@@ -1,0 +1,17 @@
+[package]
+name = "soroban-sim-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+sha2.workspace = true
+soroban-env-host = { workspace = true, features = ["recording_mode"] }
+soroban-simulation.workspace = true
+
+[dev-dependencies]
+hex = "0.4.3"

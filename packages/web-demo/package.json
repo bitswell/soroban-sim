@@ -1,0 +1,20 @@
+{
+  "name": "@theahaco/soroban-sim-web-demo",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "playwright test --project=chromium"
+  },
+  "dependencies": {
+    "@theahaco/soroban-sim": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6"
+  }
+}

@@ -1,0 +1,10 @@
+target/
+node_modules/
+packages/*/node_modules/
+packages/soroban-sim/src/generated/
+packages/web-demo/test-results/
+packages/web-demo/playwright-report/
+dist/
+.tmp/
+.DS_Store
+*.log

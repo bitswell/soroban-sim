@@ -1,0 +1,17 @@
+[package]
+name = "soroban-sim-component"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow.workspace = true
+soroban-env-host = { workspace = true, features = ["recording_mode"] }
+soroban-sim-core = { path = "../soroban-sim-core" }
+wit-bindgen.workspace = true

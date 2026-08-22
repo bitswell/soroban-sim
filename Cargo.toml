@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/soroban-sim-core",
+    "crates/soroban-sim-component",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/theahaco/soroban-sim"
+rust-version = "1.84"
+
+[workspace.dependencies]
+anyhow = "1.0.103"
+sha2 = "0.10.9"
+# Exact crates.io releases corresponding to rs-soroban-env tag v28.0.2
+# (git commit 5061e9c40ce6fc74ade9b9b3b49465b0cf7fdccb).
+soroban-env-host = { version = "=28.0.2", default-features = true }
+soroban-simulation = { version = "=28.0.2" }
+static_assertions = "1.1.0"
+wit-bindgen = "0.60.0"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

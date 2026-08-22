@@ -1,0 +1,21 @@
+{
+  "name": "soroban-sim-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.11.0",
+  "scripts": {
+    "build:fixture-contract": "cargo build --manifest-path fixtures/contracts/add-i32/Cargo.toml --target wasm32v1-none --profile contract && cp fixtures/contracts/add-i32/target/wasm32v1-none/contract/soroban_sim_fixture_add_i32.wasm fixtures/contracts/add_i32.wasm",
+    "build:component": "cargo build -p soroban-sim-component --target wasm32-wasip2 --release",
+    "build:jco": "pnpm exec jco transpile target/wasm32-wasip2/release/soroban_sim_component.wasm -o packages/soroban-sim/src/generated --name soroban-sim-component --no-nodejs-compat",
+    "test:native": "cargo test -p soroban-sim-core",
+    "test:component": "cargo test -p soroban-sim-component",
+    "test:wasmtime": "node scripts/wasmtime-fixture.mjs",
+    "check:ts": "pnpm --filter @theahaco/soroban-sim-web-demo check",
+    "test:browser": "pnpm --filter @theahaco/soroban-sim-web-demo test",
+    "m0": "pnpm run build:fixture-contract && pnpm run test:native && pnpm run build:component && pnpm run build:jco && pnpm run test:wasmtime && pnpm run check:ts && pnpm run test:browser"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.30.0"
+  }
+}

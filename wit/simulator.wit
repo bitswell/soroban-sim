@@ -1,0 +1,36 @@
+package theahaco:soroban-sim@0.1.0;
+
+world simulator {
+    record ledger-context {
+        protocol-version: u32,
+        sequence-number: u32,
+        timestamp: u64,
+        network-id: list<u8>,
+        base-reserve: u32,
+        min-temp-entry-ttl: u32,
+        min-persistent-entry-ttl: u32,
+        max-entry-ttl: u32,
+    }
+
+    record ledger-entry {
+        entry-xdr: list<u8>,
+        live-until-ledger: option<u32>,
+    }
+
+    record request {
+        host-function-xdr: list<u8>,
+        source-account-xdr: list<u8>,
+        ledger-context: ledger-context,
+        ledger-entries: list<ledger-entry>,
+        base-prng-seed: list<u8>,
+        enable-diagnostics: bool,
+    }
+
+    variant outcome {
+        complete(list<u8>),
+        needs-state(list<list<u8>>),
+    }
+
+    export simulate: func(request: request) -> result<outcome, string>;
+    export run-fixture: func() -> result<list<u8>, string>;
+}
