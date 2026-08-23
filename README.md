@@ -43,6 +43,28 @@ Pinned upstream:
 - `soroban-wasmi = 0.31.1-soroban.20.0.1` through `soroban-env-host`
 - fixture contract uses `soroban-sdk = 27.0.5`
 
+## Milestone status
+
+- **M1 (three-state snapshot + needs-state rerun) — done.** Present / absent /
+  unknown state, the fail-closed `needs-state` protocol, and the byte-stable SSIM
+  encoding are implemented and covered by `cargo test -p soroban-sim-core`.
+- **M2 foundation — done.** Explicit and `FromLedgerEntries` network config,
+  RPC state provider (`packages/soroban-sim/src/providers/rpc.ts`), IndexedDB
+  caching, transaction-envelope decoding, and the `SorobanSimulator` rerun loop
+  are in place.
+- **M3 (differential testing) — in progress.** Oracles A, B, and C are green (see
+  `docs/differential-testing.md`). The RPC-equivalence differential harness has
+  landed and demonstrates parity against a live Stellar testnet
+  `simulateTransaction` over two fixtures: the native SAC `decimals()`
+  (read-only) and a native SAC `transfer()` (write + auth + contract event). On
+  both, the invocation result, footprint (read-only **and** read-write), auth
+  entries, and contract events are byte-identical to RPC. An `AdjustmentSource`
+  knob (`apply-rpc-adjustments`) reproduces stellar-rpc's resource/fee adjustment
+  model exactly (RpcDefault instructions = raw metered + 50000 on both); the only
+  residual is a small raw-CPU-metering delta from the captured fixtures being
+  protocol 27 vs the host's protocol 28, classified `divergent-explained`.
+  Re-capture with `pnpm run capture:parity <case>`.
+
 ## Requirements
 
 - Rust stable with targets `wasm32-wasip2` and `wasm32v1-none`
@@ -96,15 +118,31 @@ Measured on macOS arm64, Rust 1.97.1, Wasmtime 48.0.0, Chromium 151.
 
 ## Current limitations
 
-- `simulate` accepts XDR host function, source account, ledger context, and ledger entries, but Milestone 0 still uses a fixed deterministic `NetworkConfig` in Rust. Full network-config encoding comes next.
-- Missing-state handling is not implemented yet. Milestone 1 will add present / absent / unknown state and `needs-state` results.
 - The component imports WASI Preview 2 CLI/io/clock/random shims because Rust `std` and upstream dependencies currently pull them in. It does not import WASI filesystem or sockets, and performs no network or persistent-filesystem access.
-- No RPC, IndexedDB, transaction decoding, authorization enforcement API, cancellation, or limits beyond Soroban host budget yet.
+- RPC-equivalence authority is demonstrated for two captured native-SAC cases —
+  a read-only `decimals()` and a write+auth+event `transfer()` — not yet across
+  arbitrary custom-wasm contracts or state-archival/restore paths. See
+  `docs/differential-testing.md` ("RPC equivalence (M3)") for scope.
+- Resource and fee estimates default to the host's raw metered cost
+  (`SimulationAdjustmentConfig::no_adjustments()`). Setting
+  `apply-rpc-adjustments` (`AdjustmentSource::RpcDefault`) reproduces
+  stellar-rpc's adjustment model exactly; the parity harness confirms adjusted
+  instructions = raw + 50000 on both fixtures. A small residual remains in the
+  *raw* metered numbers because the fixtures were captured at protocol 27 while
+  the host runs protocol 28 — a metering delta, not an adjustment difference.
+- No authorization-enforcement API (recording-mode auth is captured but not
+  enforced against a supplied auth tree) yet.
+
+Now implemented (previously listed as gaps): full network-config encoding
+(explicit + `FromLedgerEntries`), missing-state / present-absent-unknown state
+with `needs-state` reruns, the RPC state provider, IndexedDB caching,
+transaction-envelope decoding, and cancellation / budget limits.
 
 ## Docs
 
 - `docs/architecture.md` — design and state-loading plan.
 - `docs/feasibility.md` — Milestone 0 proof and blocker inventory.
+- `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.
 - `docs/upstream.md` — upstream pins and contribution notes.
 
 ## License
