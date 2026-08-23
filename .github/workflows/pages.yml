@@ -1,0 +1,78 @@
+name: pages
+
+# Build the interactive web demo and deploy it to GitHub Pages.
+# Project pages live under /soroban-sim/, so the Vite build is run with
+# PAGES_BASE=/soroban-sim/ (the `build:pages` script) — dev + Playwright keep
+# base "/". The jco-generated component (./generated, gitignored) is produced
+# fresh here via build:component + build:jco. The committed fixture .wasm files
+# are the reproducibility anchor, so build:fixture-contracts is deliberately NOT
+# run.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - "crates/**"
+      - "wit/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; let an in-flight run finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.11.0
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Materialize packages/soroban-sim/src/generated (component + jco bindings).
+      - name: Build component wasm
+        run: pnpm run build:component
+
+      - name: Transpile with jco
+        run: pnpm run build:jco
+
+      # Vite build under the Pages base path; emits dist/ incl. core.wasm asset.
+      - name: Build web demo
+        run: pnpm --filter @theahaco/soroban-sim-web-demo run build:pages
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: packages/web-demo/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
