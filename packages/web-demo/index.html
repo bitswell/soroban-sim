@@ -42,6 +42,74 @@
         </p>
       </header>
 
+      <!-- COMPONENT MODEL EXPLAINER -->
+      <section class="explainer" aria-labelledby="cm-h">
+        <div class="panel-head">
+          <span class="eyebrow" id="cm-h">WebAssembly Component Model</span>
+          <span class="sub">why this simulator runs in your browser at all</span>
+        </div>
+
+        <div class="cm-grid">
+          <article class="cm-card">
+            <span class="cm-step">01</span>
+            <h3>Core wasm speaks only numbers</h3>
+            <p>
+              A raw wasm module's imports and exports can only pass four scalar
+              types — <code>i32</code>, <code>i64</code>, <code>f32</code>,
+              <code>f64</code>. No strings, no records, no lists. Anything richer
+              has to be hand-marshalled through linear memory by both sides.
+            </p>
+          </article>
+
+          <article class="cm-card">
+            <span class="cm-step">02</span>
+            <h3>The Component Model adds types</h3>
+            <p>
+              A <b>component</b> wraps core wasm in a typed interface described in
+              <b>WIT</b> (Wasm Interface Types). The <b>Canonical ABI</b> defines
+              exactly how strings, records, lists and results lower to those
+              scalars — so components compose across languages with no glue by
+              hand.
+            </p>
+          </article>
+
+          <article class="cm-card">
+            <span class="cm-step">03</span>
+            <h3>jco transpiles it to JS</h3>
+            <p>
+              <code>jco transpile</code> turns a <code>.wasm</code> component into
+              plain JavaScript plus the inner core module(s). The generated glue
+              implements the Canonical ABI in JS, so the component runs
+              unmodified in the browser or Node — which is exactly what loads in
+              this page's Worker.
+            </p>
+          </article>
+
+          <article class="cm-card accent">
+            <span class="cm-step">04</span>
+            <h3>How soroban-sim uses it</h3>
+            <p>
+              The <b>simulator</b> is the component — world <code>simulator</code>,
+              exporting <code>simulate</code> and <code>needs-state</code>. The
+              Soroban <b>contracts stay plain core wasm</b> executed by the host
+              inside it. jco lets that whole engine run here, off the main thread.
+            </p>
+          </article>
+        </div>
+
+        <div class="cm-flow" aria-hidden="true">
+          <span class="cm-node">WIT world <b>simulator</b></span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node">component <code>.wasm</code></span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node">jco transpile</span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node">JS glue + core <code>.wasm</code></span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node accent">runs in this Web Worker</span>
+        </div>
+      </section>
+
       <div class="console">
         <!-- REQUEST -->
         <section class="panel" aria-labelledby="req-h">
@@ -146,6 +214,114 @@
         Deterministic SSIM bytes — the same rerun loop yields the same result in
         this Worker, the native runner, and CI.
       </p>
+
+      <!-- RUNNING-WASM STATE (populated on completion) -->
+      <section class="wasmstate" id="wasm-state" hidden aria-live="polite">
+        <div class="ws-head">
+          <span class="eyebrow">Running-wasm state</span>
+          <span class="sub">what the host actually did — metered, decoded from the SSIM envelope</span>
+        </div>
+
+        <div class="ws-grid">
+          <!-- BUDGET GAUGES -->
+          <section class="panel gauges" aria-labelledby="bud-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="bud-h">Host budget</span>
+              <span class="sub">real metering</span>
+            </div>
+
+            <div class="gauge">
+              <div class="gauge-top">
+                <span class="g-name">CPU instructions</span>
+                <span class="g-num" id="g-cpu-num">—</span>
+              </div>
+              <div class="gauge-track">
+                <div class="gauge-fill cpu" id="g-cpu-fill"></div>
+              </div>
+              <div class="gauge-scale" id="g-cpu-scale">of 100M per-tx limit</div>
+            </div>
+
+            <div class="gauge">
+              <div class="gauge-top">
+                <span class="g-name">Memory</span>
+                <span class="g-num" id="g-mem-num">—</span>
+              </div>
+              <div class="gauge-track">
+                <div class="gauge-fill mem" id="g-mem-fill"></div>
+              </div>
+              <div class="gauge-scale" id="g-mem-scale">of 40 MiB per-tx limit</div>
+            </div>
+
+            <div class="gauge-note" id="g-note"></div>
+          </section>
+
+          <!-- FOOTPRINT -->
+          <section class="panel footprint" aria-labelledby="fp-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="fp-h">Execution footprint</span>
+              <span class="sub">ledger keys touched</span>
+            </div>
+            <div class="fp-cols">
+              <div class="fp-col ro">
+                <div class="fp-colhead">
+                  <i class="fp-dot ro"></i> read-only
+                  <span class="fp-count" id="fp-ro-count">0</span>
+                </div>
+                <div class="fp-list" id="fp-ro">
+                  <p class="fp-empty">—</p>
+                </div>
+              </div>
+              <div class="fp-col rw">
+                <div class="fp-colhead">
+                  <i class="fp-dot rw"></i> read-write
+                  <span class="fp-count" id="fp-rw-count">0</span>
+                </div>
+                <div class="fp-list" id="fp-rw">
+                  <p class="fp-empty">—</p>
+                </div>
+              </div>
+            </div>
+            <div class="fp-res" id="fp-res"></div>
+          </section>
+
+          <!-- EVENTS + AUTH -->
+          <section class="panel eventsauth" aria-labelledby="ea-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="ea-h">Events &amp; authorization</span>
+              <span class="sub">emitted this run</span>
+            </div>
+            <div class="ea-block">
+              <div class="ea-title">
+                contract events <span class="ea-count" id="ev-count">0</span>
+              </div>
+              <div class="ea-list" id="ev-list">
+                <p class="ea-empty">no events emitted</p>
+              </div>
+            </div>
+            <div class="ea-block">
+              <div class="ea-title">
+                auth entries <span class="ea-count" id="auth-count">0</span>
+              </div>
+              <div class="ea-list" id="auth-list">
+                <p class="ea-empty">no auth recorded</p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- SSIM BYTE MAP -->
+        <section class="panel bytemap" aria-labelledby="bm-h">
+          <div class="panel-head">
+            <span class="eyebrow" id="bm-h">SSIM byte map</span>
+            <span class="sub">the deterministic result envelope, region by region</span>
+          </div>
+          <div class="bm-legend" id="bm-legend"></div>
+          <div class="bm-scroll">
+            <div class="bm-hex" id="bm-hex"></div>
+          </div>
+          <div class="bm-note" id="bm-note"></div>
+        </section>
+      </section>
 
       <!-- M0 golden browser run (mirror of #result) -->
       <div class="golden" id="golden" data-status="pending">
