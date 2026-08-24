@@ -17,10 +17,13 @@ permissions:
   contents: write
   pull-requests: write
 
-# One preview deploy at a time per PR; serialize with the production deploy.
+# Per-PR group: GitHub keeps only the NEWEST pending run per concurrency
+# group, so a shared global group let concurrent PRs cancel each other's
+# queued previews. Simultaneous pushes to gh-pages are safe — the deploy
+# action rebases and retries internally.
 concurrency:
-  group: gh-pages-branch
-  cancel-in-progress: false
+  group: pr-preview-${{ github.event.number }}
+  cancel-in-progress: true
 
 jobs:
   preview:
