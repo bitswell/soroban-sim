@@ -91,8 +91,12 @@
             <p>
               The <b>simulator</b> is the component — world <code>simulator</code>,
               exporting <code>simulate</code> and <code>needs-state</code>. The
-              Soroban <b>contracts stay plain core wasm</b> executed by the host
-              inside it. jco lets that whole engine run here, off the main thread.
+              Soroban <b>contracts stay plain core wasm</b> and are <em>not baked
+              in</em>: their bytes arrive as ledger state — a
+              <code>ContractCode</code> entry fetched through the needs-state
+              loop (or uploaded here) — and the embedded host interprets them.
+              Point it at any contract; only the golden self-test fixture ships
+              inside.
             </p>
           </article>
         </div>
