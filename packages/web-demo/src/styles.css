@@ -808,7 +808,8 @@ body {
   font-weight: 500;
 }
 .cm-card code,
-.cm-flow code {
+.cm-flow code,
+.cm-call code {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--known);
@@ -844,6 +845,70 @@ body {
 .cm-arrow {
   color: var(--ink-faint);
   font-size: 13px;
+}
+.cm-call {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--grid);
+}
+.cm-call-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.cm-call-title {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.cm-call-time {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--known);
+}
+.cm-call-steps {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cm-call-steps .cm-arrow {
+  align-self: center;
+}
+.cm-cnode {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--grid);
+  background: var(--panel-2);
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.cm-cnode b {
+  color: var(--ink);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.cm-cnode i {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+.cm-cnode i code {
+  font-size: 10px;
+}
+.cm-cnode.accent {
+  border-color: var(--known);
+  background: color-mix(in srgb, var(--known) 10%, var(--panel-2));
+}
+.cm-cnode.accent b {
+  color: var(--known);
 }
 
 /* ---- running-wasm state ------------------------------------------------ */
