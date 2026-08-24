@@ -8,8 +8,8 @@
       name="description"
       content="In-browser Soroban transaction simulator — watch the needs-state rerun loop resolve ledger state round by round, offline or live against testnet."
     />
-    <script type="module" crossorigin src="/soroban-sim/pr-preview/pr-16/assets/index-DMDO46RV.js"></script>
-    <link rel="stylesheet" crossorigin href="/soroban-sim/pr-preview/pr-16/assets/index-ByJk8HR8.css">
+    <script type="module" crossorigin src="/soroban-sim/pr-preview/pr-16/assets/index-DejHOtOp.js"></script>
+    <link rel="stylesheet" crossorigin href="/soroban-sim/pr-preview/pr-16/assets/index-rlqcvAL0.css">
   </head>
   <body>
     <!-- M0 golden anchor: the run-fixture Worker path writes JSON here and sets
@@ -56,22 +56,25 @@
             <span class="cm-step">01</span>
             <h3>Core wasm speaks only numbers</h3>
             <p>
-              A raw wasm module's imports and exports can only pass four scalar
-              types — <code>i32</code>, <code>i64</code>, <code>f32</code>,
-              <code>f64</code>. No strings, no records, no lists. Anything richer
-              has to be hand-marshalled through linear memory by both sides.
+              A raw wasm module's imports and exports pass numeric values —
+              <code>i32</code>, <code>i64</code>, <code>f32</code>,
+              <code>f64</code>. No strings, no records, no lists. Anything
+              richer has to be hand-marshalled through linear memory by both
+              sides, with both sides agreeing on the layout by convention.
             </p>
           </article>
 
           <article class="cm-card">
             <span class="cm-step">02</span>
-            <h3>The Component Model adds types</h3>
+            <h3>The Canonical ABI does the marshalling</h3>
             <p>
-              A <b>component</b> wraps core wasm in a typed interface described in
-              <b>WIT</b> (Wasm Interface Types). The <b>Canonical ABI</b> defines
-              exactly how strings, records, lists and results lower to those
-              scalars — so components compose across languages with no glue by
-              hand.
+              A <b>component</b> wraps core wasm in a typed interface described
+              in <b>WIT</b>. The <b>Canonical ABI</b> pins down the layout: here,
+              each XDR <code>list&lt;u8&gt;</code> crosses as (ptr,&nbsp;len) —
+              one <code>cabi_realloc</code> into guest memory plus one memcpy —
+              the request record flattens to an 88-byte struct, and the
+              <code>outcome</code> variant lifts back as a discriminant byte
+              plus payload, copied out before a post-return free.
             </p>
           </article>
 
@@ -79,11 +82,14 @@
             <span class="cm-step">03</span>
             <h3>jco transpiles it to JS</h3>
             <p>
-              <code>jco transpile</code> turns a <code>.wasm</code> component into
-              plain JavaScript plus the inner core module(s). The generated glue
-              implements the Canonical ABI in JS, so the component runs
-              unmodified in the browser or Node — which is exactly what loads in
-              this page's Worker.
+              <code>jco transpile</code> splits the 3.1&nbsp;MB component into
+              its core <code>.wasm</code> plus ~227&nbsp;KB of generated glue
+              that implements the Canonical ABI in JavaScript. Its 15 WASI
+              0.2 imports (stdio, clocks, seed) come from
+              <code>preview2-shim</code> — yet a whole successful run calls
+              exactly one: <code>insecure-seed</code>, once. Cold start
+              ~23&nbsp;ms; a warm call ~0.2&nbsp;ms; memory flat at
+              2.25&nbsp;MiB.
             </p>
           </article>
 
@@ -91,14 +97,16 @@
             <span class="cm-step">04</span>
             <h3>How soroban-sim uses it</h3>
             <p>
-              The <b>simulator</b> is the component — world <code>simulator</code>,
-              exporting <code>simulate</code> and <code>needs-state</code>. The
-              Soroban <b>contracts stay plain core wasm</b> and are <em>not baked
-              in</em>: their bytes arrive as ledger state — a
-              <code>ContractCode</code> entry fetched through the needs-state
-              loop (or uploaded here) — and the embedded host interprets them.
-              Point it at any contract; only the golden self-test fixture ships
-              inside.
+              World <code>simulator</code> exports <code>simulate</code>,
+              <code>simulate-transaction</code>, <code>simulate-trace</code>
+              and a <code>run-fixture</code> self-test; each simulate call
+              returns <code>complete(ssim)</code> or
+              <code>needs-state(keys)</code> — and holds <em>no state between
+              calls</em>: every round re-sends the whole snapshot, then reruns
+              deterministically. The Soroban <b>contracts stay plain core
+              wasm</b>, <em>not baked in</em>: their bytes arrive as
+              <code>ContractCode</code> ledger entries through that loop (or
+              uploaded here), interpreted by the embedded host.
             </p>
           </article>
         </div>
@@ -113,6 +121,30 @@
           <span class="cm-node">JS glue + core <code>.wasm</code></span>
           <span class="cm-arrow">→</span>
           <span class="cm-node accent">runs in this Web Worker</span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node">request lowered in · <b>388-byte SSIM</b> lifted out</span>
+        </div>
+
+        <div class="cm-call" aria-hidden="true">
+          <div class="cm-call-head">
+            <span class="cm-call-title">one <code>simulate()</code> call across the boundary</span>
+            <span class="cm-call-time">warm: ~0.2 ms</span>
+          </div>
+          <div class="cm-call-steps">
+            <span class="cm-cnode"><b>JS request object</b><i>records + <code>Uint8Array</code>s</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>lower</b><i><code>cabi_realloc</code> + memcpy per <code>list&lt;u8&gt;</code> · 88-B struct</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>guest wit-bindgen</b><i>reads linear memory</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode accent"><b>Rust host runs</b><i>embedded, metered</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>SSIM bytes</b><i><code>outcome</code> discriminant + payload</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>lift</b><i>copy out, post-return frees</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>Uint8Array</b><i>388 B on the golden fixture</i></span>
+          </div>
         </div>
       </section>
 
