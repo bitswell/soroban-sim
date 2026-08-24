@@ -21,8 +21,14 @@ import type {
   StateProvider,
 } from "@theahaco/soroban-sim";
 import { rpc } from "@stellar/stellar-sdk";
-import { ledgerKeyLabel, scValLabel } from "./decode.js";
-import { decodeSsim } from "./ssim.js";
+import {
+  authLabel,
+  contractEventLabel,
+  footprintLabels,
+  ledgerKeyLabel,
+  scValLabel,
+} from "./decode.js";
+import { decodeSsim, ssimRegions } from "./ssim.js";
 import {
   fixtureById,
   type RawFixture,
@@ -245,6 +251,26 @@ async function handleSimulate(msg: SimulateMsg): Promise<void> {
         ? scValLabel(decoded.result.scValXdr)
         : { type: "Void", display: "void" };
 
+    // Turn the decoded XDR slices into display-ready state, all worker-side.
+    // Each label helper is internally guarded (returns undefined / a "—" marker
+    // on failure) so a display glitch never aborts the interactive run.
+    const footprint = decoded.transactionData
+      ? footprintLabels(decoded.transactionData)
+      : undefined;
+    const contractEvents = decoded.contractEvents.map((e) => contractEventLabel(e));
+    const auth = decoded.auth.map((a) => authLabel(a));
+
+    // Byte map of the SSIM envelope so the "everything is bytes" story is
+    // tangible. The hex is only shipped for small envelopes (these fixtures are
+    // a few hundred bytes to a few KB); the region map is always cheap.
+    const regions = ssimRegions(result.resultXdr);
+    let resultHex: string | undefined;
+    if (result.resultXdr.length <= 4096) {
+      let h = "";
+      for (const b of result.resultXdr) h += b.toString(16).padStart(2, "0");
+      resultHex = h;
+    }
+
     post({
       type: "sim-result",
       id: msg.id,
@@ -261,7 +287,23 @@ async function handleSimulate(msg: SimulateMsg): Promise<void> {
       absent: recording.absent,
       instructions: decoded.simulatedInstructions,
       memoryBytes: decoded.simulatedMemory,
-      hasTxData: decoded.hasTxData,
+      hasTxData: decoded.transactionData !== undefined,
+      readOnly: footprint?.readOnly,
+      readWrite: footprint?.readWrite,
+      resources: footprint
+        ? {
+            instructions: footprint.instructions,
+            readBytes: footprint.readBytes,
+            writeBytes: footprint.writeBytes,
+            resourceFee: footprint.resourceFee,
+          }
+        : undefined,
+      contractEvents: contractEvents.length > 0 ? contractEvents : undefined,
+      auth: auth.length > 0 ? auth : undefined,
+      diagnosticEventCount: decoded.diagnosticEvents.length,
+      modifiedCount: decoded.modifiedEntries.length,
+      regions,
+      resultHex,
     });
   } catch (error) {
     post({
