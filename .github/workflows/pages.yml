@@ -1,7 +1,14 @@
 name: pages
 
 # Build the interactive web demo and deploy it to GitHub Pages.
-# Project pages live under /soroban-sim/, so the Vite build is run with
+#
+# Pages is served from the `gh-pages` BRANCH (Settings -> Pages -> Deploy from
+# a branch): this job pushes the built site to the branch root, and
+# pr-preview.yml deploys per-PR previews under pr-preview/pr-<n>/ on the same
+# branch (cleaned up when the PR closes). `clean-exclude` keeps previews alive
+# across production deploys.
+#
+# Project pages live under /soroban-sim/, so the Vite build runs with
 # PAGES_BASE=/soroban-sim/ (the `build:pages` script) — dev + Playwright keep
 # base "/". The jco-generated component (./generated, gitignored) is produced
 # fresh here via build:component + build:jco. The committed fixture .wasm files
@@ -19,17 +26,15 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
-# Allow one concurrent deployment; let an in-flight run finish.
+# Serialize pushes to the gh-pages branch with the preview workflow.
 concurrency:
-  group: pages
+  group: gh-pages-branch
   cancel-in-progress: false
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,18 +66,14 @@ jobs:
       - name: Build web demo
         run: pnpm --filter @theahaco/soroban-sim-web-demo run build:pages
 
-      - uses: actions/configure-pages@v5
+      - name: Disable Jekyll
+        run: touch packages/web-demo/dist/.nojekyll
 
-      - uses: actions/upload-pages-artifact@v3
+      - name: Deploy to gh-pages (preserve PR previews)
+        uses: JamesIves/github-pages-deploy-action@v4
         with:
-          path: packages/web-demo/dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          folder: packages/web-demo/dist
+          branch: gh-pages
+          clean: true
+          clean-exclude: pr-preview
+          commit-message: "deploy: ${{ github.sha }}"

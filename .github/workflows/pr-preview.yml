@@ -1,0 +1,78 @@
+name: pr-preview
+
+# Per-PR live previews of the web demo, deployed to the gh-pages branch under
+# pr-preview/pr-<number>/ and linked from a sticky PR comment. Torn down
+# automatically when the PR closes. Production deploys (pages.yml) use
+# clean-exclude to leave the pr-preview/ umbrella intact.
+#
+# The Vite base is computed per PR (/soroban-sim/pr-preview/pr-<n>/) so the
+# ~3 MB jco core.wasm asset URL resolves correctly inside the preview.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One preview deploy at a time per PR; serialize with the production deploy.
+concurrency:
+  group: gh-pages-branch
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event.action != 'closed'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: github.event.action != 'closed'
+        with:
+          targets: wasm32-wasip2
+
+      - uses: actions/setup-node@v4
+        if: github.event.action != 'closed'
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@v4
+        if: github.event.action != 'closed'
+        with:
+          version: 11.11.0
+          run_install: false
+
+      - name: Install dependencies
+        if: github.event.action != 'closed'
+        run: pnpm install --frozen-lockfile
+
+      - name: Build component wasm
+        if: github.event.action != 'closed'
+        run: pnpm run build:component
+
+      - name: Transpile with jco
+        if: github.event.action != 'closed'
+        run: pnpm run build:jco
+
+      - name: Build web demo (preview base)
+        if: github.event.action != 'closed'
+        env:
+          PAGES_BASE: /soroban-sim/pr-preview/pr-${{ github.event.number }}/
+        run: pnpm --filter @theahaco/soroban-sim-web-demo exec vite build
+
+      - name: Disable Jekyll
+        if: github.event.action != 'closed'
+        run: touch packages/web-demo/dist/.nojekyll
+
+      # Deploys on open/sync, removes on close, maintains a sticky PR comment
+      # with the preview link.
+      - name: Deploy preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: packages/web-demo/dist
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview
+          action: auto
