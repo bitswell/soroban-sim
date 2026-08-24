@@ -43,7 +43,42 @@ export interface CancelMsg {
   type: "cancel";
   id: number;
 }
-export type MainToWorker = RunFixtureMsg | SimulateMsg | CancelMsg;
+/**
+ * Debug the completed run `id`: the worker re-invokes the two-pass
+ * `simulate-trace` component export over the entries the run accumulated
+ * (all state known by then, so no network) and posts a `debug-result`.
+ */
+export interface DebugMsg {
+  type: "debug";
+  id: number;
+}
+/** Parse an uploaded contract wasm: hash it, extract the spec, list functions. */
+export interface UploadParseMsg {
+  type: "upload-parse";
+  id: number;
+  fileName: string;
+  bytes: Uint8Array;
+}
+/**
+ * Invoke a function on the previously parsed uploaded contract. `args` are the
+ * raw user-entered strings, one per argument; the worker converts them using
+ * the contract spec (spec ladder) or decodes them as base64 ScVal XDR (`raw`).
+ */
+export interface SimulateUploadMsg {
+  type: "simulate-upload";
+  id: number;
+  fn: string;
+  args: string[];
+  /** true => free-form fn + base64-ScVal-XDR args (the no-spec floor). */
+  raw: boolean;
+}
+export type MainToWorker =
+  | RunFixtureMsg
+  | SimulateMsg
+  | CancelMsg
+  | DebugMsg
+  | UploadParseMsg
+  | SimulateUploadMsg;
 
 /** A footprint LedgerKey, decoded for display (same shape as a RoundKey label). */
 export interface FootprintKey {
@@ -170,15 +205,129 @@ export interface SimResultMsg {
   regions?: ByteRegion[];
   /** Lowercase hex of the SSIM envelope (omitted for very large envelopes). */
   resultHex?: string;
+  /** True when the worker stashed a trace-replay context for this run. */
+  debuggable?: boolean;
 }
 export interface SimErrorMsg {
   type: "sim-error";
   id: number;
   message: string;
 }
+
+// ---- visual debugger ------------------------------------------------------
+
+/** One semantic step of the recorded execution, display-ready. */
+export interface DebugStep {
+  /** 0-based position in the trace. */
+  seq: number;
+  /** TraceEvent variant: begin | push-ctx | pop-ctx | env-call | env-ret | end. */
+  kind: string;
+  /** Short name (env fn or frame label). */
+  name: string;
+  /** Full Display rendering, e.g. `call put_contract_data(U32(7), U32(99), Temporary)`. */
+  display: string;
+  /** Cumulative CPU instructions / memory bytes at this step. */
+  cpu: number;
+  mem: number;
+  /** Delta vs the previous step. */
+  dCpu: number;
+  dMem: number;
+  /** True for env-calls that touch contract storage (the ledger lane). */
+  storage: boolean;
+  /** Index into `DebugResultMsg.frames` of the innermost enclosing call-tree frame; -1 outside all frames. */
+  frame: number;
+  /** For push-ctx: seq of the matching pop-ctx (step-over target); -1 otherwise. */
+  matchPop: number;
+}
+
+/** One call-tree frame, built from Tier-1 fn_call/fn_return diagnostics. */
+export interface DebugFrame {
+  /** Index of the parent frame, -1 for roots. */
+  parent: number;
+  depth: number;
+  /** Invoked contract (C… address), when decodable. */
+  contract?: string;
+  fn: string;
+  /** Decoded call arguments, printable form. */
+  args: string[];
+  /** Decoded return value (absent when the frame never returned). */
+  ret?: string;
+  /** Trace-step range [pushSeq, popSeq] this frame covers; -1 when uncorrelated. */
+  pushSeq: number;
+  popSeq: number;
+}
+
+export interface DebugResultMsg {
+  type: "debug-result";
+  id: number;
+  /**
+   * Set when the enforcing trace replay was unavailable (e.g. address-credential
+   * auth); `steps` is empty and the call tree (Tier 1) is all we can show.
+   */
+  reason?: string;
+  steps: DebugStep[];
+  frames: DebugFrame[];
+  /** Budget totals of the traced run (last step's cumulative counters). */
+  totalCpu: number;
+  totalMem: number;
+  elapsedMs: number;
+}
+export interface DebugErrorMsg {
+  type: "debug-error";
+  id: number;
+  message: string;
+}
+
+// ---- upload-any-contract --------------------------------------------------
+
+/** Input widget class for one spec-typed argument. */
+export type UploadArgInput =
+  | "u32"
+  | "i32"
+  | "u64"
+  | "i64"
+  | "bool"
+  | "string"
+  | "symbol"
+  | "address"
+  | "xdr";
+
+export interface UploadFnArg {
+  name: string;
+  /** Spec type name, e.g. scSpecTypeU32 (or "scval-xdr" on the raw rungs). */
+  type: string;
+  input: UploadArgInput;
+}
+export interface UploadFnInfo {
+  name: string;
+  args: UploadFnArg[];
+}
+export interface UploadInfoMsg {
+  type: "upload-info";
+  id: number;
+  ok: boolean;
+  error?: string;
+  fileName: string;
+  size: number;
+  /** Deterministic contract id derived from the code hash (C… address). */
+  contractId: string;
+  /** sha-256 of the uploaded code (the ContractCode ledger key). */
+  codeHash: string;
+  /**
+   * Labeling ladder rung: `spec` = typed args from contractspecv0;
+   * `names` = wasm export names only (args as raw ScVal XDR);
+   * `raw` = free-form fn + raw ScVal XDR args.
+   */
+  ladder: "spec" | "names" | "raw";
+  fns: UploadFnInfo[];
+}
+
 export type WorkerToMain =
   | ReadyMsg
   | ResultMsg
   | RoundMsg
   | SimResultMsg
-  | SimErrorMsg;
+  | SimErrorMsg
+  | DebugResultMsg
+  | DebugErrorMsg
+  | UploadInfoMsg;

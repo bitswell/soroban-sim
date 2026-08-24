@@ -4,7 +4,14 @@ import {
   fixtureById,
   LIVE_FIXTURE_ID,
 } from "./fixtures.js";
-import type { DemoMode, RoundMsg, WorkerToMain } from "./protocol.js";
+import type {
+  DebugResultMsg,
+  DemoMode,
+  RoundMsg,
+  UploadFnInfo,
+  UploadInfoMsg,
+  WorkerToMain,
+} from "./protocol.js";
 
 /** The committed add_i32 golden the CI gate and native runner also produce. */
 const GOLDEN_LEN = 388;
@@ -50,6 +57,48 @@ const resultNote = $("result-note");
 
 const golden = $("golden");
 const goldenText = $("golden-text");
+
+// upload-any-contract
+const uploadFile = $<HTMLInputElement>("upload-file");
+const uploadBtn = $<HTMLButtonElement>("upload-btn");
+const uploadCard = $("upload-card");
+const upName = $("up-name");
+const upSize = $("up-size");
+const upCid = $("up-cid");
+const upLadder = $("up-ladder");
+const upFnRow = $("up-fn-row");
+const upFn = $<HTMLSelectElement>("up-fn");
+const upFnFree = $<HTMLInputElement>("up-fn-free");
+const upArgs = $("up-args");
+const upErr = $("up-err");
+
+// visual debugger
+const debugRunBtn = $<HTMLButtonElement>("debug-run");
+const debuggerEl = $("debugger");
+const dbgReason = $("dbg-reason");
+const dbgScrub = $("dbg-scrub");
+const dbgCount = $("dbg-count");
+const dbgTicks = $("dbg-ticks");
+const dbgSlider = $<HTMLInputElement>("dbg-slider");
+const dbgLane = $("dbg-lane");
+const dbgBack = $<HTMLButtonElement>("dbg-back");
+const dbgFwd = $<HTMLButtonElement>("dbg-fwd");
+const dbgOver = $<HTMLButtonElement>("dbg-over");
+const dbgStorageBtn = $<HTMLButtonElement>("dbg-storage-btn");
+const dbgDetail = $("dbg-detail");
+const dbgPos = $("dbg-pos");
+const dbgDisplay = $("dbg-display");
+const dbgKind = $("dbg-kind");
+const dbgName = $("dbg-name");
+const dbgDcpu = $("dbg-dcpu");
+const dbgDmem = $("dbg-dmem");
+const dbgCpuNum = $("dbg-cpu-num");
+const dbgCpuFill = $("dbg-cpu-fill");
+const dbgCpuScale = $("dbg-cpu-scale");
+const dbgMemNum = $("dbg-mem-num");
+const dbgMemFill = $("dbg-mem-fill");
+const dbgMemScale = $("dbg-mem-scale");
+const dbgTree = $("dbg-tree");
 
 // running-wasm state
 const wasmState = $("wasm-state");
@@ -114,6 +163,22 @@ let hardStopTimer: ReturnType<typeof setTimeout> | undefined;
 let presentCount = 0;
 let absentCount = 0;
 
+// upload-any-contract state
+let uploadInfo: UploadInfoMsg | undefined;
+let uploadSelected = false;
+let uploadParseId = 0;
+
+// visual-debugger state
+let debuggableRunId: number | undefined;
+let debugPending = false;
+let debugData: DebugResultMsg | undefined;
+let dbgIdx = 0;
+let activeTick: HTMLElement | undefined;
+let activeLaneMark: HTMLElement | undefined;
+let activeTreeFrame: HTMLElement | undefined;
+let treeFrameEls: (HTMLElement | undefined)[] = [];
+let laneMarkBySeq = new Map<number, HTMLElement>();
+
 // ---- worker (respawnable for hard-stop) ------------------------------------
 let worker!: Worker;
 let workerStarted = 0;
@@ -167,6 +232,34 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
       failRun(msg.message);
       return;
     }
+    case "upload-info": {
+      if (msg.id !== uploadParseId) return;
+      onUploadInfo(msg);
+      return;
+    }
+    case "debug-result": {
+      if (msg.id !== debuggableRunId) return;
+      debugPending = false;
+      debugRunBtn.disabled = false;
+      debugRunBtn.textContent = "◉ debug this run";
+      openDebugger(msg);
+      return;
+    }
+    case "debug-error": {
+      if (msg.id !== debuggableRunId) return;
+      debugPending = false;
+      debugRunBtn.disabled = false;
+      debugRunBtn.textContent = "◉ debug this run";
+      debuggerEl.hidden = false;
+      dbgReason.hidden = false;
+      dbgReason.innerHTML = "";
+      const b = document.createElement("b");
+      b.textContent = "trace failed: ";
+      dbgReason.append(b, document.createTextNode(msg.message));
+      dbgScrub.hidden = true;
+      dbgDetail.hidden = true;
+      return;
+    }
   }
 }
 
@@ -187,7 +280,10 @@ function renderFixtures(): void {
     btn.type = "button";
     const disabled = mode === "live" && !f.liveCapable;
     btn.disabled = disabled;
-    btn.setAttribute("aria-pressed", String(f.id === selectedId));
+    btn.setAttribute(
+      "aria-pressed",
+      String(!uploadSelected && f.id === selectedId),
+    );
     const tag = f.liveCapable
       ? `<span class="fx-tag">live</span>`
       : "";
@@ -195,6 +291,8 @@ function renderFixtures(): void {
     btn.addEventListener("click", () => {
       if (btn.disabled || running) return;
       selectedId = f.id;
+      uploadSelected = false;
+      uploadCard.setAttribute("aria-pressed", "false");
       renderFixtures();
       renderReqNote();
     });
@@ -203,7 +301,9 @@ function renderFixtures(): void {
 }
 
 function renderReqNote(): void {
-  reqNote.textContent = fixtureById(selectedId).note;
+  reqNote.textContent = uploadSelected
+    ? "Uploaded contract — runs offline: your code + a fresh contract instance seeded over the committed config snapshot."
+    : fixtureById(selectedId).note;
 }
 
 // ---- mode ------------------------------------------------------------------
@@ -241,6 +341,14 @@ function resetRunUI(): void {
   rErr.hidden = true;
   resultPanel.classList.remove("error");
   wasmState.hidden = true;
+  // debugger resets with every new run
+  debugRunBtn.hidden = true;
+  debugRunBtn.disabled = false;
+  debugRunBtn.textContent = "◉ debug this run";
+  debuggerEl.hidden = true;
+  debuggableRunId = undefined;
+  debugPending = false;
+  debugData = undefined;
 }
 
 function setMetricNum(el: HTMLElement, value: string): void {
@@ -254,6 +362,23 @@ function setMetricNum(el: HTMLElement, value: string): void {
 
 function startRun(): void {
   if (!workerReady || running) return;
+  if (uploadSelected) {
+    const invocation = gatherUploadInvocation();
+    if (!invocation) return; // validation error already shown inline
+    running = true;
+    runId += 1;
+    resetRunUI();
+    runBtn.textContent = "Cancel";
+    runBtn.dataset.running = "true";
+    worker.postMessage({
+      type: "simulate-upload",
+      id: runId,
+      fn: invocation.fn,
+      args: invocation.args,
+      raw: invocation.raw,
+    });
+    return;
+  }
   running = true;
   runId += 1;
   resetRunUI();
@@ -413,6 +538,12 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   // The interactive add_i32 run uses a full tx envelope, so its bytes differ;
   // we never claim a byte-match here.
   rBadge.classList.add("hidden");
+
+  // The worker stashed a trace-replay context for this run — offer the debugger.
+  if (msg.debuggable) {
+    debuggableRunId = msg.id;
+    debugRunBtn.hidden = false;
+  }
 
   renderWasmState(msg);
 }
@@ -682,6 +813,429 @@ function failRunText(message: string): void {
       ? `${message} — retry, or switch to Offline for a deterministic run.`
       : message;
 }
+
+// ---- upload-any-contract ---------------------------------------------------
+uploadBtn.addEventListener("click", () => uploadFile.click());
+uploadFile.addEventListener("change", async () => {
+  const file = uploadFile.files?.[0];
+  if (!file) return;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  uploadParseId += 1;
+  worker.postMessage({
+    type: "upload-parse",
+    id: uploadParseId,
+    fileName: file.name,
+    bytes,
+  });
+});
+
+function selectUpload(): void {
+  if (running || !uploadInfo?.ok) return;
+  uploadSelected = true;
+  uploadCard.setAttribute("aria-pressed", "true");
+  renderFixtures();
+  renderReqNote();
+}
+uploadCard.addEventListener("click", selectUpload);
+uploadCard.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    selectUpload();
+  }
+});
+
+function onUploadInfo(msg: UploadInfoMsg): void {
+  uploadInfo = msg;
+  uploadCard.hidden = false;
+  upName.textContent = msg.fileName;
+  upSize.textContent = fmtBytes(msg.size);
+  upErr.hidden = true;
+  upErr.textContent = "";
+  for (const rung of upLadder.querySelectorAll<HTMLElement>(".rung")) {
+    rung.classList.toggle("active", msg.ok && rung.dataset.rung === msg.ladder);
+  }
+  if (!msg.ok) {
+    upCid.textContent = "";
+    upFnRow.hidden = true;
+    upArgs.replaceChildren();
+    upErr.hidden = false;
+    upErr.textContent = msg.error ?? "could not read this file as contract wasm";
+    uploadSelected = false;
+    uploadCard.setAttribute("aria-pressed", "false");
+    renderFixtures();
+    return;
+  }
+  upCid.textContent = msg.contractId;
+  upCid.title = `code sha-256 ${msg.codeHash}`;
+  upFnRow.hidden = false;
+  if (msg.ladder === "raw") {
+    upFn.hidden = true;
+    upFnFree.hidden = false;
+  } else {
+    upFn.hidden = false;
+    upFnFree.hidden = true;
+    upFn.replaceChildren();
+    for (const fn of msg.fns) {
+      const opt = document.createElement("option");
+      opt.value = fn.name;
+      opt.textContent =
+        msg.ladder === "spec"
+          ? `${fn.name}(${fn.args.map((a) => a.name).join(", ")})`
+          : fn.name;
+      upFn.appendChild(opt);
+    }
+  }
+  renderUploadArgs();
+  selectUpload();
+}
+upFn.addEventListener("change", renderUploadArgs);
+
+/** Placeholder text per spec-arg widget class. */
+const ARG_PLACEHOLDER: Record<string, string> = {
+  u32: "e.g. 7",
+  i32: "e.g. -7",
+  u64: "e.g. 7",
+  i64: "e.g. -7",
+  string: "text",
+  symbol: "symbol",
+  address: "G… or C… address",
+  xdr: "base64 ScVal XDR",
+};
+
+function renderUploadArgs(): void {
+  upArgs.replaceChildren();
+  upErr.hidden = true;
+  const info = uploadInfo;
+  if (!info?.ok) return;
+  if (info.ladder === "spec") {
+    const fnInfo = info.fns.find((f) => f.name === upFn.value) ?? info.fns[0];
+    if (!fnInfo) return;
+    for (const arg of fnInfo.args) {
+      const field = document.createElement("div");
+      field.className = "up-arg";
+      const label = document.createElement("label");
+      const b = document.createElement("b");
+      b.textContent = arg.name;
+      label.append(b, document.createTextNode(` ${arg.input}`));
+      field.appendChild(label);
+      let input: HTMLElement;
+      if (arg.input === "bool") {
+        const sel = document.createElement("select");
+        for (const v of ["true", "false"]) {
+          const o = document.createElement("option");
+          o.value = v;
+          o.textContent = v;
+          sel.appendChild(o);
+        }
+        input = sel;
+      } else if (arg.input === "xdr") {
+        const ta = document.createElement("textarea");
+        ta.rows = 2;
+        ta.placeholder = ARG_PLACEHOLDER.xdr!;
+        input = ta;
+      } else {
+        const inp = document.createElement("input");
+        inp.type = "text";
+        inp.placeholder = ARG_PLACEHOLDER[arg.input] ?? "";
+        input = inp;
+      }
+      input.dataset.arg = arg.name;
+      field.appendChild(input);
+      upArgs.appendChild(field);
+    }
+    return;
+  }
+  // names / raw rungs: args are raw ScVal XDR, one per line, optional.
+  const field = document.createElement("div");
+  field.className = "up-arg";
+  const label = document.createElement("label");
+  const b = document.createElement("b");
+  b.textContent = "args";
+  label.append(
+    b,
+    document.createTextNode(" base64 ScVal XDR, one per line (optional)"),
+  );
+  const ta = document.createElement("textarea");
+  ta.rows = 3;
+  ta.placeholder = "AAAAAwAAAAc=";
+  ta.dataset.arg = "raw-args";
+  field.append(label, ta);
+  upArgs.appendChild(field);
+}
+
+function showUploadError(message: string): void {
+  upErr.hidden = false;
+  upErr.textContent = message;
+}
+
+function gatherUploadInvocation():
+  | { fn: string; args: string[]; raw: boolean }
+  | undefined {
+  const info = uploadInfo;
+  if (!info?.ok) {
+    showUploadError("upload a contract .wasm first");
+    return undefined;
+  }
+  upErr.hidden = true;
+  if (info.ladder === "spec") {
+    const fn = upFn.value;
+    const inputs = upArgs.querySelectorAll<
+      HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+    >("input, select, textarea");
+    const args: string[] = [];
+    for (const el of inputs) {
+      if (el.value.trim() === "") {
+        showUploadError(`argument "${el.dataset.arg}" is required`);
+        return undefined;
+      }
+      args.push(el.value);
+    }
+    return { fn, args, raw: false };
+  }
+  const fn = info.ladder === "raw" ? upFnFree.value.trim() : upFn.value;
+  if (!fn) {
+    showUploadError("enter a function name to invoke");
+    return undefined;
+  }
+  const ta = upArgs.querySelector<HTMLTextAreaElement>("textarea");
+  const args = (ta?.value ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  return { fn, args, raw: true };
+}
+
+// ---- visual debugger -------------------------------------------------------
+debugRunBtn.addEventListener("click", () => {
+  if (debuggableRunId === undefined || debugPending) return;
+  debugPending = true;
+  debugRunBtn.disabled = true;
+  debugRunBtn.textContent = "tracing…";
+  worker.postMessage({ type: "debug", id: debuggableRunId });
+});
+
+const KIND_LABEL: Record<string, string> = {
+  begin: "begin",
+  end: "end",
+  "push-ctx": "frame push",
+  "pop-ctx": "frame pop",
+  "env-call": "env call",
+  "env-ret": "env return",
+};
+
+function openDebugger(msg: DebugResultMsg): void {
+  debugData = msg;
+  debuggerEl.hidden = false;
+
+  if (msg.reason) {
+    dbgReason.hidden = false;
+    dbgReason.replaceChildren();
+    const b = document.createElement("b");
+    b.textContent = "trace unavailable: ";
+    dbgReason.append(
+      b,
+      document.createTextNode(
+        `${msg.reason} — showing the Tier-1 call tree only.`,
+      ),
+    );
+  } else {
+    dbgReason.hidden = true;
+    dbgReason.replaceChildren();
+  }
+
+  renderCallTree(msg);
+
+  const steps = msg.steps;
+  const hasTrace = steps.length > 0;
+  dbgScrub.hidden = !hasTrace;
+  dbgDetail.hidden = !hasTrace;
+  if (!hasTrace) {
+    debuggerEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    return;
+  }
+
+  const storageCount = steps.reduce((n, s) => n + (s.storage ? 1 : 0), 0);
+  dbgCount.textContent = `${fmtInt(steps.length)} steps · ${fmtInt(
+    msg.frames.length,
+  )} frames · ${fmtInt(storageCount)} storage ops`;
+
+  // ticks
+  dbgTicks.replaceChildren();
+  activeTick = undefined;
+  for (const step of steps) {
+    const t = document.createElement("button");
+    t.type = "button";
+    t.className = `dtick ${step.kind}${step.storage ? " storage" : ""}`;
+    t.title = `#${step.seq} ${step.display}`;
+    t.addEventListener("click", () => setDebugStep(step.seq));
+    dbgTicks.appendChild(t);
+  }
+
+  // ledger lane
+  dbgLane.replaceChildren();
+  laneMarkBySeq = new Map();
+  activeLaneMark = undefined;
+  if (storageCount === 0) {
+    const empty = document.createElement("span");
+    empty.className = "lane-empty";
+    empty.textContent = "no storage ops in this run";
+    dbgLane.appendChild(empty);
+  } else {
+    const denom = Math.max(steps.length - 1, 1);
+    for (const step of steps) {
+      if (!step.storage) continue;
+      const mark = document.createElement("button");
+      mark.type = "button";
+      mark.className = "lane-mark";
+      mark.style.left = `${(step.seq / denom) * 100}%`;
+      mark.title = `#${step.seq} ${step.display}`;
+      mark.addEventListener("click", () => setDebugStep(step.seq));
+      laneMarkBySeq.set(step.seq, mark);
+      dbgLane.appendChild(mark);
+    }
+  }
+
+  dbgSlider.min = "0";
+  dbgSlider.max = String(steps.length - 1);
+  setDebugStep(0);
+  debuggerEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function renderCallTree(msg: DebugResultMsg): void {
+  dbgTree.replaceChildren();
+  treeFrameEls = [];
+  activeTreeFrame = undefined;
+  if (msg.frames.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "tree-empty";
+    empty.textContent = "no fn_call diagnostics recorded";
+    dbgTree.appendChild(empty);
+    return;
+  }
+  msg.frames.forEach((frame, i) => {
+    const el = document.createElement("div");
+    el.className = "tree-frame";
+    el.style.marginLeft = `${frame.depth * 16}px`;
+    const head = document.createElement("div");
+    head.className = "tf-head";
+    const fn = document.createElement("span");
+    fn.className = "tf-fn";
+    fn.textContent = frame.fn;
+    head.appendChild(fn);
+    if (frame.contract) {
+      const c = document.createElement("span");
+      c.className = "tf-contract";
+      c.textContent = `${frame.contract.slice(0, 4)}…${frame.contract.slice(-4)}`;
+      c.title = frame.contract;
+      head.appendChild(c);
+    }
+    el.appendChild(head);
+    const args = document.createElement("div");
+    args.className = "tf-args";
+    args.textContent = `(${frame.args.join(", ")})`;
+    el.appendChild(args);
+    const ret = document.createElement("div");
+    if (frame.ret !== undefined) {
+      ret.className = "tf-ret";
+      ret.textContent = `→ ${frame.ret}`;
+    } else {
+      ret.className = "tf-ret open";
+      ret.textContent = "→ (no return recorded)";
+    }
+    el.appendChild(ret);
+    if (frame.pushSeq >= 0) {
+      el.addEventListener("click", () => setDebugStep(frame.pushSeq));
+    }
+    treeFrameEls[i] = el;
+    dbgTree.appendChild(el);
+  });
+}
+
+function fmtDelta(n: number): string {
+  return n > 0 ? `+${fmtInt(n)}` : "0";
+}
+
+function setDebugStep(i: number): void {
+  const data = debugData;
+  if (!data || data.steps.length === 0) return;
+  dbgIdx = Math.max(0, Math.min(i, data.steps.length - 1));
+  const step = data.steps[dbgIdx]!;
+
+  dbgSlider.value = String(dbgIdx);
+  dbgPos.textContent = `step ${dbgIdx + 1} / ${data.steps.length}`;
+  dbgDisplay.textContent = step.display;
+  dbgKind.textContent =
+    (KIND_LABEL[step.kind] ?? step.kind) + (step.storage ? " · storage" : "");
+  dbgName.textContent = step.name || "—";
+  dbgDcpu.textContent = fmtDelta(step.dCpu);
+  dbgDmem.textContent = fmtDelta(step.dMem);
+
+  dbgCpuNum.textContent = fmtInt(step.cpu);
+  dbgCpuFill.style.width = fillWidth(step.cpu, data.totalCpu || 1);
+  dbgCpuScale.textContent = `${fmtPct(step.cpu, data.totalCpu || 1)} of this run's ${fmtInt(data.totalCpu)} insns`;
+  dbgMemNum.textContent = fmtBytes(step.mem);
+  dbgMemFill.style.width = fillWidth(step.mem, data.totalMem || 1);
+  dbgMemScale.textContent = `${fmtPct(step.mem, data.totalMem || 1)} of this run's ${fmtBytes(data.totalMem)}`;
+
+  if (activeTick) activeTick.classList.remove("active");
+  activeTick = dbgTicks.children[dbgIdx] as HTMLElement | undefined;
+  activeTick?.classList.add("active");
+
+  if (activeLaneMark) activeLaneMark.classList.remove("active");
+  activeLaneMark = laneMarkBySeq.get(step.seq);
+  activeLaneMark?.classList.add("active");
+
+  if (activeTreeFrame) activeTreeFrame.classList.remove("active");
+  activeTreeFrame = step.frame >= 0 ? treeFrameEls[step.frame] : undefined;
+  activeTreeFrame?.classList.add("active");
+
+  const last = data.steps.length - 1;
+  dbgBack.disabled = dbgIdx === 0;
+  dbgFwd.disabled = dbgIdx === last;
+  dbgOver.disabled = dbgIdx === last;
+  dbgStorageBtn.disabled = !data.steps.some(
+    (s) => s.seq > dbgIdx && s.storage,
+  );
+}
+
+dbgSlider.addEventListener("input", () => {
+  setDebugStep(Number(dbgSlider.value));
+});
+dbgBack.addEventListener("click", () => setDebugStep(dbgIdx - 1));
+dbgFwd.addEventListener("click", () => setDebugStep(dbgIdx + 1));
+dbgOver.addEventListener("click", () => {
+  const step = debugData?.steps[dbgIdx];
+  if (!step) return;
+  // On a frame push, jump past the matching pop; otherwise a single step.
+  if (step.kind === "push-ctx" && step.matchPop >= 0) {
+    setDebugStep(step.matchPop + 1);
+  } else {
+    setDebugStep(dbgIdx + 1);
+  }
+});
+dbgStorageBtn.addEventListener("click", () => {
+  const next = debugData?.steps.find((s) => s.seq > dbgIdx && s.storage);
+  if (next) setDebugStep(next.seq);
+});
+window.addEventListener("keydown", (e) => {
+  if (debuggerEl.hidden || !debugData || debugData.steps.length === 0) return;
+  const target = e.target as HTMLElement | null;
+  if (
+    target &&
+    (target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.tagName === "SELECT")
+  ) {
+    return;
+  }
+  if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    setDebugStep(dbgIdx - 1);
+  } else if (e.key === "ArrowRight") {
+    e.preventDefault();
+    setDebugStep(dbgIdx + 1);
+  }
+});
 
 // ---- boot ------------------------------------------------------------------
 renderFixtures();

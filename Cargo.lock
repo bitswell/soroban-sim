@@ -1066,6 +1066,8 @@ name = "soroban-sim-component"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
+ "serde_json",
  "soroban-env-host",
  "soroban-sim-core",
  "wit-bindgen",

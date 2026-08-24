@@ -122,6 +122,51 @@
             <div class="fixture-list" id="fixtures"></div>
           </div>
 
+          <div class="field">
+            <label>Or any contract</label>
+            <input
+              type="file"
+              id="upload-file"
+              accept=".wasm,application/wasm"
+              class="sr-input"
+            />
+            <button class="upload-btn" id="upload-btn" type="button">
+              upload .wasm ⇪
+            </button>
+            <div
+              class="upload-card"
+              id="upload-card"
+              role="button"
+              tabindex="0"
+              aria-pressed="false"
+              hidden
+            >
+              <div class="up-top">
+                <span class="up-name" id="up-name"></span>
+                <span class="up-size" id="up-size"></span>
+              </div>
+              <div class="up-cid" id="up-cid"></div>
+              <div class="up-ladder" id="up-ladder" title="Labeling ladder: how much the UI can decode about this contract">
+                <span class="rung" data-rung="spec" title="contractspecv0 section found — typed function signatures">spec</span>
+                <span class="rung" data-rung="names" title="wasm export names only — args as raw ScVal XDR">names</span>
+                <span class="rung" data-rung="raw" title="no metadata — free-form fn + raw ScVal XDR args">raw</span>
+              </div>
+              <div class="up-fn-row" id="up-fn-row">
+                <label for="up-fn">fn</label>
+                <select id="up-fn" aria-label="Contract function"></select>
+                <input
+                  id="up-fn-free"
+                  type="text"
+                  placeholder="function name"
+                  aria-label="Function name"
+                  hidden
+                />
+              </div>
+              <div class="up-args" id="up-args"></div>
+              <p class="up-err" id="up-err" hidden></p>
+            </div>
+          </div>
+
           <p class="req-note" id="req-note"></p>
 
           <label class="cache-row hidden" id="cache-row">
@@ -209,6 +254,9 @@
         </div>
         <span class="badge hidden" id="r-badge">matches CI golden 1082a3e4</span>
         <span class="errmsg" id="r-err" hidden></span>
+        <button class="debug-btn" id="debug-run" type="button" hidden>
+          ◉ debug this run
+        </button>
       </section>
       <p class="result-note" id="result-note" hidden>
         Deterministic SSIM bytes — the same rerun loop yields the same result in
@@ -321,6 +369,110 @@
           </div>
           <div class="bm-note" id="bm-note"></div>
         </section>
+      </section>
+
+      <!-- VISUAL DEBUGGER (populated by "debug this run") -->
+      <section class="debugger" id="debugger" hidden aria-live="polite">
+        <div class="ws-head">
+          <span class="eyebrow">Visual debugger</span>
+          <span class="sub"
+            >time-travel over the recorded execution — every VM→host boundary
+            crossing, replayed deterministically under the tracing host</span
+          >
+        </div>
+
+        <div class="dbg-reason" id="dbg-reason" hidden></div>
+
+        <section class="panel dbg-scrub" id="dbg-scrub" aria-labelledby="dbg-tl-h">
+          <div class="panel-head">
+            <span class="eyebrow" id="dbg-tl-h">Execution timeline</span>
+            <span class="sub" id="dbg-count">—</span>
+          </div>
+          <div class="dbg-legend">
+            <span><i class="dtick-chip frame"></i> frame push/pop</span>
+            <span><i class="dtick-chip env"></i> env call/ret</span>
+            <span><i class="dtick-chip storage"></i> storage op</span>
+            <span><i class="dtick-chip edge"></i> begin/end</span>
+          </div>
+          <div class="dbg-ticks" id="dbg-ticks"></div>
+          <input
+            type="range"
+            class="dbg-slider"
+            id="dbg-slider"
+            min="0"
+            max="0"
+            value="0"
+            step="1"
+            aria-label="Trace step"
+          />
+          <div class="dbg-lane-row">
+            <span class="dbg-lane-label">ledger lane</span>
+            <div class="dbg-lane" id="dbg-lane"></div>
+          </div>
+          <div class="dbg-controls">
+            <button id="dbg-back" type="button">⏴ back</button>
+            <button id="dbg-fwd" type="button">step ⏵</button>
+            <button id="dbg-over" type="button">step over frame ⭟</button>
+            <button id="dbg-storage-btn" type="button">run to storage op ⇥</button>
+            <span class="dbg-hint">← / → scrub</span>
+          </div>
+        </section>
+
+        <div class="dbg-grid">
+          <section class="panel dbg-detail" id="dbg-detail" aria-labelledby="dbg-sd-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="dbg-sd-h">Step detail</span>
+              <span class="sub" id="dbg-pos">—</span>
+            </div>
+            <div class="dbg-display" id="dbg-display">—</div>
+            <div class="dbg-meta">
+              <div class="dbg-kv">
+                <span class="k">kind</span>
+                <span class="v" id="dbg-kind">—</span>
+              </div>
+              <div class="dbg-kv">
+                <span class="k">name</span>
+                <span class="v" id="dbg-name">—</span>
+              </div>
+              <div class="dbg-kv">
+                <span class="k">Δ cpu</span>
+                <span class="v" id="dbg-dcpu">—</span>
+              </div>
+              <div class="dbg-kv">
+                <span class="k">Δ mem</span>
+                <span class="v" id="dbg-dmem">—</span>
+              </div>
+            </div>
+            <div class="gauge">
+              <div class="gauge-top">
+                <span class="g-name">CPU consumed so far</span>
+                <span class="g-num" id="dbg-cpu-num">—</span>
+              </div>
+              <div class="gauge-track">
+                <div class="gauge-fill cpu" id="dbg-cpu-fill"></div>
+              </div>
+              <div class="gauge-scale" id="dbg-cpu-scale">of this run's total</div>
+            </div>
+            <div class="gauge">
+              <div class="gauge-top">
+                <span class="g-name">Memory consumed so far</span>
+                <span class="g-num" id="dbg-mem-num">—</span>
+              </div>
+              <div class="gauge-track">
+                <div class="gauge-fill mem" id="dbg-mem-fill"></div>
+              </div>
+              <div class="gauge-scale" id="dbg-mem-scale">of this run's total</div>
+            </div>
+          </section>
+
+          <section class="panel dbg-tree-panel" aria-labelledby="dbg-ct-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="dbg-ct-h">Call tree</span>
+              <span class="sub">Tier-1 fn_call / fn_return diagnostics</span>
+            </div>
+            <div class="dbg-tree" id="dbg-tree"></div>
+          </section>
+        </div>
       </section>
 
       <!-- M0 golden browser run (mirror of #result) -->

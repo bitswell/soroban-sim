@@ -2,6 +2,7 @@
 export {
   runFixture,
   simulate,
+  simulateTrace,
   simulateTransaction,
 } from "./generated/soroban-sim-component.js";
 export type {
@@ -9,8 +10,13 @@ export type {
   LedgerEntry,
   Outcome,
   Request,
+  TraceOutcome,
   TransactionRequest,
 } from "./generated/soroban-sim-component.js";
+
+// STRC trace decoding (visual debugger).
+export { decodeTrace, TRACE_MAGIC } from "./trace.js";
+export type { TraceStep, TraceStepKind } from "./trace.js";
 
 // State provider contract (#8 ships concrete providers).
 export type { EntryResolution, StateProvider } from "./state-provider.js";
@@ -29,11 +35,13 @@ export { SorobanSimulator } from "./simulator.js";
 export type {
   Component,
   ComponentSimulate,
+  ComponentSimulateTrace,
   ComponentSimulateTransaction,
   SimulateInput,
   SimulateProgress,
   SimulateResult,
   SimulateRunOptions,
+  SimulateTraceResult,
   SimulateTransactionInput,
   SimulatorOptions,
   StateCache,

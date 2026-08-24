@@ -22,7 +22,9 @@ use soroban_simulation::NetworkConfig;
 use std::rc::Rc;
 
 mod snapshot;
+mod trace;
 pub use snapshot::*;
+pub use trace::*;
 
 pub const FIXTURE_A: i32 = 40;
 pub const FIXTURE_B: i32 = 2;
@@ -125,6 +127,39 @@ pub fn run_fixture() -> Result<Vec<u8>> {
 }
 
 pub fn simulate(request: SimulationRequest) -> Result<SimOutcome> {
+    match simulate_core(request)? {
+        CoreOutcome::NeedsState(keys) => Ok(SimOutcome::NeedsState(keys)),
+        CoreOutcome::Complete(core) => {
+            Ok(SimOutcome::Complete(encode_simulation_result(&core.result)?))
+        }
+    }
+}
+
+/// The rich pass-1 output retained internally so [`simulate_with_trace`] can
+/// run the enforcing replay (pass 2) over the exact same inputs. Everything the
+/// replay needs — the recorded result (footprint/resources/auth), the snapshot
+/// the recording read from, and the invocation parameters — lives here.
+pub(crate) struct SimulationCore {
+    pub(crate) result: InvokeHostFunctionSimulationResult,
+    pub(crate) snapshot: Rc<ThreeStateSnapshot>,
+    pub(crate) host_function: HostFunction,
+    pub(crate) source_account: AccountId,
+    pub(crate) ledger_info: LedgerInfo,
+    pub(crate) network_config: NetworkConfig,
+    pub(crate) base_prng_seed: [u8; 32],
+    pub(crate) enable_diagnostics: bool,
+}
+
+pub(crate) enum CoreOutcome {
+    Complete(Box<SimulationCore>),
+    NeedsState(Vec<LedgerKey>),
+}
+
+/// Shared pass-1 body of [`simulate`] and [`simulate_with_trace`]: identical
+/// snapshot / needs-state / recording semantics, but returns the un-encoded
+/// [`InvokeHostFunctionSimulationResult`] plus the replay inputs instead of the
+/// SSIM bytes.
+pub(crate) fn simulate_core(request: SimulationRequest) -> Result<CoreOutcome> {
     let snapshot = Rc::new(ThreeStateSnapshot::new(
         request.ledger_entries,
         request.absent_keys,
@@ -141,7 +176,7 @@ pub fn simulate(request: SimulationRequest) -> Result<SimOutcome> {
                 Err(err) => {
                     let needed = probe.take_needed();
                     if !needed.is_empty() {
-                        return Ok(SimOutcome::NeedsState(needed));
+                        return Ok(CoreOutcome::NeedsState(needed));
                     }
                     return Err(err).context("loading network config from ledger entries");
                 }
@@ -150,11 +185,11 @@ pub fn simulate(request: SimulationRequest) -> Result<SimOutcome> {
     };
 
     let result = simulate_invoke_host_function_op(
-        snapshot,
+        snapshot.clone(),
         &network_config,
         &request.adjustment.config(),
         &request.ledger_info,
-        request.host_function,
+        request.host_function.clone(),
         RecordingInvocationAuthMode::recording(true, true),
         &request.source_account,
         request.base_prng_seed,
@@ -166,9 +201,18 @@ pub fn simulate(request: SimulationRequest) -> Result<SimOutcome> {
     // before treating invoke_result as a genuine contract failure.
     let needed = probe.take_needed();
     if !needed.is_empty() {
-        return Ok(SimOutcome::NeedsState(needed));
+        return Ok(CoreOutcome::NeedsState(needed));
     }
-    Ok(SimOutcome::Complete(encode_simulation_result(&result)?))
+    Ok(CoreOutcome::Complete(Box::new(SimulationCore {
+        result,
+        snapshot,
+        host_function: request.host_function,
+        source_account: request.source_account,
+        ledger_info: request.ledger_info,
+        network_config,
+        base_prng_seed: request.base_prng_seed,
+        enable_diagnostics: request.enable_diagnostics,
+    })))
 }
 
 /// Extract the `HostFunction` of the first `InvokeHostFunction` operation and

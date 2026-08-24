@@ -15,3 +15,9 @@ anyhow.workspace = true
 soroban-env-host = { workspace = true, features = ["recording_mode"] }
 soroban-sim-core = { path = "../soroban-sim-core" }
 wit-bindgen.workspace = true
+
+[dev-dependencies]
+# Native-test-only: parse the committed parity fixture JSON to drive the WIT
+# request mapping end-to-end. Both are already in the lockfile transitively.
+base64 = "0.22.1"
+serde_json = "1.0"

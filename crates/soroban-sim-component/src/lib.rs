@@ -9,8 +9,9 @@ use soroban_env_host::xdr::{
 };
 use soroban_env_host::LedgerInfo;
 use soroban_sim_core::{
-    simulate, simulate_transaction, AdjustmentSource, LedgerEntryWithLiveUntil,
-    NetworkConfigSource, SimOutcome, SimulationRequest, UnmappedPolicy,
+    encode_trace, simulate, simulate_transaction, simulate_with_trace, AdjustmentSource,
+    LedgerEntryWithLiveUntil, NetworkConfigSource, SimOutcome, SimulationRequest,
+    TraceOutcome as CoreTraceOutcome, UnmappedPolicy,
 };
 
 struct Component;
@@ -36,6 +37,10 @@ impl Guest for Component {
 
     fn simulate_transaction(request: TransactionRequest) -> Result<Outcome, String> {
         simulate_transaction_request(request).map_err(|e| e.to_string())
+    }
+
+    fn simulate_trace(request: Request) -> Result<TraceOutcome, String> {
+        simulate_trace_request(request).map_err(|e| e.to_string())
     }
 }
 
@@ -85,6 +90,36 @@ fn outcome_to_wit(outcome: SimOutcome) -> anyhow::Result<Outcome> {
 }
 
 fn simulate_request(request: Request) -> anyhow::Result<Outcome> {
+    let outcome = simulate(simulation_request_from_wit(request)?)?;
+    outcome_to_wit(outcome)
+}
+
+/// simulate-trace shares the exact request mapping with simulate (same
+/// FromLedgerEntries network config, fail-closed UnmappedPolicy::Unknown,
+/// known-absent keys); only the outcome shape differs.
+fn simulate_trace_request(request: Request) -> anyhow::Result<TraceOutcome> {
+    let outcome = simulate_with_trace(simulation_request_from_wit(request)?)?;
+    match outcome {
+        CoreTraceOutcome::Complete { ssim, trace } => {
+            Ok(TraceOutcome::Complete(TraceComplete {
+                ssim,
+                trace: encode_trace(&trace)?,
+            }))
+        }
+        CoreTraceOutcome::NeedsState(keys) => {
+            let key_xdrs = keys
+                .iter()
+                .map(|k| k.to_xdr(Limits::none()).map_err(anyhow::Error::from))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(TraceOutcome::NeedsState(key_xdrs))
+        }
+        CoreTraceOutcome::TraceUnavailable { ssim, reason } => {
+            Ok(TraceOutcome::TraceUnavailable(TraceFallback { ssim, reason }))
+        }
+    }
+}
+
+fn simulation_request_from_wit(request: Request) -> anyhow::Result<SimulationRequest> {
     let host_function = HostFunction::from_xdr(request.host_function_xdr, Limits::none())?;
     let source_account = AccountId::from_xdr(request.source_account_xdr, Limits::none())?;
     let ledger_info = ledger_info_from_wit(request.ledger_context)?;
@@ -100,7 +135,7 @@ fn simulate_request(request: Request) -> anyhow::Result<Outcome> {
         .map(|key_xdr| LedgerKey::from_xdr(key_xdr, Limits::none()).map_err(anyhow::Error::from))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let outcome = simulate(SimulationRequest {
+    Ok(SimulationRequest {
         host_function,
         source_account,
         ledger_info,
@@ -115,8 +150,7 @@ fn simulate_request(request: Request) -> anyhow::Result<Outcome> {
         base_prng_seed,
         enable_diagnostics: request.enable_diagnostics,
         adjustment: adjustment_from_wit(request.apply_rpc_adjustments),
-    })?;
-    outcome_to_wit(outcome)
+    })
 }
 
 fn ledger_info_from_wit(context: LedgerContext) -> anyhow::Result<LedgerInfo> {
@@ -149,10 +183,116 @@ export!(Component);
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use base64::Engine as _;
+    use soroban_sim_core::{decode_trace, TraceStepKind};
+
     #[test]
     fn component_fixture_matches_core_fixture() {
         let direct = soroban_sim_core::run_fixture().unwrap();
         let again = soroban_sim_core::run_fixture().unwrap();
         assert_eq!(direct, again);
+    }
+
+    fn b64(s: &str) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD.decode(s).unwrap()
+    }
+
+    /// Build a WIT-level `Request` from the committed local-add-i32 parity
+    /// capture: real tx envelope + a full ledger snapshot (incl. the
+    /// ConfigSetting entries `NetworkConfigSource::FromLedgerEntries` needs).
+    fn parity_request() -> Request {
+        let json: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/parity/local-add-i32.json"
+        ))
+        .unwrap();
+        let tx = TransactionEnvelope::from_xdr(b64(json["txXdr"].as_str().unwrap()), Limits::none())
+            .unwrap();
+        let (host_function, source_account) =
+            soroban_sim_core::extract_invoke_host_function(&tx).unwrap();
+        let lc = &json["ledgerContext"];
+        let network_id: Vec<u8> = {
+            let hex = lc["networkId"].as_str().unwrap();
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let ledger_entries = json["snapshot"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| LedgerEntry {
+                entry_xdr: b64(entry["entryXdr"].as_str().unwrap()),
+                live_until_ledger: entry["liveUntilLedger"].as_u64().map(|v| v as u32),
+            })
+            .collect();
+        Request {
+            host_function_xdr: host_function.to_xdr(Limits::none()).unwrap(),
+            source_account_xdr: source_account.to_xdr(Limits::none()).unwrap(),
+            ledger_context: LedgerContext {
+                protocol_version: lc["protocolVersion"].as_u64().unwrap() as u32,
+                sequence_number: lc["sequenceNumber"].as_u64().unwrap() as u32,
+                timestamp: lc["timestamp"].as_u64().unwrap(),
+                network_id,
+                base_reserve: lc["baseReserve"].as_u64().unwrap() as u32,
+                min_temp_entry_ttl: lc["minTempEntryTtl"].as_u64().unwrap() as u32,
+                min_persistent_entry_ttl: lc["minPersistentEntryTtl"].as_u64().unwrap() as u32,
+                max_entry_ttl: lc["maxEntryTtl"].as_u64().unwrap() as u32,
+            },
+            ledger_entries,
+            known_absent_keys: vec![],
+            base_prng_seed: vec![0u8; 32],
+            enable_diagnostics: true,
+            apply_rpc_adjustments: false,
+        }
+    }
+
+    /// simulate-trace over the full parity snapshot: trace replay completes,
+    /// the STRC bytes decode, the steps are Begin..End bracketed, and the ssim
+    /// bytes are identical to the plain simulate export's.
+    #[test]
+    fn simulate_trace_completes_on_parity_fixture() {
+        let plain = match simulate_request(parity_request()).unwrap() {
+            Outcome::Complete(bytes) => bytes,
+            Outcome::NeedsState(keys) => panic!("plain simulate needs {} keys", keys.len()),
+        };
+        let traced = simulate_trace_request(parity_request()).unwrap();
+        let TraceOutcome::Complete(complete) = traced else {
+            panic!("expected trace-complete, got {traced:?}");
+        };
+        assert_eq!(complete.ssim, plain, "trace ssim must match plain simulate");
+        let steps = decode_trace(&complete.trace).unwrap();
+        assert!(steps.len() >= 4, "expected at least Begin/push/pop/End");
+        assert_eq!(steps.first().unwrap().kind, TraceStepKind::Begin);
+        assert_eq!(steps.last().unwrap().kind, TraceStepKind::End);
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.kind == TraceStepKind::PushCtx && s.name.ends_with(":add")),
+            "expected a VM frame push for `add`, got {:?}",
+            steps.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// Without the ConfigSetting ledger entries, FromLedgerEntries cannot load
+    /// the network config: the trace path must surface needs-state (same
+    /// fail-closed contract as plain simulate), not an error.
+    #[test]
+    fn simulate_trace_needs_state_without_config_entries() {
+        let mut request = parity_request();
+        request.ledger_entries.retain(|entry| {
+            let parsed =
+                XdrLedgerEntry::from_xdr(entry.entry_xdr.clone(), Limits::none()).unwrap();
+            !matches!(
+                parsed.data,
+                soroban_env_host::xdr::LedgerEntryData::ConfigSetting(_)
+            )
+        });
+        let traced = simulate_trace_request(request).unwrap();
+        let TraceOutcome::NeedsState(keys) = traced else {
+            panic!("expected needs-state, got {traced:?}");
+        };
+        assert!(!keys.is_empty());
     }
 }
