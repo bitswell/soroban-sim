@@ -26,8 +26,9 @@ jobs:
   preview:
     runs-on: ubuntu-latest
     steps:
+      # Unconditional: the teardown on `closed` also needs a checked-out repo
+      # (the deploy action operates on a git worktree).
       - uses: actions/checkout@v4
-        if: github.event.action != 'closed'
 
       - uses: dtolnay/rust-toolchain@stable
         if: github.event.action != 'closed'
