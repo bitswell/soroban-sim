@@ -883,25 +883,24 @@ mod tests {
         let none = complete(AdjustmentSource::None);
         let rpc = complete(AdjustmentSource::RpcDefault);
 
-        // NOTE: in soroban-simulation 28.0.2, `simulated_instructions` is the raw
+        // NOTE: in soroban-simulation 27.0.1, `simulated_instructions` is the raw
         // metered CPU count and is NOT touched by the adjustment config; the
         // adjustment scales the resources/fee reported in `transaction_data`
-        // (SorobanResources.instructions ×1.04 + 50_000, resource_fee ×1.15).
+        // (instructions = max(raw × 1.04, raw + 50_000); refundable fee × 1.15).
         // Both runs therefore report the same simulated_instructions...
-        assert_eq!(simulated_instructions(&none), 2086263);
-        assert_eq!(simulated_instructions(&rpc), 2086263);
+        let raw_instructions = simulated_instructions(&none);
+        assert_eq!(simulated_instructions(&rpc), raw_instructions);
 
         // ...but the transaction_data resources/fees differ, which is the knob.
         let none_td = transaction_data(&none);
         let rpc_td = transaction_data(&rpc);
 
-        // Observed on the add-i32 fixture:
-        //   None      -> resources.instructions = 2086263, resource_fee = 2388
-        //   RpcDefault-> resources.instructions = 2169713, resource_fee = 2539
-        assert_eq!(none_td.resources.instructions, 2086263, "None raw instructions drifted");
-        assert_eq!(rpc_td.resources.instructions, 2169713, "RpcDefault adjusted instructions drifted");
-        assert_eq!(none_td.resource_fee, 2388, "None raw resource_fee drifted");
-        assert_eq!(rpc_td.resource_fee, 2539, "RpcDefault adjusted resource_fee drifted");
+        assert_eq!(none_td.resources.instructions, raw_instructions);
+        let expected_adjusted = raw_instructions
+            .saturating_add(50_000)
+            .max(((raw_instructions as f64) * 1.04).floor() as u32);
+        assert_eq!(rpc_td.resources.instructions, expected_adjusted);
+        assert!(rpc_td.resource_fee > none_td.resource_fee);
         assert_ne!(none_td.resources.instructions, rpc_td.resources.instructions);
         assert_ne!(none, rpc, "adjustment knob must change the encoded output");
 

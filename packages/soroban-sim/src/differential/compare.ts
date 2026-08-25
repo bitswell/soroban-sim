@@ -324,9 +324,8 @@ export function buildParityReport(
       note: eq
         ? undefined
         : `adjustment model reproduced exactly (local = raw ${local.rawInstructions} + 50000); ` +
-          `residual +${delta} is a raw CPU-metering skew between our pinned soroban-env-host ` +
-          `28.0.2 and the RPC core's env-host build (the local protocol-28 quickstart core embeds ` +
-          `env-host 28.0.0; testnet fixtures additionally span protocol 27 vs 28)`,
+          `residual ${delta >= 0 ? "+" : ""}${delta} is a raw CPU-metering skew between the ` +
+          `exact host build compiled here and the RPC core build; semantic fields are compared separately`,
     });
   }
 

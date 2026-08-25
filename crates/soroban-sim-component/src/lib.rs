@@ -231,7 +231,10 @@ mod tests {
             host_function_xdr: host_function.to_xdr(Limits::none()).unwrap(),
             source_account_xdr: source_account.to_xdr(Limits::none()).unwrap(),
             ledger_context: LedgerContext {
-                protocol_version: lc["protocolVersion"].as_u64().unwrap() as u32,
+                // The committed local fixture can come from a neighbouring
+                // protocol; execution must always use this compiled host's
+                // exact interface version.
+                protocol_version: soroban_env_host::meta::INTERFACE_VERSION.protocol,
                 sequence_number: lc["sequenceNumber"].as_u64().unwrap() as u32,
                 timestamp: lc["timestamp"].as_u64().unwrap(),
                 network_id,

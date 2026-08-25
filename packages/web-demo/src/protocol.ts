@@ -72,13 +72,39 @@ export interface SimulateUploadMsg {
   /** true => free-form fn + base64-ScVal-XDR args (the no-spec floor). */
   raw: boolean;
 }
+/** Read a deployed Testnet contract instance/code and extract its callable spec. */
+export interface LoadContractMsg {
+  type: "load-contract";
+  id: number;
+  contractId: string;
+}
+/** Invoke a deployed Testnet contract using ledger state resolved through RPC. */
+export interface SimulateContractMsg {
+  type: "simulate-contract";
+  id: number;
+  contractId: string;
+  fn: string;
+  args: string[];
+  /** true => args are base64 ScVal XDR instead of spec-typed values. */
+  raw: boolean;
+}
+/** Simulate a caller-supplied transaction envelope locally against Testnet state. */
+export interface SimulateXdrMsg {
+  type: "simulate-xdr";
+  id: number;
+  /** Base64 stellar-xdr TransactionEnvelope. */
+  transactionXdr: string;
+}
 export type MainToWorker =
   | RunFixtureMsg
   | SimulateMsg
   | CancelMsg
   | DebugMsg
   | UploadParseMsg
-  | SimulateUploadMsg;
+  | SimulateUploadMsg
+  | LoadContractMsg
+  | SimulateContractMsg
+  | SimulateXdrMsg;
 
 /** A footprint LedgerKey, decoded for display (same shape as a RoundKey label). */
 export interface FootprintKey {
@@ -135,6 +161,17 @@ export interface ResourceInfo {
   writeBytes: number;
   /** Resource fee in stroops (string preserves the i64 range). */
   resourceFee: string;
+}
+
+/** One transaction-wide ledger change decoded into a before/after summary. */
+export interface StateChangeLabel {
+  kind: string;
+  key: string;
+  change: "created" | "updated" | "deleted" | "restored";
+  /** Contract business state vs. host-managed archival restoration. */
+  category?: "contract" | "maintenance" | "transaction";
+  before?: string;
+  after?: string;
 }
 
 // ---- worker -> main -------------------------------------------------------
@@ -201,6 +238,16 @@ export interface SimResultMsg {
   diagnosticEventCount?: number;
   /** Count of post-invocation ledger-entry diffs the run produced. */
   modifiedCount?: number;
+  /** Decoded before/after ledger changes produced by the invocation. */
+  stateChanges?: StateChangeLabel[];
+  /** Which input surface produced this result. */
+  requestKind?: "fixture" | "upload" | "contract" | "xdr";
+  /** Ledger snapshot used for a live Testnet run. */
+  ledgerSequence?: number;
+  /** Source G account carried by the invocation/envelope, when decodable. */
+  sourceAccount?: string;
+  /** Operation count for a supplied transaction envelope. */
+  operationCount?: number;
   /** Region map of the SSIM envelope, for the byte-map view. */
   regions?: ByteRegion[];
   /** Lowercase hex of the SSIM envelope (omitted for very large envelopes). */
@@ -322,6 +369,21 @@ export interface UploadInfoMsg {
   fns: UploadFnInfo[];
 }
 
+/** Metadata/spec discovered from a deployed Testnet contract. */
+export interface ContractInfoMsg {
+  type: "contract-info";
+  id: number;
+  ok: boolean;
+  error?: string;
+  contractId: string;
+  executable?: "wasm" | "stellar-asset";
+  codeHash?: string;
+  ledgerSequence?: number;
+  protocolVersion?: number;
+  ladder: "spec" | "raw";
+  fns: UploadFnInfo[];
+}
+
 export type WorkerToMain =
   | ReadyMsg
   | ResultMsg
@@ -330,4 +392,5 @@ export type WorkerToMain =
   | SimErrorMsg
   | DebugResultMsg
   | DebugErrorMsg
-  | UploadInfoMsg;
+  | UploadInfoMsg
+  | ContractInfoMsg;

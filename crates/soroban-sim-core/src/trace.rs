@@ -22,13 +22,14 @@
 
 use anyhow::{anyhow, Result};
 use soroban_env_host::budget::{AsBudget, Budget};
-use soroban_env_host::e2e_invoke::{self, TtlLedgerEntryMeta};
+use soroban_env_host::e2e_invoke;
 use soroban_env_host::storage::SnapshotSource;
 use soroban_env_host::xdr::{
-    DiagnosticEvent, LedgerEntryData, LedgerKey, Limits, ReadXdr, ScVal,
-    SorobanTransactionDataExt, WriteXdr,
+    DiagnosticEvent, Hash, LedgerEntryData, LedgerKey, Limits, ReadXdr, ScVal,
+    SorobanTransactionDataExt, TtlEntry, WriteXdr,
 };
 use soroban_env_host::{TraceEvent, TraceHook, DEFAULT_XDR_RW_LIMITS};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -37,7 +38,7 @@ use crate::{
 };
 
 /// Shadow-limit factors replicated from soroban-simulation's private
-/// `NetworkConfig::create_budget` (network_config.rs:15-16 in 28.0.2), so the
+/// `NetworkConfig::create_budget` (network_config.rs in 27.0.1), so the
 /// pass-2 enforcing budget matches the pass-1 recording budget exactly.
 /// (`create_budget` is `pub(crate)` there, so we rebuild the same budget via
 /// the public `Budget::try_from_configs_with_shadow_limits`.)
@@ -175,12 +176,11 @@ fn replay_with_trace(core: &SimulationCore) -> std::result::Result<Vec<TraceStep
         .map(xdr_bytes)
         .collect::<std::result::Result<Vec<Vec<u8>>, String>>()?;
 
-    // One item per footprint key, read_only (XDR order) then read_write —
-    // mirroring what invoke_host_function_in_recording_mode feeds enforcing
-    // execution (e2e_invoke.rs:842-914 in 28.0.2). Soroban entries carry
-    // TtlLedgerEntryMeta; a None entry means no live ledger entry for the key.
-    let mut encoded_ledger_entries: Vec<(Option<Vec<u8>>, Option<TtlLedgerEntryMeta>)> =
-        Vec::with_capacity(resources.footprint.read_only.len() + resources.footprint.read_write.len());
+    // Present footprint entries, read_only (XDR order) then read_write, plus a
+    // parallel TTL XDR item. Missing entries stay in the footprint and are
+    // filled as absent by the enforcing host.
+    let mut encoded_ledger_entries: Vec<Vec<u8>> = Vec::new();
+    let mut encoded_ttl_entries: Vec<Vec<u8>> = Vec::new();
     let footprint_keys = resources
         .footprint
         .read_only
@@ -196,27 +196,23 @@ fn replay_with_trace(core: &SimulationCore) -> std::result::Result<Vec<TraceStep
         match got {
             Some((entry, maybe_live_until)) => {
                 let encoded = xdr_bytes(entry.as_ref())?;
-                let ttl_meta = match &entry.data {
+                let encoded_ttl = match &entry.data {
                     LedgerEntryData::ContractData(_) | LedgerEntryData::ContractCode(_) => {
                         let live_until_ledger = maybe_live_until.ok_or_else(|| {
                             format!("Soroban footprint entry {key:?} has no live-until ledger")
                         })?;
-                        let entry_size_for_rent = e2e_invoke::entry_size_for_rent(
-                            &budget,
-                            entry.as_ref(),
-                            encoded.len() as u32,
-                        )
-                        .map_err(|e| format!("entry_size_for_rent failed: {e:?}"))?;
-                        Some(TtlLedgerEntryMeta {
-                            live_until_ledger,
-                            entry_size_for_rent,
-                        })
+                        let key_hash: [u8; 32] = Sha256::digest(xdr_bytes(key)?).into();
+                        xdr_bytes(&TtlEntry {
+                            key_hash: Hash(key_hash),
+                            live_until_ledger_seq: live_until_ledger,
+                        })?
                     }
-                    _ => None,
+                    _ => Vec::new(),
                 };
-                encoded_ledger_entries.push((Some(encoded), ttl_meta));
+                encoded_ledger_entries.push(encoded);
+                encoded_ttl_entries.push(encoded_ttl);
             }
-            None => encoded_ledger_entries.push((None, None)),
+            None => {}
         }
     }
 
@@ -253,6 +249,7 @@ fn replay_with_trace(core: &SimulationCore) -> std::result::Result<Vec<TraceStep
         encoded_auth_entries.into_iter(),
         core.ledger_info.clone(),
         encoded_ledger_entries.into_iter(),
+        encoded_ttl_entries.into_iter(),
         core.base_prng_seed.to_vec(),
         &mut diagnostic_events,
         Some(hook),

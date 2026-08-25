@@ -13,8 +13,11 @@ async function runFixtureAndOpenDebugger(
   fixtureName?: RegExp,
 ): Promise<void> {
   await page.goto("/");
+  await page.locator("#advanced-inputs summary").click();
+  await page
+    .getByRole("button", { name: fixtureName ?? /add_i32/ })
+    .click();
   await expect(page.locator("#run")).toBeEnabled({ timeout: 60_000 });
-  if (fixtureName) await page.getByRole("button", { name: fixtureName }).click();
   await page.locator("#run").click();
   await expect(page.locator("#result-panel")).toBeVisible({ timeout: 60_000 });
 

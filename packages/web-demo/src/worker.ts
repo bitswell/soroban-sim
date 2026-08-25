@@ -30,6 +30,7 @@ import {
   type CallFrame,
   contractEventLabel,
   footprintLabels,
+  ledgerChangeLabel,
   ledgerKeyLabel,
   scValLabel,
 } from "./decode.js";
@@ -43,10 +44,14 @@ import type {
   DebugFrame,
   DebugMsg,
   DebugStep,
+  LoadContractMsg,
   MainToWorker,
   RoundKey,
+  StateChangeLabel,
+  SimulateContractMsg,
   SimulateMsg,
   SimulateUploadMsg,
+  SimulateXdrMsg,
   UploadArgInput,
   UploadFnInfo,
   UploadParseMsg,
@@ -54,8 +59,22 @@ import type {
 } from "./protocol.js";
 
 const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
-/** The linked soroban-env-host runs protocol 28; the host rejects anything else. */
-const HOST_PROTOCOL_VERSION = 28;
+/** The linked soroban-env-host runs protocol 27; the host rejects anything else. */
+const HOST_PROTOCOL_VERSION = 27;
+const DEFAULT_SIMULATION_SOURCE =
+  "GALD63KYDPYZLJLY2VD722RI6HAW3RIKU5AROSPAXTL5JRDJB5NGOJIX";
+const CONFIG_SETTING_IDS = [
+  "configSettingContractComputeV0",
+  "configSettingContractLedgerCostV0",
+  "configSettingContractLedgerCostExtV0",
+  "configSettingContractHistoricalDataV0",
+  "configSettingContractEventsV0",
+  "configSettingContractBandwidthV0",
+  "configSettingStateArchival",
+  "configSettingContractCostParamsCpuInstructions",
+  "configSettingContractCostParamsMemoryBytes",
+  "configSettingLiveSorobanStateSizeWindow",
+] as const;
 
 function post(msg: WorkerToMain): void {
   self.postMessage(msg);
@@ -96,6 +115,14 @@ function xf(obj: unknown, name: string): unknown {
   const rec = obj as Record<string, unknown>;
   const v = rec?.[name];
   return typeof v === "function" ? (v as () => unknown).call(obj) : v;
+}
+
+function xdrBytes(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  const raw = (value as { value?: unknown })?.value;
+  if (raw instanceof Uint8Array) return raw;
+  const encoded = (value as { toXdr?: () => Uint8Array })?.toXdr?.();
+  return encoded ? new Uint8Array(encoded) : new Uint8Array();
 }
 
 /** A present ledger entry the run resolved, kept for the debug trace rerun. */
@@ -235,6 +262,134 @@ async function liveLedgerHead(
   }
 }
 
+function rpcResolution(result: rpc.Api.LedgerEntryResult): EntryResolution {
+  const entry = new xdr.LedgerEntry({
+    lastModifiedLedgerSeq: result.lastModifiedLedgerSeq ?? 0,
+    data: result.val,
+    ext: xdr.LedgerEntryExt.v0(),
+  });
+  return {
+    status: "present",
+    entry: {
+      entryXdr: new Uint8Array(entry.toXdr()),
+      ...(result.liveUntilLedgerSeq !== undefined
+        ? { liveUntilLedger: result.liveUntilLedgerSeq }
+        : {}),
+    },
+  };
+}
+
+/**
+ * RPC-backed state pinned to one Testnet ledger. If Testnet closes a new ledger
+ * while a run is resolving entries, fail instead of silently mixing snapshots.
+ */
+class PinnedRpcProvider implements StateProvider {
+  constructor(
+    private readonly server: rpc.Server,
+    readonly ledgerSequence: number,
+    private readonly cache: Map<string, EntryResolution>,
+  ) {}
+
+  async resolve(keyXdrs: Uint8Array[]): Promise<EntryResolution[]> {
+    const keys = keyXdrs.map((bytes) => xdr.LedgerKey.fromXdr(bytes));
+    const missing = keys.filter((key) => !this.cache.has(key.toXdr("base64")));
+    if (missing.length > 0) {
+      const response = await this.server.getLedgerEntries(...missing);
+      if (response.latestLedger !== this.ledgerSequence) {
+        throw new Error(
+          `Testnet advanced from ledger ${this.ledgerSequence} to ${response.latestLedger} while resolving state; rerun for a coherent snapshot`,
+        );
+      }
+      const found = new Map(
+        response.entries.map((entry) => [entry.key.toXdr("base64"), entry]),
+      );
+      for (const key of missing) {
+        const canonical = key.toXdr("base64");
+        const result = found.get(canonical);
+        this.cache.set(
+          canonical,
+          result ? rpcResolution(result) : { status: "absent" },
+        );
+      }
+    }
+    return keys.map(
+      (key) => this.cache.get(key.toXdr("base64")) ?? { status: "absent" },
+    );
+  }
+}
+
+interface TestnetSnapshot {
+  ledgerContext: LedgerContext;
+  provider: StateProvider;
+  ledgerSequence: number;
+}
+
+/**
+ * Fetch network configuration first, then pin the freshest ledger head for all
+ * contract/account reads. Configuration changes only at protocol boundaries;
+ * the exact protocol check below prevents crossing one with stale settings.
+ */
+async function testnetSnapshot(): Promise<TestnetSnapshot> {
+  const server = new rpc.Server(TESTNET_RPC_URL);
+  const configKeys = CONFIG_SETTING_IDS.map((name) =>
+    xdr.LedgerKey.configSetting(
+      new xdr.LedgerKeyConfigSetting({
+        configSettingId: xdr.ConfigSettingId[name],
+      }),
+    ),
+  );
+
+  const config = await server.getLedgerEntries(...configKeys);
+  const latest = await server.getLatestLedger();
+  const protocolVersion = Number(latest.protocolVersion);
+  if (protocolVersion !== HOST_PROTOCOL_VERSION) {
+    throw new Error(
+      `this browser host supports protocol ${HOST_PROTOCOL_VERSION}, but Testnet is on protocol ${protocolVersion}; exact protocol parity is required for preflight`,
+    );
+  }
+
+  const cache = new Map<string, EntryResolution>();
+  for (const result of config.entries) {
+    cache.set(result.key.toXdr("base64"), rpcResolution(result));
+  }
+  if (cache.size !== configKeys.length) {
+    throw new Error(
+      `Testnet returned ${cache.size}/${configKeys.length} required network settings`,
+    );
+  }
+
+  const archival = config.entries.find(
+    (entry) =>
+      (entry.val as { type?: string; value?: { type?: string } }).value?.type ===
+      "configSettingStateArchival",
+  );
+  const settings = (
+    archival?.val as { value?: { value?: Record<string, number> } }
+  )?.value?.value;
+  if (!settings) throw new Error("Testnet StateArchival settings were unavailable");
+
+  const networkId = new Uint8Array(
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(NETWORK_PASSPHRASE),
+    ),
+  );
+  return {
+    ledgerSequence: latest.sequence,
+    ledgerContext: {
+      protocolVersion: HOST_PROTOCOL_VERSION,
+      sequenceNumber: latest.sequence,
+      timestamp: BigInt(latest.closeTime),
+      networkId,
+      baseReserve: latest.headerXdr.baseReserve,
+      minTempEntryTtl: settings.minTemporaryTtl!,
+      minPersistentEntryTtl: settings.minPersistentTtl!,
+      maxEntryTtl: settings.maxEntryTtl!,
+    },
+    provider: new PinnedRpcProvider(server, latest.sequence, cache),
+  };
+}
+
 // ---- visual debugger ------------------------------------------------------
 
 /** Everything needed to replay a completed run under the tracing entry point. */
@@ -260,6 +415,8 @@ function stashDebugContext(id: number, ctx: DebugContext): void {
 function invokeFromEnvelope(txXdr: Uint8Array): {
   hostFunctionXdr: Uint8Array;
   sourceAccountXdr: Uint8Array;
+  sourceAccount: string;
+  operationCount: number;
 } {
   const env = xdr.TransactionEnvelope.fromXdr(txXdr as unknown as Buffer);
   const v1 = xf(env, "v1");
@@ -267,8 +424,10 @@ function invokeFromEnvelope(txXdr: Uint8Array): {
   const tx = xf(v1, "tx");
   const ed = xf(xf(tx, "sourceAccount"), "ed25519");
   if (!ed) throw new Error("only ed25519 source accounts are debuggable");
+  const edBytes = xdrBytes(ed);
+  if (edBytes.length !== 32) throw new Error("source account key is not 32 bytes");
   const accountId = xdr.AccountId.publicKeyTypeEd25519(
-    ed as Parameters<typeof xdr.AccountId.publicKeyTypeEd25519>[0],
+    edBytes as Parameters<typeof xdr.AccountId.publicKeyTypeEd25519>[0],
   );
   const ops = (xf(tx, "operations") as unknown[]) ?? [];
   for (const op of ops) {
@@ -279,6 +438,8 @@ function invokeFromEnvelope(txXdr: Uint8Array): {
     return {
       hostFunctionXdr: new Uint8Array(hf.toXdr()),
       sourceAccountXdr: new Uint8Array(accountId.toXdr()),
+      sourceAccount: StrKey.encodeEd25519PublicKey(edBytes as unknown as Buffer),
+      operationCount: ops.length,
     };
   }
   throw new Error("no InvokeHostFunction operation in the envelope");
@@ -516,7 +677,9 @@ async function handleSimulate(msg: SimulateMsg): Promise<void> {
       debuggable = false;
     }
 
-    await postSimResult(msg.id, result, recording, started, debuggable);
+    await postSimResult(msg.id, result, recording, started, debuggable, {
+      requestKind: "fixture",
+    });
   } catch (error) {
     post({
       type: "sim-error",
@@ -532,12 +695,20 @@ async function handleSimulate(msg: SimulateMsg): Promise<void> {
  * Decode a completed run's SSIM envelope into the display-ready `sim-result`
  * message. Shared by the fixture flow and the uploaded-contract flow.
  */
+interface RunMeta {
+  requestKind: "fixture" | "upload" | "contract" | "xdr";
+  ledgerSequence?: number;
+  sourceAccount?: string;
+  operationCount?: number;
+}
+
 async function postSimResult(
   id: number,
   result: SimulateResult,
   recording: RecordingProvider,
   started: number,
   debuggable: boolean,
+  meta: RunMeta,
 ): Promise<void> {
   {
     const decoded = decodeSsim(result.resultXdr);
@@ -555,6 +726,29 @@ async function postSimResult(
       : undefined;
     const contractEvents = decoded.contractEvents.map((e) => contractEventLabel(e));
     const auth = decoded.auth.map((a) => authLabel(a));
+    let stateChanges: StateChangeLabel[] = decoded.modifiedEntries.map((change) =>
+      ledgerChangeLabel(change.before, change.after),
+    );
+    if (meta.requestKind === "contract") {
+      stateChanges = stateChanges.map((change) => {
+        const restoration =
+          change.kind === "ContractCode" ||
+          (change.kind === "ContractData" && change.after === "contract instance");
+        return restoration
+          ? {
+              ...change,
+              change: "restored" as const,
+              category: "maintenance" as const,
+              before: "archived",
+            }
+          : { ...change, category: "contract" as const };
+      });
+    } else if (meta.requestKind === "xdr") {
+      stateChanges = stateChanges.map((change) => ({
+        ...change,
+        category: "transaction" as const,
+      }));
+    }
 
     // Byte map of the SSIM envelope so the "everything is bytes" story is
     // tangible. The hex is only shipped for small envelopes (these fixtures are
@@ -598,6 +792,11 @@ async function postSimResult(
       auth: auth.length > 0 ? auth : undefined,
       diagnosticEventCount: decoded.diagnosticEvents.length,
       modifiedCount: decoded.modifiedEntries.length,
+      stateChanges: stateChanges.length > 0 ? stateChanges : undefined,
+      requestKind: meta.requestKind,
+      ledgerSequence: meta.ledgerSequence,
+      sourceAccount: meta.sourceAccount,
+      operationCount: meta.operationCount,
       regions,
       resultHex,
       debuggable: debuggable && decoded.result.ok,
@@ -735,10 +934,21 @@ async function handleUploadParse(msg: UploadParseMsg): Promise<void> {
   }
 }
 
-/** Convert the user's raw arg strings into ScVals via the spec (or b64 XDR). */
-function buildUploadArgs(msg: SimulateUploadMsg, state: UploadState): unknown[] {
-  if (msg.raw || state.ladder !== "spec") {
-    return msg.args
+interface CallableState {
+  spec?: InstanceType<typeof contract.Spec>;
+  fns: UploadFnInfo[];
+  ladder: "spec" | "names" | "raw";
+}
+
+/** Convert raw arg strings into ScVals via a discovered spec (or b64 XDR). */
+function buildContractArgs(
+  fn: string,
+  args: string[],
+  raw: boolean,
+  state: CallableState,
+): unknown[] {
+  if (raw || state.ladder !== "spec") {
+    return args
       .map((a) => a.trim())
       .filter((a) => a.length > 0)
       .map((a, i) => {
@@ -751,45 +961,47 @@ function buildUploadArgs(msg: SimulateUploadMsg, state: UploadState): unknown[] 
         }
       });
   }
-  const fnInfo = state.fns.find((f) => f.name === msg.fn);
-  if (!fnInfo) throw new Error(`unknown function ${msg.fn}`);
-  if (msg.args.length !== fnInfo.args.length) {
+  const fnInfo = state.fns.find((f) => f.name === fn);
+  if (!fnInfo) throw new Error(`unknown function ${fn}`);
+  if (args.length !== fnInfo.args.length) {
     throw new Error(
-      `${msg.fn} takes ${fnInfo.args.length} argument(s), got ${msg.args.length}`,
+      `${fn} takes ${fnInfo.args.length} argument(s), got ${args.length}`,
     );
   }
   const specFn = state
     .spec!.funcs()
-    .find((f) => String(xf(f, "name")) === msg.fn);
+    .find((f) => String(xf(f, "name")) === fn);
   const inputs = specFn ? ((xf(specFn, "inputs") as unknown[]) ?? []) : [];
   return fnInfo.args.map((arg, i) => {
-    const raw = msg.args[i]!;
+    const rawArg = args[i]!;
     const label = `${arg.name} (${arg.input})`;
     try {
       if (arg.input === "xdr") {
-        return xdr.ScVal.fromXdr(b64ToBytes(raw.trim()) as unknown as Buffer);
+        return xdr.ScVal.fromXdr(
+          b64ToBytes(rawArg.trim()) as unknown as Buffer,
+        );
       }
       let native: unknown;
       switch (arg.input) {
         case "u32":
         case "i32": {
-          const n = Number(raw.trim());
+          const n = Number(rawArg.trim());
           if (!Number.isInteger(n)) throw new Error("not an integer");
           native = n;
           break;
         }
         case "u64":
         case "i64":
-          native = BigInt(raw.trim());
+          native = BigInt(rawArg.trim());
           break;
         case "bool":
-          native = raw.trim() === "true";
+          native = rawArg.trim() === "true";
           break;
         case "address":
-          native = raw.trim();
+          native = rawArg.trim();
           break;
         default:
-          native = raw;
+          native = rawArg;
       }
       const typeDef = inputs[i] !== undefined ? xf(inputs[i], "type") : undefined;
       return state.spec!.nativeToScVal(
@@ -890,7 +1102,7 @@ async function handleSimulateUpload(msg: SimulateUploadMsg): Promise<void> {
     });
     const recording = new RecordingProvider(provider, msg.id);
 
-    const scArgs = buildUploadArgs(msg, state);
+    const scArgs = buildContractArgs(msg.fn, msg.args, msg.raw, state);
     const invokeArgs = new xdr.InvokeContractArgs({
       contractAddress: scaddr,
       functionName: msg.fn.trim(),
@@ -925,7 +1137,265 @@ async function handleSimulateUpload(msg: SimulateUploadMsg): Promise<void> {
       sourceAccountXdr,
       entries: recording.entries,
     });
-    await postSimResult(msg.id, result, recording, started, true);
+    await postSimResult(msg.id, result, recording, started, true, {
+      requestKind: "upload",
+      sourceAccount: DEFAULT_SIMULATION_SOURCE,
+      operationCount: 1,
+    });
+  } catch (error) {
+    post({
+      type: "sim-error",
+      id: msg.id,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    controllers.delete(msg.id);
+  }
+}
+
+// ---- deployed Testnet contract / transaction workbench -------------------
+
+interface DeployedContractState extends CallableState {
+  contractId: string;
+  executable: "wasm" | "stellar-asset";
+  codeHash?: Uint8Array;
+}
+let deployedContract: DeployedContractState | undefined;
+
+function specFunctions(
+  spec: InstanceType<typeof contract.Spec>,
+): UploadFnInfo[] {
+  return spec.funcs().map((fn) => ({
+    name: String(xf(fn, "name")),
+    args: ((xf(fn, "inputs") as unknown[]) ?? []).map((input) => {
+      const typeDef = xf(input, "type");
+      const typeName =
+        (typeDef as { type?: string })?.type ??
+        (typeDef != null ? String(typeDef) : "unknown");
+      return {
+        name: String(xf(input, "name")),
+        type: typeName,
+        input: specTypeToInput(typeName),
+      };
+    }),
+  }));
+}
+
+async function handleLoadContract(msg: LoadContractMsg): Promise<void> {
+  try {
+    let address: Address;
+    try {
+      address = Address.fromString(msg.contractId.trim());
+    } catch {
+      throw new Error("enter a valid C… contract address");
+    }
+    if (address.type !== "contract") throw new Error("enter a C… contract address");
+    const contractId = address.toString();
+    const server = new rpc.Server(TESTNET_RPC_URL);
+    const latest = await server.getLatestLedger();
+    const instanceKey = xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract: address.toScAddress(),
+        key: xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: xdr.ContractDataDurability.fromName("persistent"),
+      }),
+    );
+    const instanceResponse = await server.getLedgerEntries(instanceKey);
+    const instanceEntry = instanceResponse.entries[0];
+    if (!instanceEntry) throw new Error("contract instance not found on Testnet");
+    const instanceData = instanceEntry.val as {
+      type?: string;
+      value?: { val?: { type?: string; value?: { executable?: unknown } } };
+    };
+    const instance = instanceData.value?.val;
+    if (instanceData.type !== "contractData" || instance?.type !== "scvContractInstance") {
+      throw new Error("ledger entry is not a contract instance");
+    }
+    const executable = instance.value?.executable as {
+      type?: string;
+      wasmHash?: unknown;
+    };
+
+    let executableLabel: DeployedContractState["executable"];
+    let codeHash: Uint8Array | undefined;
+    let spec: InstanceType<typeof contract.Spec> | undefined;
+    let fns: UploadFnInfo[] = [];
+    let ladder: DeployedContractState["ladder"] = "raw";
+    let ledgerSequence = instanceResponse.latestLedger;
+
+    if (executable?.type === "contractExecutableWasm") {
+      executableLabel = "wasm";
+      codeHash = xdrBytes(executable.wasmHash);
+      const codeKey = xdr.LedgerKey.contractCode(
+        new xdr.LedgerKeyContractCode({
+          hash: codeHash as unknown as Buffer,
+        }),
+      );
+      const codeResponse = await server.getLedgerEntries(codeKey);
+      const codeEntry = codeResponse.entries[0];
+      if (!codeEntry) throw new Error("contract Wasm entry not found on Testnet");
+      ledgerSequence = codeResponse.latestLedger;
+      const codeData = codeEntry.val as {
+        type?: string;
+        value?: { code?: Uint8Array };
+      };
+      const wasm = codeData.value?.code;
+      if (codeData.type !== "contractCode" || !wasm) {
+        throw new Error("contract code entry did not contain Wasm");
+      }
+      try {
+        spec = contract.Spec.fromWasm(wasm);
+        fns = specFunctions(spec);
+        if (fns.length > 0) ladder = "spec";
+      } catch {
+        spec = undefined;
+      }
+    } else if (executable?.type === "contractExecutableStellarAsset") {
+      executableLabel = "stellar-asset";
+    } else {
+      throw new Error(`unsupported contract executable ${executable?.type ?? "unknown"}`);
+    }
+
+    deployedContract = {
+      contractId,
+      executable: executableLabel,
+      ...(codeHash ? { codeHash } : {}),
+      ...(spec ? { spec } : {}),
+      fns,
+      ladder,
+    };
+    post({
+      type: "contract-info",
+      id: msg.id,
+      ok: true,
+      contractId,
+      executable: executableLabel,
+      ...(codeHash ? { codeHash: bytesToHex(codeHash) } : {}),
+      ledgerSequence,
+      protocolVersion: Number(latest.protocolVersion),
+      ladder: ladder === "spec" ? "spec" : "raw",
+      fns,
+    });
+  } catch (error) {
+    deployedContract = undefined;
+    post({
+      type: "contract-info",
+      id: msg.id,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      contractId: msg.contractId.trim(),
+      ladder: "raw",
+      fns: [],
+    });
+  }
+}
+
+function defaultSourceAccountXdr(): Uint8Array {
+  const raw = StrKey.decodeEd25519PublicKey(DEFAULT_SIMULATION_SOURCE);
+  return new Uint8Array(
+    xdr.AccountId.publicKeyTypeEd25519(raw as unknown as Buffer).toXdr(),
+  );
+}
+
+async function handleSimulateContract(msg: SimulateContractMsg): Promise<void> {
+  const started = performance.now();
+  const controller = new AbortController();
+  controllers.set(msg.id, controller);
+  try {
+    const state = deployedContract;
+    if (!state || state.contractId !== msg.contractId.trim()) {
+      throw new Error("load this deployed contract before simulating it");
+    }
+    if (!msg.fn.trim()) throw new Error("choose a contract function");
+    const snapshot = await testnetSnapshot();
+    const recording = new RecordingProvider(snapshot.provider, msg.id);
+    const args = buildContractArgs(msg.fn, msg.args, msg.raw, state);
+    const hostFunction = xdr.HostFunction.hostFunctionTypeInvokeContract(
+      new xdr.InvokeContractArgs({
+        contractAddress: Address.fromString(state.contractId).toScAddress(),
+        functionName: msg.fn.trim(),
+        args: args as ConstructorParameters<
+          typeof xdr.InvokeContractArgs
+        >[0]["args"],
+      }),
+    );
+    const hostFunctionXdr = new Uint8Array(hostFunction.toXdr());
+    const sourceAccountXdr = defaultSourceAccountXdr();
+    const sim = await SorobanSimulator.create({
+      networkPassphrase: NETWORK_PASSPHRASE,
+      provider: recording,
+    });
+    const result = await sim.simulate(
+      {
+        hostFunctionXdr,
+        sourceAccountXdr,
+        ledgerContext: snapshot.ledgerContext,
+        basePrngSeed: new Uint8Array(32),
+        enableDiagnostics: false,
+        applyRpcAdjustments: true,
+      },
+      { signal: controller.signal },
+    );
+    stashDebugContext(msg.id, {
+      networkPassphrase: NETWORK_PASSPHRASE,
+      ledgerContext: snapshot.ledgerContext,
+      hostFunctionXdr,
+      sourceAccountXdr,
+      entries: recording.entries,
+    });
+    await postSimResult(msg.id, result, recording, started, true, {
+      requestKind: "contract",
+      ledgerSequence: snapshot.ledgerSequence,
+      sourceAccount: DEFAULT_SIMULATION_SOURCE,
+      operationCount: 1,
+    });
+  } catch (error) {
+    post({
+      type: "sim-error",
+      id: msg.id,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    controllers.delete(msg.id);
+  }
+}
+
+async function handleSimulateXdr(msg: SimulateXdrMsg): Promise<void> {
+  const started = performance.now();
+  const controller = new AbortController();
+  controllers.set(msg.id, controller);
+  try {
+    const transactionXdr = b64ToBytes(msg.transactionXdr.trim());
+    const invocation = invokeFromEnvelope(transactionXdr);
+    const snapshot = await testnetSnapshot();
+    const recording = new RecordingProvider(snapshot.provider, msg.id);
+    const sim = await SorobanSimulator.create({
+      networkPassphrase: NETWORK_PASSPHRASE,
+      provider: recording,
+    });
+    const result = await sim.simulateTransaction(
+      {
+        transactionXdr,
+        ledgerContext: snapshot.ledgerContext,
+        basePrngSeed: new Uint8Array(32),
+        enableDiagnostics: false,
+        applyRpcAdjustments: true,
+      },
+      { signal: controller.signal },
+    );
+    stashDebugContext(msg.id, {
+      networkPassphrase: NETWORK_PASSPHRASE,
+      ledgerContext: snapshot.ledgerContext,
+      hostFunctionXdr: invocation.hostFunctionXdr,
+      sourceAccountXdr: invocation.sourceAccountXdr,
+      entries: recording.entries,
+    });
+    await postSimResult(msg.id, result, recording, started, true, {
+      requestKind: "xdr",
+      ledgerSequence: snapshot.ledgerSequence,
+      sourceAccount: invocation.sourceAccount,
+      operationCount: invocation.operationCount,
+    });
   } catch (error) {
     post({
       type: "sim-error",
@@ -970,6 +1440,15 @@ self.onmessage = (event: MessageEvent<MainToWorker>) => {
       return;
     case "simulate-upload":
       void handleSimulateUpload(msg);
+      return;
+    case "load-contract":
+      void handleLoadContract(msg);
+      return;
+    case "simulate-contract":
+      void handleSimulateContract(msg);
+      return;
+    case "simulate-xdr":
+      void handleSimulateXdr(msg);
       return;
     case "run-fixture":
     default:

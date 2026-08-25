@@ -158,55 +158,135 @@
             <span class="eyebrow" id="req-h">Request</span>
           </div>
 
-          <div class="field">
-            <label>Fixture</label>
-            <div class="fixture-list" id="fixtures"></div>
+          <div class="request-tabs" role="tablist" aria-label="Simulation input">
+            <button id="request-contract" role="tab" aria-selected="true" type="button">
+              Contract call
+            </button>
+            <button id="request-xdr" role="tab" aria-selected="false" type="button">
+              Transaction XDR
+            </button>
           </div>
 
-          <div class="field">
-            <label>Or any contract</label>
-            <input
-              type="file"
-              id="upload-file"
-              accept=".wasm,application/wasm"
-              class="sr-input"
-            />
-            <button class="upload-btn" id="upload-btn" type="button">
-              upload .wasm ⇪
-            </button>
-            <div
-              class="upload-card"
-              id="upload-card"
-              role="button"
-              tabindex="0"
-              aria-pressed="false"
-              hidden
-            >
-              <div class="up-top">
-                <span class="up-name" id="up-name"></span>
-                <span class="up-size" id="up-size"></span>
-              </div>
-              <div class="up-cid" id="up-cid"></div>
-              <div class="up-ladder" id="up-ladder" title="Labeling ladder: how much the UI can decode about this contract">
-                <span class="rung" data-rung="spec" title="contractspecv0 section found — typed function signatures">spec</span>
-                <span class="rung" data-rung="names" title="wasm export names only — args as raw ScVal XDR">names</span>
-                <span class="rung" data-rung="raw" title="no metadata — free-form fn + raw ScVal XDR args">raw</span>
-              </div>
-              <div class="up-fn-row" id="up-fn-row">
-                <label for="up-fn">fn</label>
-                <select id="up-fn" aria-label="Contract function"></select>
-                <input
-                  id="up-fn-free"
-                  type="text"
-                  placeholder="function name"
-                  aria-label="Function name"
-                  hidden
-                />
-              </div>
-              <div class="up-args" id="up-args"></div>
-              <p class="up-err" id="up-err" hidden></p>
+          <div class="contract-request" id="contract-request" role="tabpanel">
+            <div class="guided-call">
+              <span class="guided-label">Guided Testnet example</span>
+              <b>Status Message</b>
+              <span>Read or update one account's on-chain message.</span>
+            </div>
+            <div class="field compact-field">
+              <label for="contract-id">Deployed contract</label>
+              <input
+                id="contract-id"
+                class="text-input contract-id-input"
+                type="text"
+                spellcheck="false"
+                value="CBXVJXHPSYORSAHPX4I6NYPQMDJWK2STQCE6JTIM7FNV4OZSIDJFGNDM"
+                aria-describedby="contract-help"
+              />
+              <p class="field-help" id="contract-help">
+                Any Testnet C-address. RPC loads its instance, Wasm, and spec;
+                execution still happens locally.
+              </p>
+              <button class="load-contract" id="load-contract" type="button">
+                Load contract interface
+              </button>
+            </div>
+            <div class="contract-meta" id="contract-meta" hidden>
+              <span id="contract-executable">—</span>
+              <span id="contract-spec">—</span>
+              <span id="contract-ledger">—</span>
+            </div>
+            <div class="up-fn-row contract-fn-row" id="contract-fn-row" hidden>
+              <label for="contract-fn">fn</label>
+              <select id="contract-fn" aria-label="Deployed contract function"></select>
+              <input
+                id="contract-fn-free"
+                type="text"
+                placeholder="function name"
+                aria-label="Deployed contract function name"
+                hidden
+              />
+            </div>
+            <div class="up-args" id="contract-args"></div>
+            <p class="up-err" id="contract-err" hidden></p>
+            <p class="simulation-source">
+              Simulation source <code>GALD…OJIX</code> · no key is stored or used
+              to sign.
+            </p>
+          </div>
+
+          <div class="xdr-request" id="xdr-request" role="tabpanel" hidden>
+            <div class="field compact-field">
+              <label for="transaction-xdr">Unsigned transaction envelope</label>
+              <textarea
+                id="transaction-xdr"
+                class="xdr-input"
+                rows="10"
+                spellcheck="false"
+                placeholder="Paste base64 TransactionEnvelope XDR"
+              ></textarea>
+              <p class="field-help">
+                The source account and InvokeHostFunction operation come from the
+                envelope. RPC supplies state only; nothing is submitted.
+              </p>
+              <p class="up-err" id="xdr-err" hidden></p>
             </div>
           </div>
+
+          <details class="advanced-inputs" id="advanced-inputs">
+            <summary>Examples &amp; local Wasm</summary>
+            <div class="advanced-body">
+              <div class="field">
+                <label>Saved examples</label>
+                <div class="fixture-list" id="fixtures"></div>
+              </div>
+
+              <div class="field">
+                <label>Local contract Wasm</label>
+                <input
+                  type="file"
+                  id="upload-file"
+                  accept=".wasm,application/wasm"
+                  class="sr-input"
+                />
+                <button class="upload-btn" id="upload-btn" type="button">
+                  upload .wasm ⇪
+                </button>
+                <div
+                  class="upload-card"
+                  id="upload-card"
+                  role="button"
+                  tabindex="0"
+                  aria-pressed="false"
+                  hidden
+                >
+                  <div class="up-top">
+                    <span class="up-name" id="up-name"></span>
+                    <span class="up-size" id="up-size"></span>
+                  </div>
+                  <div class="up-cid" id="up-cid"></div>
+                  <div class="up-ladder" id="up-ladder" title="Labeling ladder: how much the UI can decode about this contract">
+                    <span class="rung" data-rung="spec" title="contractspecv0 section found — typed function signatures">spec</span>
+                    <span class="rung" data-rung="names" title="wasm export names only — args as raw ScVal XDR">names</span>
+                    <span class="rung" data-rung="raw" title="no metadata — free-form fn + raw ScVal XDR args">raw</span>
+                  </div>
+                  <div class="up-fn-row" id="up-fn-row">
+                    <label for="up-fn">fn</label>
+                    <select id="up-fn" aria-label="Contract function"></select>
+                    <input
+                      id="up-fn-free"
+                      type="text"
+                      placeholder="function name"
+                      aria-label="Function name"
+                      hidden
+                    />
+                  </div>
+                  <div class="up-args" id="up-args"></div>
+                  <p class="up-err" id="up-err" hidden></p>
+                </div>
+              </div>
+            </div>
+          </details>
 
           <p class="req-note" id="req-note"></p>
 
@@ -286,7 +366,11 @@
 
       <!-- RESULT -->
       <section class="result" id="result-panel" hidden aria-live="polite">
-        <span class="eyebrow">Result</span>
+        <span class="eyebrow">Outcome</span>
+        <div class="result-context" id="result-context" hidden>
+          <span id="r-network">—</span>
+          <span id="r-ledger">—</span>
+        </div>
         <div class="rv">
           <span class="k">value</span>
           <span class="v big" id="r-value">—</span>
@@ -299,7 +383,7 @@
           <span class="k">sha-256</span>
           <span class="v sha" id="r-sha">—</span>
         </div>
-        <span class="badge hidden" id="r-badge">matches CI golden 1082a3e4</span>
+        <span class="badge hidden" id="r-badge">matches CI golden 3b678efa</span>
         <span class="errmsg" id="r-err" hidden></span>
         <button class="debug-btn" id="debug-run" type="button" hidden>
           Open execution trace
@@ -400,6 +484,31 @@
               <div class="ea-list" id="auth-list">
                 <p class="ea-empty">no auth recorded</p>
               </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="impact-grid">
+          <section class="panel state-impact" aria-labelledby="impact-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="impact-h">State impact</span>
+              <span class="sub">contract storage writes</span>
+            </div>
+            <div class="impact-list" id="impact-list">
+              <p class="fp-empty">no ledger writes</p>
+            </div>
+          </section>
+
+          <section class="panel submission" aria-labelledby="submission-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="submission-h">Submission requirements</span>
+              <span class="sub">preflight only</span>
+            </div>
+            <div class="submission-list">
+              <div><span>status</span><b id="submit-status">not submitted</b></div>
+              <div><span>source</span><b id="submit-source">—</b></div>
+              <div><span>authorization</span><b id="submit-auth">—</b></div>
+              <div><span>resource fee</span><b id="submit-fee">—</b></div>
             </div>
           </section>
         </div>

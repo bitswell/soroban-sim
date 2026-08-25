@@ -5,6 +5,7 @@ import {
   LIVE_FIXTURE_ID,
 } from "./fixtures.js";
 import type {
+  ContractInfoMsg,
   DebugResultMsg,
   DemoMode,
   RoundMsg,
@@ -15,7 +16,9 @@ import type {
 
 /** The committed add_i32 golden the CI gate and native runner also produce. */
 const GOLDEN_LEN = 388;
-const GOLDEN_SHA = "1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f";
+const GOLDEN_SHA = "3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca";
+const DEFAULT_SIMULATION_SOURCE =
+  "GALD63KYDPYZLJLY2VD722RI6HAW3RIKU5AROSPAXTL5JRDJB5NGOJIX";
 
 // ---- element handles -------------------------------------------------------
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -33,6 +36,24 @@ const runBtn = $<HTMLButtonElement>("run");
 const modeOffline = $<HTMLButtonElement>("mode-offline");
 const modeLive = $<HTMLButtonElement>("mode-live");
 const themeBtn = $<HTMLButtonElement>("theme");
+const requestContract = $<HTMLButtonElement>("request-contract");
+const requestXdr = $<HTMLButtonElement>("request-xdr");
+const contractRequest = $("contract-request");
+const xdrRequest = $("xdr-request");
+const advancedInputs = $<HTMLDetailsElement>("advanced-inputs");
+const contractIdInput = $<HTMLInputElement>("contract-id");
+const contractLoadBtn = $<HTMLButtonElement>("load-contract");
+const contractMeta = $("contract-meta");
+const contractExecutable = $("contract-executable");
+const contractSpec = $("contract-spec");
+const contractLedger = $("contract-ledger");
+const contractFnRow = $("contract-fn-row");
+const contractFn = $<HTMLSelectElement>("contract-fn");
+const contractFnFree = $<HTMLInputElement>("contract-fn-free");
+const contractArgs = $("contract-args");
+const contractErr = $("contract-err");
+const transactionXdr = $<HTMLTextAreaElement>("transaction-xdr");
+const xdrErr = $("xdr-err");
 
 const timeline = $("timeline");
 const timelineScroll = $("timeline-scroll");
@@ -56,6 +77,9 @@ const rSha = $("r-sha");
 const rBadge = $("r-badge");
 const rErr = $("r-err");
 const resultNote = $("result-note");
+const resultContext = $("result-context");
+const rNetwork = $("r-network");
+const rLedger = $("r-ledger");
 
 const golden = $("golden");
 const goldenText = $("golden-text");
@@ -124,8 +148,13 @@ const authCount = $("auth-count");
 const bmLegend = $("bm-legend");
 const bmHex = $("bm-hex");
 const bmNote = $("bm-note");
+const impactList = $("impact-list");
+const submitStatus = $("submit-status");
+const submitSource = $("submit-source");
+const submitAuth = $("submit-auth");
+const submitFee = $("submit-fee");
 
-/** Per-transaction host budget caps (soroban-env-host, protocol 28). */
+/** Per-transaction host budget caps (soroban-env-host, protocol 27). */
 const CPU_CAP = 100_000_000;
 const MEM_CAP = 40 * 1024 * 1024;
 
@@ -168,6 +197,10 @@ let absentCount = 0;
 let engineConfigCount = 0;
 let engineConfigLabels = new Set<string>();
 let executionEntryLabels = new Set<string>();
+type RequestKind = "contract" | "xdr" | "fixture" | "upload";
+let requestKind: RequestKind = "contract";
+let contractInfo: ContractInfoMsg | undefined;
+let contractLoadId = 0;
 
 // upload-any-contract state
 let uploadInfo: UploadInfoMsg | undefined;
@@ -208,7 +241,8 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
       mWorker.firstChild!.textContent = workerStartupMs.toFixed(0);
       if (mayRunGolden) {
         workerReady = true;
-        runBtn.disabled = false;
+        contractLoadBtn.disabled = false;
+        syncRunAvailability();
         worker.postMessage({ type: "run-fixture" });
       }
       return;
@@ -242,6 +276,11 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
     case "upload-info": {
       if (msg.id !== uploadParseId) return;
       onUploadInfo(msg);
+      return;
+    }
+    case "contract-info": {
+      if (msg.id !== contractLoadId) return;
+      onContractInfo(msg);
       return;
     }
     case "debug-result": {
@@ -285,11 +324,12 @@ function renderFixtures(): void {
     const btn = document.createElement("button");
     btn.className = "fixture";
     btn.type = "button";
-    const disabled = mode === "live" && !f.liveCapable;
+    const disabled =
+      requestKind === "fixture" && mode === "live" && !f.liveCapable;
     btn.disabled = disabled;
     btn.setAttribute(
       "aria-pressed",
-      String(!uploadSelected && f.id === selectedId),
+      String(requestKind === "fixture" && f.id === selectedId),
     );
     const tag = f.liveCapable
       ? `<span class="fx-tag">live</span>`
@@ -297,34 +337,86 @@ function renderFixtures(): void {
     btn.innerHTML = `${tag}<div>${f.label}</div><div class="fx-call">${f.call}</div>`;
     btn.addEventListener("click", () => {
       if (btn.disabled || running) return;
-      const changed = uploadSelected || selectedId !== f.id;
       selectedId = f.id;
       uploadSelected = false;
       uploadCard.setAttribute("aria-pressed", "false");
-      renderFixtures();
-      renderReqNote();
-      if (changed) invalidateRunUI();
+      activateRequest("fixture");
     });
     fixturesEl.appendChild(btn);
   }
 }
 
 function renderReqNote(): void {
-  reqNote.textContent = uploadSelected
-    ? "Uploaded contract — runs offline: your code + a fresh contract instance seeded over the committed config snapshot."
-    : fixtureById(selectedId).note;
+  switch (requestKind) {
+    case "contract":
+      reqNote.textContent = contractInfo?.ok
+        ? "Testnet RPC supplies a pinned ledger snapshot. The loaded contract executes inside this browser."
+        : "Load the deployed interface, choose a function, then simulate locally against pinned Testnet state.";
+      return;
+    case "xdr":
+      reqNote.textContent =
+        "Paste an unsigned Testnet envelope. Its InvokeHostFunction operation executes locally; RPC only resolves ledger entries.";
+      return;
+    case "upload":
+      reqNote.textContent =
+        "Uploaded contract — runs offline with a fresh instance over the committed network snapshot.";
+      return;
+    case "fixture":
+      reqNote.textContent = fixtureById(selectedId).note;
+  }
 }
 
-// ---- mode ------------------------------------------------------------------
+function syncModeUi(): void {
+  const workbench = requestKind === "contract" || requestKind === "xdr";
+  if (workbench) mode = "live";
+  modeOffline.disabled = workbench;
+  modeLive.disabled = workbench;
+  modeOffline.setAttribute("aria-pressed", String(mode === "offline"));
+  modeLive.setAttribute("aria-pressed", String(mode === "live"));
+  cacheRow.classList.toggle(
+    "hidden",
+    requestKind !== "fixture" || mode !== "live",
+  );
+}
+
+function activateRequest(next: RequestKind): void {
+  if (running) return;
+  requestKind = next;
+  uploadSelected = next === "upload";
+  uploadCard.setAttribute("aria-pressed", String(next === "upload"));
+  contractRequest.hidden = next !== "contract";
+  xdrRequest.hidden = next !== "xdr";
+  requestContract.setAttribute("aria-selected", String(next === "contract"));
+  requestXdr.setAttribute("aria-selected", String(next === "xdr"));
+  if (next === "fixture" || next === "upload") {
+    mode = "offline";
+    advancedInputs.open = true;
+  }
+  syncModeUi();
+  renderFixtures();
+  renderReqNote();
+  invalidateRunUI();
+  syncRunAvailability();
+}
+
+requestContract.addEventListener("click", () => activateRequest("contract"));
+requestXdr.addEventListener("click", () => activateRequest("xdr"));
+
+// ---- state source -----------------------------------------------------------
 function setMode(next: DemoMode): void {
-  if (running || next === mode) return;
+  if (
+    running ||
+    next === mode ||
+    requestKind === "contract" ||
+    requestKind === "xdr"
+  ) {
+    return;
+  }
   mode = next;
-  modeOffline.setAttribute("aria-pressed", String(next === "offline"));
-  modeLive.setAttribute("aria-pressed", String(next === "live"));
-  cacheRow.classList.toggle("hidden", next !== "live");
   if (next === "live" && !fixtureById(selectedId).liveCapable) {
     selectedId = LIVE_FIXTURE_ID;
   }
+  syncModeUi();
   renderFixtures();
   renderReqNote();
   invalidateRunUI();
@@ -352,10 +444,16 @@ function resetRunUI(): void {
   setMetricNum(mElapsed, "—");
   resultPanel.hidden = true;
   resultNote.hidden = true;
+  resultContext.hidden = true;
   rBadge.classList.add("hidden");
   rErr.hidden = true;
   resultPanel.classList.remove("error");
   wasmState.hidden = true;
+  impactList.innerHTML = `<p class="fp-empty">no ledger writes</p>`;
+  submitStatus.textContent = "not submitted";
+  submitSource.textContent = "—";
+  submitAuth.textContent = "—";
+  submitFee.textContent = "—";
   // debugger resets with every new run
   debugRunBtn.hidden = true;
   debugRunBtn.disabled = false;
@@ -376,6 +474,25 @@ function invalidateRunUI(): void {
   snapEmpty.hidden = false;
 }
 
+function syncRunAvailability(): void {
+  let readyForRequest = false;
+  switch (requestKind) {
+    case "contract":
+      readyForRequest = Boolean(contractInfo?.ok);
+      break;
+    case "xdr":
+      readyForRequest = transactionXdr.value.trim().length > 0;
+      break;
+    case "upload":
+      readyForRequest = Boolean(uploadInfo?.ok);
+      break;
+    case "fixture":
+      readyForRequest = true;
+      break;
+  }
+  runBtn.disabled = !running && (!workerReady || !readyForRequest);
+}
+
 function setMetricNum(el: HTMLElement, value: string): void {
   // metric spans keep a trailing unit <span>; only replace the leading text node
   if (el.firstChild && el.firstChild.nodeType === Node.TEXT_NODE) {
@@ -385,16 +502,50 @@ function setMetricNum(el: HTMLElement, value: string): void {
   }
 }
 
+function beginRun(): void {
+  running = true;
+  runId += 1;
+  resetRunUI();
+  runBtn.disabled = false;
+  runBtn.textContent = "Cancel";
+  runBtn.dataset.running = "true";
+}
+
 function startRun(): void {
-  if (!workerReady || running) return;
-  if (uploadSelected) {
+  if (!workerReady || running || runBtn.disabled) return;
+  if (requestKind === "contract") {
+    const invocation = gatherContractInvocation();
+    if (!invocation) return;
+    beginRun();
+    worker.postMessage({
+      type: "simulate-contract",
+      id: runId,
+      contractId: invocation.contractId,
+      fn: invocation.fn,
+      args: invocation.args,
+      raw: invocation.raw,
+    });
+    return;
+  }
+  if (requestKind === "xdr") {
+    const envelope = transactionXdr.value.trim();
+    if (!envelope) {
+      xdrErr.hidden = false;
+      xdrErr.textContent = "paste a base64 transaction envelope";
+      return;
+    }
+    beginRun();
+    worker.postMessage({
+      type: "simulate-xdr",
+      id: runId,
+      transactionXdr: envelope,
+    });
+    return;
+  }
+  if (requestKind === "upload") {
     const invocation = gatherUploadInvocation();
     if (!invocation) return; // validation error already shown inline
-    running = true;
-    runId += 1;
-    resetRunUI();
-    runBtn.textContent = "Cancel";
-    runBtn.dataset.running = "true";
+    beginRun();
     worker.postMessage({
       type: "simulate-upload",
       id: runId,
@@ -404,11 +555,7 @@ function startRun(): void {
     });
     return;
   }
-  running = true;
-  runId += 1;
-  resetRunUI();
-  runBtn.textContent = "Cancel";
-  runBtn.dataset.running = "true";
+  beginRun();
   worker.postMessage({
     type: "simulate",
     id: runId,
@@ -430,7 +577,7 @@ function cancelRun(): void {
     // mark ready without re-running golden
     const readyPoll = setInterval(() => {
       workerReady = true;
-      runBtn.disabled = false;
+      syncRunAvailability();
       clearInterval(readyPoll);
     }, 50);
     endRun();
@@ -442,6 +589,7 @@ function endRun(): void {
   running = false;
   runBtn.textContent = "Run simulation ▸";
   runBtn.dataset.running = "false";
+  syncRunAvailability();
   if (hardStopTimer) {
     clearTimeout(hardStopTimer);
     hardStopTimer = undefined;
@@ -565,6 +713,21 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   resultNote.hidden = false;
   rErr.hidden = true;
   resultPanel.classList.remove("error");
+  resultContext.hidden = false;
+  const liveWorkbench =
+    msg.requestKind === "contract" || msg.requestKind === "xdr";
+  rNetwork.textContent = msg.requestKind === "xdr"
+    ? "Transaction XDR · Testnet state · local execution"
+    : msg.requestKind === "contract"
+      ? "Contract call · Testnet state · local execution"
+    : msg.requestKind === "upload"
+      ? "local Wasm · saved snapshot"
+      : mode === "live"
+        ? "Testnet state · local execution"
+        : "saved snapshot · local execution";
+  rLedger.textContent = msg.ledgerSequence
+    ? `ledger ${fmtInt(msg.ledgerSequence)}`
+    : "deterministic snapshot";
 
   if (msg.ok) {
     rValue.textContent = `${msg.scValType} · ${msg.scValDisplay}`;
@@ -587,6 +750,10 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
     debuggableRunId = msg.id;
     debugRunBtn.hidden = false;
   }
+
+  resultNote.textContent = liveWorkbench
+    ? `RPC supplied ledger entries at Testnet ledger ${fmtInt(msg.ledgerSequence ?? 0)}. The transaction executed in this Worker and was not submitted.`
+    : "Deterministic SSIM bytes — the same rerun loop yields the same result in this Worker, the native runner, and CI.";
 
   renderWasmState(msg);
 }
@@ -649,8 +816,88 @@ function renderWasmState(msg: Extract<WorkerToMain, { type: "sim-result" }>): vo
   renderEvents(msg.contractEvents);
   renderAuth(msg.auth);
 
+  // --- transaction-wide state impact + what submission would still require ---
+  renderStateImpact(msg.stateChanges);
+  renderSubmissionRequirements(msg);
+
   // --- ssim byte map ---
   renderByteMap(msg.regions, msg.resultHex, msg.resultLen, msg.diagnosticEventCount, msg.modifiedCount);
+}
+
+function renderStateImpact(
+  changes: Extract<WorkerToMain, { type: "sim-result" }>["stateChanges"],
+): void {
+  impactList.replaceChildren();
+  const visible = (changes ?? []).filter(
+    (change) => change.kind !== "ConfigSetting",
+  );
+  const contractChanges = visible.filter((change) => change.category !== "maintenance");
+  const maintenance = visible.filter((change) => change.category === "maintenance");
+  if (contractChanges.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "fp-empty";
+    empty.textContent = "No contract storage writes. This invocation is read-only.";
+    impactList.appendChild(empty);
+  }
+  for (const change of contractChanges) {
+    const item = document.createElement("div");
+    item.className = `impact-item ${change.change}`;
+    const head = document.createElement("div");
+    head.className = "impact-head";
+    const kind = document.createElement("b");
+    kind.textContent = change.kind;
+    const badge = document.createElement("span");
+    badge.textContent = change.change;
+    head.append(kind, badge);
+    const key = document.createElement("div");
+    key.className = "impact-key";
+    key.textContent = change.key;
+    const values = document.createElement("div");
+    values.className = "impact-values";
+    const before = document.createElement("code");
+    before.textContent = change.before ?? "∅";
+    const arrow = document.createElement("span");
+    arrow.textContent = "→";
+    const after = document.createElement("code");
+    after.textContent = change.after ?? "∅";
+    values.append(before, arrow, after);
+    item.append(head, key, values);
+    impactList.appendChild(item);
+  }
+  if (maintenance.length > 0) {
+    const note = document.createElement("div");
+    note.className = "impact-maintenance";
+    const label = document.createElement("b");
+    label.textContent = "Host-managed restoration";
+    const detail = document.createElement("span");
+    detail.textContent = `${maintenance.length} archived ${maintenance.length === 1 ? "entry" : "entries"} would be restored for this call (${maintenance.map((change) => change.kind).join(", ")}).`;
+    note.append(label, detail);
+    impactList.appendChild(note);
+  }
+}
+
+function renderSubmissionRequirements(
+  msg: Extract<WorkerToMain, { type: "sim-result" }>,
+): void {
+  const restoreCount = (msg.stateChanges ?? []).filter(
+    (change) => change.category === "maintenance",
+  ).length;
+  submitStatus.textContent = msg.ok
+    ? restoreCount > 0
+      ? `preflight complete · restores ${restoreCount} archived ${restoreCount === 1 ? "entry" : "entries"} · not submitted`
+      : "preflight complete · not submitted"
+    : "fix simulation error before submission";
+  submitSource.textContent = msg.sourceAccount
+    ? `${msg.sourceAccount.slice(0, 6)}…${msg.sourceAccount.slice(-6)}`
+    : "source comes from final envelope";
+  const auth = msg.auth ?? [];
+  submitAuth.textContent =
+    auth.length === 0
+      ? "no contract auth recorded"
+      : `${auth.length} contract auth ${auth.length === 1 ? "entry" : "entries"} to authorize`;
+  submitFee.textContent = msg.resources
+    ? `${fmtInt(Number(msg.resources.resourceFee))} stroops minimum resource fee`
+    : "resource fee unavailable";
 }
 
 function renderFootprint(
@@ -846,16 +1093,221 @@ function failRunText(message: string): void {
   resultPanel.hidden = false;
   resultNote.hidden = true;
   resultPanel.classList.add("error");
-  rValue.textContent = mode === "live" ? "testnet unreachable" : "simulation failed";
+  const rpcFailure = /rpc|testnet|fetch|network|ledger advanced/i.test(message);
+  rValue.textContent = rpcFailure ? "testnet state unavailable" : "simulation failed";
   rLen.textContent = "—";
   rSha.textContent = "—";
   rBadge.classList.add("hidden");
   rErr.hidden = false;
-  rErr.textContent =
-    mode === "live"
-      ? `${message} — retry, or switch to Saved snapshot for a deterministic run.`
-      : message;
+  rErr.textContent = rpcFailure ? `${message} — retry to pin a fresh ledger.` : message;
 }
+
+// ---- deployed Testnet contract --------------------------------------------
+function renderContractArgs(): void {
+  contractArgs.replaceChildren();
+  contractErr.hidden = true;
+  const info = contractInfo;
+  if (!info?.ok) return;
+  if (info.ladder === "spec") {
+    const fnInfo =
+      info.fns.find((fn) => fn.name === contractFn.value) ?? info.fns[0];
+    if (!fnInfo) return;
+    for (const arg of fnInfo.args) {
+      const field = document.createElement("div");
+      field.className = "up-arg";
+      const label = document.createElement("label");
+      const b = document.createElement("b");
+      b.textContent = arg.name;
+      label.append(b, document.createTextNode(` ${arg.input}`));
+      field.appendChild(label);
+      let input: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+      if (arg.input === "bool") {
+        const select = document.createElement("select");
+        for (const value of ["true", "false"]) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value;
+          select.appendChild(option);
+        }
+        input = select;
+      } else if (arg.input === "xdr") {
+        const textarea = document.createElement("textarea");
+        textarea.rows = 2;
+        textarea.placeholder = ARG_PLACEHOLDER.xdr!;
+        input = textarea;
+      } else {
+        const text = document.createElement("input");
+        text.type = "text";
+        text.placeholder = ARG_PLACEHOLDER[arg.input] ?? "";
+        if (arg.name === "author" && arg.input === "address") {
+          text.value = DEFAULT_SIMULATION_SOURCE;
+        } else if (arg.name === "message" && arg.input === "string") {
+          text.value = "Simulated locally with soroban-sim";
+        }
+        input = text;
+      }
+      input.dataset.arg = arg.name;
+      field.appendChild(input);
+      contractArgs.appendChild(field);
+    }
+    return;
+  }
+
+  const field = document.createElement("div");
+  field.className = "up-arg";
+  const label = document.createElement("label");
+  const b = document.createElement("b");
+  b.textContent = "args";
+  label.append(
+    b,
+    document.createTextNode(" base64 ScVal XDR, one per line (optional)"),
+  );
+  const textarea = document.createElement("textarea");
+  textarea.rows = 4;
+  textarea.placeholder = "AAAAAwAAAAc=";
+  textarea.dataset.arg = "raw-args";
+  field.append(label, textarea);
+  contractArgs.appendChild(field);
+}
+
+function onContractInfo(msg: ContractInfoMsg): void {
+  contractLoadBtn.disabled = false;
+  contractLoadBtn.textContent = "Reload contract interface";
+  contractErr.hidden = true;
+  contractErr.textContent = "";
+  if (!msg.ok) {
+    contractInfo = undefined;
+    contractMeta.hidden = true;
+    contractFnRow.hidden = true;
+    contractArgs.replaceChildren();
+    contractErr.hidden = false;
+    contractErr.textContent = msg.error ?? "could not load this Testnet contract";
+    renderReqNote();
+    syncRunAvailability();
+    return;
+  }
+
+  contractInfo = msg;
+  contractMeta.hidden = false;
+  contractExecutable.textContent =
+    msg.executable === "wasm" ? "Wasm contract" : "Stellar Asset Contract";
+  contractSpec.textContent =
+    msg.ladder === "spec" ? `${msg.fns.length} typed functions` : "raw ScVal inputs";
+  contractLedger.textContent = msg.ledgerSequence
+    ? `loaded at ledger ${fmtInt(msg.ledgerSequence)}`
+    : "Testnet";
+  contractFnRow.hidden = false;
+  contractFn.replaceChildren();
+  if (msg.ladder === "spec") {
+    contractFn.hidden = false;
+    contractFnFree.hidden = true;
+    for (const fn of msg.fns) {
+      const option = document.createElement("option");
+      option.value = fn.name;
+      option.textContent = `${fn.name}(${fn.args.map((arg) => arg.name).join(", ")})`;
+      contractFn.appendChild(option);
+    }
+    if (msg.fns.some((fn) => fn.name === "get_message")) {
+      contractFn.value = "get_message";
+    }
+  } else {
+    contractFn.hidden = true;
+    contractFnFree.hidden = false;
+  }
+  renderContractArgs();
+  renderReqNote();
+  invalidateRunUI();
+  syncRunAvailability();
+}
+
+function loadContract(): void {
+  if (!workerReady || running) return;
+  const contractId = contractIdInput.value.trim();
+  if (!contractId) {
+    contractErr.hidden = false;
+    contractErr.textContent = "enter a Testnet C-address";
+    return;
+  }
+  activateRequest("contract");
+  contractInfo = undefined;
+  contractLoadId += 1;
+  contractLoadBtn.disabled = true;
+  contractLoadBtn.textContent = "Loading from Testnet…";
+  contractMeta.hidden = true;
+  contractFnRow.hidden = true;
+  contractArgs.replaceChildren();
+  contractErr.hidden = true;
+  syncRunAvailability();
+  worker.postMessage({
+    type: "load-contract",
+    id: contractLoadId,
+    contractId,
+  });
+}
+
+function gatherContractInvocation():
+  | { contractId: string; fn: string; args: string[]; raw: boolean }
+  | undefined {
+  const info = contractInfo;
+  if (!info?.ok) {
+    contractErr.hidden = false;
+    contractErr.textContent = "load the contract interface first";
+    return undefined;
+  }
+  contractErr.hidden = true;
+  if (info.ladder === "spec") {
+    const fn = contractFn.value;
+    const inputs = contractArgs.querySelectorAll<
+      HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+    >("input, select, textarea");
+    const args: string[] = [];
+    for (const input of inputs) {
+      if (input.value.trim() === "") {
+        contractErr.hidden = false;
+        contractErr.textContent = `argument "${input.dataset.arg}" is required`;
+        return undefined;
+      }
+      args.push(input.value);
+    }
+    return { contractId: info.contractId, fn, args, raw: false };
+  }
+  const fn = contractFnFree.value.trim();
+  if (!fn) {
+    contractErr.hidden = false;
+    contractErr.textContent = "enter a function name";
+    return undefined;
+  }
+  const textarea = contractArgs.querySelector<HTMLTextAreaElement>("textarea");
+  const args = (textarea?.value ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return { contractId: info.contractId, fn, args, raw: true };
+}
+
+contractLoadBtn.addEventListener("click", loadContract);
+contractIdInput.addEventListener("input", () => {
+  contractInfo = undefined;
+  contractMeta.hidden = true;
+  contractFnRow.hidden = true;
+  contractArgs.replaceChildren();
+  contractLoadBtn.textContent = "Load contract interface";
+  contractErr.hidden = true;
+  invalidateRunUI();
+  renderReqNote();
+  syncRunAvailability();
+});
+contractFn.addEventListener("change", () => {
+  renderContractArgs();
+  invalidateRunUI();
+});
+contractFnFree.addEventListener("input", invalidateRunUI);
+contractArgs.addEventListener("input", invalidateRunUI);
+transactionXdr.addEventListener("input", () => {
+  xdrErr.hidden = true;
+  invalidateRunUI();
+  syncRunAvailability();
+});
 
 // ---- upload-any-contract ---------------------------------------------------
 uploadBtn.addEventListener("click", () => uploadFile.click());
@@ -875,12 +1327,9 @@ uploadFile.addEventListener("change", async () => {
 
 function selectUpload(): void {
   if (running || !uploadInfo?.ok) return;
-  const changed = !uploadSelected;
   uploadSelected = true;
   uploadCard.setAttribute("aria-pressed", "true");
-  renderFixtures();
-  renderReqNote();
-  if (changed) invalidateRunUI();
+  activateRequest("upload");
 }
 uploadCard.addEventListener("click", selectUpload);
 uploadCard.addEventListener("keydown", (e) => {
@@ -1331,7 +1780,9 @@ window.addEventListener("keydown", (e) => {
 });
 
 // ---- boot ------------------------------------------------------------------
+contractLoadBtn.disabled = true;
+syncModeUi();
 renderFixtures();
 renderReqNote();
-runBtn.disabled = true;
+syncRunAvailability();
 spawnWorker(true);

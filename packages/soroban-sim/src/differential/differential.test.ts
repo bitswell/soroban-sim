@@ -19,19 +19,12 @@
  *
  * ── Protocol / env-host version note (real findings, not papered over) ──────
  * The two `native-sac-*` fixtures were captured against Stellar testnet at ledger
- * protocol 27, while `soroban-sim-core` links `soroban-env-host` 28.0.2 (protocol
- * 28). The host's replay-safety guard (`check_ledger_protocol_supported`, from
- * `Host::set_ledger_info` during recording setup) rejects *any* ledger protocol
- * != 28 with a bare `Error(Context, InternalError)`, so the harness pins the
- * ledger context to 28 (`HOST_PROTOCOL_VERSION`).
+ * protocol 27, matching the protocol-27 browser host used for live preflight.
  *
- * `local-add-i32` was captured against a LOCAL protocol-28 quickstart node, so
- * protocol matches on both sides — yet a small raw-instruction residual remains.
- * Root cause (grounded via `stellar-core version`): that quickstart core embeds
- * soroban-env-host 28.0.0, whereas we pin 28.0.2 — a patch-level CPU-metering
- * calibration difference. In all cases RESULT / FOOTPRINT / AUTH / EVENT / bytes
- * are byte-equal; only the raw instruction count (and the CPU-fee component that
- * tracks it) diverges, which the `instructions (RpcDefault)` field documents.
+ * `local-add-i32` was captured against a LOCAL protocol-28 quickstart node and
+ * therefore remains a cross-version resource comparison. In all cases RESULT /
+ * FOOTPRINT / AUTH / EVENT / bytes are byte-equal; resource residuals are
+ * reported explicitly rather than force-passed.
  */
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -81,10 +74,9 @@ import {
 import { decodeSsim } from "./decode-ssim.js";
 
 /**
- * Ledger protocol version the linked `soroban-env-host` (28.0.2) will run. See
- * the file header for why the fixtures' captured protocol (27) is overridden.
+ * Ledger protocol version the linked `soroban-env-host` will run.
  */
-const HOST_PROTOCOL_VERSION = 28;
+const HOST_PROTOCOL_VERSION = 27;
 
 interface ParityFixture {
   networkPassphrase: string;

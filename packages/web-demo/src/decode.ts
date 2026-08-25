@@ -120,6 +120,125 @@ function renderNative(v: unknown): string {
   }
 }
 
+export interface LedgerChangeLabel {
+  kind: string;
+  key: string;
+  change: "created" | "updated" | "deleted";
+  before?: string;
+  after?: string;
+}
+
+interface LedgerEntryView {
+  kind: string;
+  key: string;
+  value: string;
+}
+
+function shortAddress(address: string): string {
+  return `${address.slice(0, 6)}…${address.slice(-6)}`;
+}
+
+/** Decode the transaction-relevant identity and value of a full LedgerEntry. */
+function ledgerEntryView(bytes: Uint8Array): LedgerEntryView {
+  try {
+    const entry = xdr.LedgerEntry.fromXdr(bytes as unknown as Buffer);
+    const data = field(entry, "data") as { type?: string; value?: unknown };
+    const kind = data?.type ?? "unknown";
+    const value = data?.value;
+
+    if (kind === "contractData") {
+      const contract = Address.fromScAddress(
+        field(value, "contract") as Parameters<typeof Address.fromScAddress>[0],
+      ).toString();
+      const durability = tagName(field(value, "durability")) || "contract data";
+      const keyScVal = field(value, "key");
+      const valScVal = field(value, "val");
+      const keyLabel = keyScVal
+        ? scValLabel(toXdrBytes(keyScVal)).display
+        : "unknown key";
+      const valueLabel =
+        (valScVal as { type?: string })?.type === "scvContractInstance"
+          ? "contract instance"
+          : valScVal
+            ? scValLabel(toXdrBytes(valScVal)).display
+            : "void";
+      return {
+        kind: "ContractData",
+        key: `${shortAddress(contract)} · ${durability} · ${keyLabel}`,
+        value: valueLabel,
+      };
+    }
+
+    if (kind === "contractCode") {
+      const code = field(value, "code") as Uint8Array | undefined;
+      const hash = toXdrBytes(field(value, "hash"));
+      return {
+        kind: "ContractCode",
+        key: hex(hash).slice(0, 12),
+        value: `${code?.length ?? 0} byte Wasm module`,
+      };
+    }
+
+    if (kind === "account") {
+      const accountId = field(value, "accountId");
+      const raw = toXdrBytes(accountId);
+      const address =
+        raw.length >= 32
+          ? StrKey.encodeEd25519PublicKey(raw.slice(-32) as unknown as Buffer)
+          : "account";
+      return {
+        kind: "Account",
+        key: shortAddress(address),
+        value: `balance ${String(field(value, "balance") ?? "0")} · sequence ${String(
+          field(value, "seqNum") ?? "0",
+        )}`,
+      };
+    }
+
+    if (kind === "ttl") {
+      const keyHash = toXdrBytes(field(value, "keyHash"));
+      return {
+        kind: "Ttl",
+        key: hex(keyHash).slice(0, 12),
+        value: `live until ledger ${String(field(value, "liveUntilLedgerSeq") ?? "—")}`,
+      };
+    }
+
+    return {
+      kind: kind.charAt(0).toUpperCase() + kind.slice(1),
+      key: "ledger entry",
+      value: "changed",
+    };
+  } catch (error) {
+    return {
+      kind: "Unknown",
+      key: "undecodable ledger entry",
+      value: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/** Turn SSIM's optional before/after entry pair into a display-ready change. */
+export function ledgerChangeLabel(
+  before: Uint8Array | undefined,
+  after: Uint8Array | undefined,
+): LedgerChangeLabel {
+  const beforeView = before ? ledgerEntryView(before) : undefined;
+  const afterView = after ? ledgerEntryView(after) : undefined;
+  const view = afterView ?? beforeView ?? {
+    kind: "Unknown",
+    key: "ledger entry",
+    value: "unknown",
+  };
+  return {
+    kind: view.kind,
+    key: view.key,
+    change: beforeView ? (afterView ? "updated" : "deleted") : "created",
+    ...(beforeView ? { before: beforeView.value } : {}),
+    ...(afterView ? { after: afterView.value } : {}),
+  };
+}
+
 // --- footprint / resources (SorobanTransactionData) ------------------------
 
 /**
