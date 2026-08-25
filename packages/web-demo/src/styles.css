@@ -101,6 +101,9 @@
 * {
   box-sizing: border-box;
 }
+[hidden] {
+  display: none !important;
+}
 html,
 body {
   margin: 0;
@@ -135,9 +138,12 @@ body {
   max-width: 1280px;
   margin: 0 auto;
   padding: 20px;
+  display: flex;
+  flex-direction: column;
 }
 
 .topbar {
+  order: 1;
   display: flex;
   align-items: center;
   gap: 20px;
@@ -150,8 +156,9 @@ body {
 .brand {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   margin-right: auto;
+  max-width: 760px;
 }
 .brand .wordmark {
   font-family: var(--display);
@@ -163,6 +170,15 @@ body {
 .brand .wordmark b {
   color: var(--known);
   font-weight: 700;
+}
+.brand h1 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: clamp(18px, 2.2vw, 28px);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-weight: 500;
+  color: var(--ink);
 }
 
 /* segmented mode control */
@@ -226,6 +242,7 @@ body {
 
 /* ---- console grid ------------------------------------------------------ */
 .console {
+  order: 2;
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr) 280px;
   gap: 14px;
@@ -408,7 +425,7 @@ body {
   background: var(--panel-2);
   background-image: linear-gradient(90deg, var(--grid-soft) 1px, transparent 1px);
   background-size: 76px 100%;
-  min-height: 240px;
+  min-height: 200px;
   flex: 1;
   padding: 14px;
   scrollbar-width: thin;
@@ -418,7 +435,7 @@ body {
   align-items: stretch;
   gap: 12px;
   height: 100%;
-  min-height: 212px;
+  min-height: 172px;
 }
 .timeline-empty {
   color: var(--ink-faint);
@@ -520,6 +537,21 @@ body {
   padding-top: 12px;
   border-top: 1px solid var(--grid);
 }
+.engine-state-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--grid);
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+.engine-state-summary b {
+  color: var(--ink-dim);
+  font-weight: 500;
+}
 .metric {
   display: flex;
   flex-direction: column;
@@ -605,6 +637,7 @@ body {
 
 /* ---- result bar -------------------------------------------------------- */
 .result {
+  order: 3;
   border: 1px solid var(--grid);
   background: var(--panel);
   margin-top: 14px;
@@ -671,6 +704,7 @@ body {
   font-size: 13px;
 }
 .result-note {
+  order: 4;
   color: var(--ink-faint);
   font-size: 11px;
   margin-top: 8px;
@@ -679,6 +713,7 @@ body {
 
 /* golden strip (M0 browser run) */
 .golden {
+  order: 8;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -713,6 +748,7 @@ body {
 }
 
 .footer {
+  order: 9;
   margin-top: 16px;
   color: var(--ink-faint);
   font-size: 11px;
@@ -747,11 +783,43 @@ body {
 }
 
 /* ---- component-model explainer ---------------------------------------- */
-.explainer {
+.explainer-details {
+  order: 7;
+  margin-top: 14px;
   border: 1px solid var(--grid);
   background: var(--panel);
+}
+.explainer-details > summary,
+.raw-details > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 12px 16px;
+  color: var(--ink-dim);
+  font-family: var(--display);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.explainer-details > summary::-webkit-details-marker,
+.raw-details > summary::-webkit-details-marker {
+  display: none;
+}
+.explainer-details > summary::before,
+.raw-details > summary::before {
+  content: "+";
+  display: inline-block;
+  width: 18px;
+  color: var(--known);
+}
+.explainer-details[open] > summary::before,
+.raw-details[open] > summary::before {
+  content: "−";
+}
+.explainer {
+  border-top: 1px solid var(--grid);
+  background: transparent;
   padding: 16px;
-  margin-top: 14px;
 }
 .cm-grid {
   display: grid;
@@ -913,6 +981,7 @@ body {
 
 /* ---- running-wasm state ------------------------------------------------ */
 .wasmstate {
+  order: 5;
   margin-top: 14px;
 }
 .ws-head {
@@ -1162,7 +1231,13 @@ body {
 
 /* ssim byte map */
 .bytemap {
+  margin: 0;
+  border-width: 1px 0 0;
+}
+.raw-details {
   margin-top: 14px;
+  border: 1px solid var(--grid);
+  background: var(--panel);
 }
 .bm-legend {
   display: flex;
@@ -1407,6 +1482,7 @@ body {
 }
 
 .debugger {
+  order: 6;
   margin-top: 14px;
 }
 .dbg-reason {
@@ -1433,6 +1509,17 @@ body {
   letter-spacing: 0.06em;
   color: var(--ink-dim);
   margin-bottom: 10px;
+}
+.trace-raw {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.trace-raw input {
+  accent-color: var(--verify);
 }
 .dtick-chip {
   display: inline-block;

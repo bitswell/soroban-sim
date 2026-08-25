@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>soroban-sim · instrument</title>
+    <title>soroban-sim · local contract simulation</title>
     <meta
       name="description"
-      content="In-browser Soroban transaction simulator — watch the needs-state rerun loop resolve ledger state round by round, offline or live against testnet."
+      content="Simulate a Stellar smart-contract transaction locally in your browser before submitting it, using a saved snapshot or current Testnet ledger state."
     />
   </head>
   <body>
@@ -19,12 +19,13 @@
       <header class="topbar">
         <div class="brand">
           <div class="wordmark">soroban<b>-</b>sim</div>
-          <div class="eyebrow">transaction simulator · in-browser wasm</div>
+          <h1>Simulate a Stellar smart-contract transaction locally before submitting it.</h1>
+          <div class="eyebrow">local execution · saved or testnet state</div>
         </div>
 
-        <div class="segmented" role="group" aria-label="Simulation mode">
-          <button id="mode-offline" aria-pressed="true">Offline</button>
-          <button id="mode-live" aria-pressed="false">Live · testnet</button>
+        <div class="segmented" role="group" aria-label="Ledger state source">
+          <button id="mode-offline" aria-pressed="true">Saved snapshot</button>
+          <button id="mode-live" aria-pressed="false">Testnet state</button>
         </div>
 
         <button
@@ -37,13 +38,16 @@
         </button>
 
         <p class="mode-help">
-          Same rerun loop. <b>Offline</b> seeds a committed snapshot into an
-          in-memory provider; <b>Live</b> fetches ledger state from testnet RPC.
+          Contract execution always stays in this browser. <b>Saved snapshot</b>
+          uses committed ledger entries; <b>Testnet state</b> asks Stellar RPC
+          only for missing entries. This preview never submits a transaction.
         </p>
       </header>
 
       <!-- COMPONENT MODEL EXPLAINER -->
-      <section class="explainer" aria-labelledby="cm-h">
+      <details class="explainer-details">
+        <summary>How browser execution works</summary>
+        <section class="explainer" aria-labelledby="cm-h">
         <div class="panel-head">
           <span class="eyebrow" id="cm-h">WebAssembly Component Model</span>
           <span class="sub">why this simulator runs in your browser at all</span>
@@ -144,7 +148,8 @@
             <span class="cm-cnode"><b>Uint8Array</b><i>388 B on the golden fixture</i></span>
           </div>
         </div>
-      </section>
+        </section>
+      </details>
 
       <div class="console">
         <!-- REQUEST -->
@@ -213,11 +218,11 @@
           <button class="run" id="run">Run simulation ▸</button>
         </section>
 
-        <!-- RESOLUTION TIMELINE (hero) -->
+        <!-- CONTRACT-RELEVANT STATE RESOLUTION -->
         <section class="panel timeline-panel" aria-labelledby="tl-h">
           <div class="panel-head">
-            <span class="eyebrow" id="tl-h">Resolution timeline</span>
-            <span class="sub">needs-state → resolve → rerun</span>
+            <span class="eyebrow" id="tl-h">Contract state reads</span>
+            <span class="sub">missing entry → resolve → local rerun</span>
           </div>
 
           <div class="legend">
@@ -229,20 +234,25 @@
           <div class="timeline-scroll" id="timeline-scroll">
             <div class="timeline" id="timeline">
               <p class="timeline-empty" id="timeline-empty">
-                The snapshot starts empty. Run a simulation and each column is one
-                component run: the wasm returns needs-state, the provider resolves
-                the missing ledger key, the loop reruns — until it completes.
+                Run a simulation to see only the ledger entries requested while
+                executing the transaction. Network configuration is loaded as
+                simulator setup and kept out of this view.
               </p>
             </div>
           </div>
 
+          <div class="engine-state-summary" id="engine-state-summary" hidden>
+            <span><b id="engine-config-count">0</b> network settings loaded for the local host</span>
+            <span>hidden from contract state</span>
+          </div>
+
           <div class="metrics">
             <div class="metric">
-              <span class="m-label">rounds</span>
+              <span class="m-label">local passes</span>
               <span class="m-val" id="m-rounds">—</span>
             </div>
             <div class="metric">
-              <span class="m-label">keys requested</span>
+              <span class="m-label">execution entries</span>
               <span class="m-val" id="m-keys">—</span>
             </div>
             <div class="metric">
@@ -256,10 +266,10 @@
           </div>
         </section>
 
-        <!-- SUPPLIED SNAPSHOT -->
+        <!-- RESOLVED EXECUTION STATE -->
         <section class="panel" aria-labelledby="snap-h">
           <div class="panel-head">
-            <span class="eyebrow" id="snap-h">Supplied snapshot</span>
+            <span class="eyebrow" id="snap-h">Resolved execution state</span>
           </div>
           <div class="snap-counter">
             <span><b id="snap-present">0</b> present</span>
@@ -267,7 +277,8 @@
           </div>
           <div class="snap-list" id="snap-list">
             <p class="snap-empty" id="snap-empty">
-              Entries fold in here as the loop resolves them.
+              Contract code, data, accounts, and TTL entries appear here as the
+              local execution requests them.
             </p>
           </div>
         </section>
@@ -291,7 +302,7 @@
         <span class="badge hidden" id="r-badge">matches CI golden 1082a3e4</span>
         <span class="errmsg" id="r-err" hidden></span>
         <button class="debug-btn" id="debug-run" type="button" hidden>
-          ◉ debug this run
+          Open execution trace
         </button>
       </section>
       <p class="result-note" id="result-note" hidden>
@@ -393,27 +404,30 @@
           </section>
         </div>
 
-        <!-- SSIM BYTE MAP -->
-        <section class="panel bytemap" aria-labelledby="bm-h">
-          <div class="panel-head">
-            <span class="eyebrow" id="bm-h">SSIM byte map</span>
-            <span class="sub">the deterministic result envelope, region by region</span>
-          </div>
-          <div class="bm-legend" id="bm-legend"></div>
-          <div class="bm-scroll">
-            <div class="bm-hex" id="bm-hex"></div>
-          </div>
-          <div class="bm-note" id="bm-note"></div>
-        </section>
+        <!-- RAW SSIM OUTPUT -->
+        <details class="raw-details">
+          <summary>Inspect raw SSIM output</summary>
+          <section class="panel bytemap" aria-labelledby="bm-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="bm-h">SSIM byte map</span>
+              <span class="sub">the deterministic result envelope, region by region</span>
+            </div>
+            <div class="bm-legend" id="bm-legend"></div>
+            <div class="bm-scroll">
+              <div class="bm-hex" id="bm-hex"></div>
+            </div>
+            <div class="bm-note" id="bm-note"></div>
+          </section>
+        </details>
       </section>
 
-      <!-- VISUAL DEBUGGER (populated by "debug this run") -->
+      <!-- EXECUTION TRACE (populated on demand) -->
       <section class="debugger" id="debugger" hidden aria-live="polite">
         <div class="ws-head">
-          <span class="eyebrow">Visual debugger</span>
+          <span class="eyebrow">Execution trace</span>
           <span class="sub"
-            >time-travel over the recorded execution — every VM→host boundary
-            crossing, replayed deterministically under the tracing host</span
+            >semantic contract frames, storage operations, and resource changes —
+            not source-line or individual Wasm-instruction stepping</span
           >
         </div>
 
@@ -421,14 +435,16 @@
 
         <section class="panel dbg-scrub" id="dbg-scrub" aria-labelledby="dbg-tl-h">
           <div class="panel-head">
-            <span class="eyebrow" id="dbg-tl-h">Execution timeline</span>
+            <span class="eyebrow" id="dbg-tl-h">Trace timeline</span>
             <span class="sub" id="dbg-count">—</span>
           </div>
           <div class="dbg-legend">
             <span><i class="dtick-chip frame"></i> frame push/pop</span>
-            <span><i class="dtick-chip env"></i> env call/ret</span>
             <span><i class="dtick-chip storage"></i> storage op</span>
             <span><i class="dtick-chip edge"></i> begin/end</span>
+            <label class="trace-raw">
+              <input id="dbg-raw" type="checkbox" /> show raw host calls
+            </label>
           </div>
           <div class="dbg-ticks" id="dbg-ticks"></div>
           <input
@@ -504,7 +520,7 @@
           <section class="panel dbg-tree-panel" aria-labelledby="dbg-ct-h">
             <div class="panel-head">
               <span class="eyebrow" id="dbg-ct-h">Call tree</span>
-              <span class="sub">Tier-1 fn_call / fn_return diagnostics</span>
+              <span class="sub">contract calls, arguments, and returns</span>
             </div>
             <div class="dbg-tree" id="dbg-tree"></div>
           </section>

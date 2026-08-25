@@ -48,8 +48,8 @@ export interface FixtureMeta {
 export const FIXTURES: FixtureMeta[] = [
   {
     id: "add_i32",
-    label: "add_i32 — add(21, 21)",
-    call: "add(21, 21) → i32",
+    label: "add_i32 — add(7, 35)",
+    call: "add(7, 35) → i32",
     note: "Custom Wasm, captured from a local protocol-28 node.",
     expect: "I32 · 42",
     liveCapable: false,

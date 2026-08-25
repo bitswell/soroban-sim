@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Visual debugger — offline, deterministic. After a completed run the worker
- * stashes the accumulated entries; "debug this run" re-invokes the two-pass
- * `simulate-trace` export (enforcing replay under the tracing host) and the UI
- * renders a time-travel stepper over the recorded TraceEvents plus the Tier-1
- * fn_call/fn_return call tree.
+ * Execution trace — offline, deterministic. After a completed run the worker
+ * stashes the accumulated entries; "Open execution trace" re-invokes the
+ * two-pass `simulate-trace` export (enforcing replay under the tracing host) and the UI
+ * renders a semantic view over the recorded TraceEvents plus the
+ * fn_call/fn_return call tree. Raw host calls remain opt-in.
  */
 
 async function runFixtureAndOpenDebugger(
@@ -24,7 +24,7 @@ async function runFixtureAndOpenDebugger(
   await expect(page.locator("#debugger")).toBeVisible({ timeout: 60_000 });
 }
 
-test.describe("visual debugger (offline)", () => {
+test.describe("execution trace (offline)", () => {
   test("add_i32: trace replays with steps, frame push, and budget attribution", async ({
     page,
   }) => {
@@ -37,7 +37,19 @@ test.describe("visual debugger (offline)", () => {
     // A real trace: begin + frame push/pop + end at minimum.
     const ticks = await page.locator("#dbg-ticks .dtick").count();
     expect(ticks).toBeGreaterThanOrEqual(4);
-    await expect(page.locator("#dbg-count")).toContainText("steps");
+    await expect(page.locator("#dbg-count")).toContainText("semantic steps");
+
+    // Host-boundary noise is hidden by default and available on demand.
+    expect(
+      await page.locator("#dbg-ticks .dtick.env-call:not(.storage)").count(),
+    ).toBe(0);
+    const semanticTicks = ticks;
+    await page.locator("#dbg-raw").check();
+    await expect(page.locator("#dbg-count")).toContainText("raw steps");
+    expect(await page.locator("#dbg-ticks .dtick").count()).toBeGreaterThanOrEqual(
+      semanticTicks,
+    );
+    await page.locator("#dbg-raw").uncheck();
 
     // Step 1 is `begin`; stepping lands on the VM frame push with decoded args.
     await expect(page.locator("#dbg-display")).toHaveText("begin");
@@ -66,6 +78,13 @@ test.describe("visual debugger (offline)", () => {
 
     await expect(page.locator("#dbg-scrub")).toBeVisible();
     await expect(page.locator("#dbg-count")).toContainText("storage ops");
+
+    const semanticTicks = await page.locator("#dbg-ticks .dtick").count();
+    await page.locator("#dbg-raw").check();
+    expect(await page.locator("#dbg-ticks .dtick").count()).toBeGreaterThan(
+      semanticTicks,
+    );
+    await page.locator("#dbg-raw").uncheck();
 
     // The transfer touches contract storage — lane marks exist.
     const laneMarks = await page.locator("#dbg-lane .lane-mark").count();

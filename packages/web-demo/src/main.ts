@@ -41,6 +41,8 @@ const mRounds = $("m-rounds");
 const mKeys = $("m-keys");
 const mElapsed = $("m-elapsed");
 const mWorker = $("m-worker");
+const engineStateSummary = $("engine-state-summary");
+const engineConfigCountEl = $("engine-config-count");
 
 const snapList = $("snap-list");
 const snapEmpty = $("snap-empty");
@@ -80,6 +82,7 @@ const dbgScrub = $("dbg-scrub");
 const dbgCount = $("dbg-count");
 const dbgTicks = $("dbg-ticks");
 const dbgSlider = $<HTMLInputElement>("dbg-slider");
+const dbgRaw = $<HTMLInputElement>("dbg-raw");
 const dbgLane = $("dbg-lane");
 const dbgBack = $<HTMLButtonElement>("dbg-back");
 const dbgFwd = $<HTMLButtonElement>("dbg-fwd");
@@ -162,6 +165,9 @@ let workerReady = false;
 let hardStopTimer: ReturnType<typeof setTimeout> | undefined;
 let presentCount = 0;
 let absentCount = 0;
+let engineConfigCount = 0;
+let engineConfigLabels = new Set<string>();
+let executionEntryLabels = new Set<string>();
 
 // upload-any-contract state
 let uploadInfo: UploadInfoMsg | undefined;
@@ -172,6 +178,7 @@ let uploadParseId = 0;
 let debuggableRunId: number | undefined;
 let debugPending = false;
 let debugData: DebugResultMsg | undefined;
+let debugSteps: DebugResultMsg["steps"] = [];
 let dbgIdx = 0;
 let activeTick: HTMLElement | undefined;
 let activeLaneMark: HTMLElement | undefined;
@@ -241,7 +248,7 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
       if (msg.id !== debuggableRunId) return;
       debugPending = false;
       debugRunBtn.disabled = false;
-      debugRunBtn.textContent = "◉ debug this run";
+      debugRunBtn.textContent = "Open execution trace";
       openDebugger(msg);
       return;
     }
@@ -249,7 +256,7 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
       if (msg.id !== debuggableRunId) return;
       debugPending = false;
       debugRunBtn.disabled = false;
-      debugRunBtn.textContent = "◉ debug this run";
+      debugRunBtn.textContent = "Open execution trace";
       debuggerEl.hidden = false;
       dbgReason.hidden = false;
       dbgReason.innerHTML = "";
@@ -290,11 +297,13 @@ function renderFixtures(): void {
     btn.innerHTML = `${tag}<div>${f.label}</div><div class="fx-call">${f.call}</div>`;
     btn.addEventListener("click", () => {
       if (btn.disabled || running) return;
+      const changed = uploadSelected || selectedId !== f.id;
       selectedId = f.id;
       uploadSelected = false;
       uploadCard.setAttribute("aria-pressed", "false");
       renderFixtures();
       renderReqNote();
+      if (changed) invalidateRunUI();
     });
     fixturesEl.appendChild(btn);
   }
@@ -308,7 +317,7 @@ function renderReqNote(): void {
 
 // ---- mode ------------------------------------------------------------------
 function setMode(next: DemoMode): void {
-  if (running) return;
+  if (running || next === mode) return;
   mode = next;
   modeOffline.setAttribute("aria-pressed", String(next === "offline"));
   modeLive.setAttribute("aria-pressed", String(next === "live"));
@@ -318,6 +327,7 @@ function setMode(next: DemoMode): void {
   }
   renderFixtures();
   renderReqNote();
+  invalidateRunUI();
 }
 modeOffline.addEventListener("click", () => setMode("offline"));
 modeLive.addEventListener("click", () => setMode("live"));
@@ -330,6 +340,11 @@ function resetRunUI(): void {
   snapEmpty.hidden = true;
   presentCount = 0;
   absentCount = 0;
+  engineConfigCount = 0;
+  engineConfigLabels = new Set();
+  executionEntryLabels = new Set();
+  engineStateSummary.hidden = true;
+  engineConfigCountEl.textContent = "0";
   snapPresent.textContent = "0";
   snapAbsent.textContent = "0";
   mRounds.textContent = "—";
@@ -344,11 +359,21 @@ function resetRunUI(): void {
   // debugger resets with every new run
   debugRunBtn.hidden = true;
   debugRunBtn.disabled = false;
-  debugRunBtn.textContent = "◉ debug this run";
+  debugRunBtn.textContent = "Open execution trace";
   debuggerEl.hidden = true;
   debuggableRunId = undefined;
   debugPending = false;
   debugData = undefined;
+  debugSteps = [];
+  dbgRaw.checked = false;
+  activeRound = undefined;
+}
+
+/** Remove output that no longer describes the selected request. */
+function invalidateRunUI(): void {
+  resetRunUI();
+  timelineEmpty.hidden = false;
+  snapEmpty.hidden = false;
 }
 
 function setMetricNum(el: HTMLElement, value: string): void {
@@ -432,6 +457,28 @@ runBtn.addEventListener("click", () => {
 let activeRound: HTMLElement | undefined;
 
 function renderRound(msg: RoundMsg): void {
+  const configKeys = msg.keys.filter((key) => key.kind === "ConfigSetting");
+  const executionKeys = msg.keys.filter((key) => key.kind !== "ConfigSetting");
+
+  for (const key of configKeys) engineConfigLabels.add(key.label);
+  engineConfigCount = engineConfigLabels.size;
+  if (engineConfigCount > 0) {
+    engineConfigCountEl.textContent = String(engineConfigCount);
+    engineStateSummary.hidden = false;
+  }
+
+  const newExecutionKeys = executionKeys.filter((key) => {
+    if (executionEntryLabels.has(key.label)) return false;
+    executionEntryLabels.add(key.label);
+    return true;
+  });
+
+  // Host/network configuration is necessary simulator setup, not a contract
+  // state read. Keep the actual local pass count, but collapse those keys.
+  mRounds.textContent = String(msg.roundIndex + 1);
+  mKeys.textContent = String(executionEntryLabels.size);
+  if (newExecutionKeys.length === 0) return;
+
   timelineEmpty.hidden = true;
   if (activeRound) activeRound.classList.remove("active");
 
@@ -444,7 +491,7 @@ function renderRound(msg: RoundMsg): void {
   col.appendChild(rnum);
 
   // usually one key per round; render the primary key's cell + labels
-  const key = msg.keys[0]!;
+  const key = newExecutionKeys[0]!;
   const cell = document.createElement("div");
   cell.className = `cell ${key.status}`;
   if (key.ttl !== undefined) {
@@ -470,12 +517,8 @@ function renderRound(msg: RoundMsg): void {
   timeline.appendChild(col);
   activeRound = col;
 
-  // live metrics tick
-  mRounds.textContent = String(msg.roundIndex + 1);
-  mKeys.textContent = String(msg.requestedKeyCount);
-
-  // append every key of the round to the snapshot rail
-  for (const k of msg.keys) appendSnapshotRow(k);
+  // Append only transaction-relevant entries to the state rail.
+  for (const k of newExecutionKeys) appendSnapshotRow(k);
 
   // keep the newest column in view
   timelineScroll.scrollLeft = timelineScroll.scrollWidth;
@@ -515,7 +558,7 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   if (activeRound) activeRound.classList.remove("active");
 
   mRounds.textContent = String(msg.rounds);
-  mKeys.textContent = String(msg.requestedKeyCount);
+  mKeys.textContent = String(executionEntryLabels.size);
   setMetricNum(mElapsed, msg.elapsedMs.toFixed(0));
 
   resultPanel.hidden = false;
@@ -616,7 +659,7 @@ function renderFootprint(
   keys: Extract<WorkerToMain, { type: "sim-result" }>["readOnly"],
 ): void {
   list.replaceChildren();
-  const arr = keys ?? [];
+  const arr = (keys ?? []).filter((key) => key.kind !== "ConfigSetting");
   counter.textContent = String(arr.length);
   if (arr.length === 0) {
     const p = document.createElement("p");
@@ -810,7 +853,7 @@ function failRunText(message: string): void {
   rErr.hidden = false;
   rErr.textContent =
     mode === "live"
-      ? `${message} — retry, or switch to Offline for a deterministic run.`
+      ? `${message} — retry, or switch to Saved snapshot for a deterministic run.`
       : message;
 }
 
@@ -819,6 +862,7 @@ uploadBtn.addEventListener("click", () => uploadFile.click());
 uploadFile.addEventListener("change", async () => {
   const file = uploadFile.files?.[0];
   if (!file) return;
+  invalidateRunUI();
   const bytes = new Uint8Array(await file.arrayBuffer());
   uploadParseId += 1;
   worker.postMessage({
@@ -831,10 +875,12 @@ uploadFile.addEventListener("change", async () => {
 
 function selectUpload(): void {
   if (running || !uploadInfo?.ok) return;
+  const changed = !uploadSelected;
   uploadSelected = true;
   uploadCard.setAttribute("aria-pressed", "true");
   renderFixtures();
   renderReqNote();
+  if (changed) invalidateRunUI();
 }
 uploadCard.addEventListener("click", selectUpload);
 uploadCard.addEventListener("keydown", (e) => {
@@ -888,7 +934,13 @@ function onUploadInfo(msg: UploadInfoMsg): void {
   renderUploadArgs();
   selectUpload();
 }
-upFn.addEventListener("change", renderUploadArgs);
+upFn.addEventListener("change", () => {
+  renderUploadArgs();
+  invalidateRunUI();
+});
+upFnFree.addEventListener("input", invalidateRunUI);
+upArgs.addEventListener("input", invalidateRunUI);
+cacheBox.addEventListener("change", invalidateRunUI);
 
 /** Placeholder text per spec-arg widget class. */
 const ARG_PLACEHOLDER: Record<string, string> = {
@@ -1005,12 +1057,12 @@ function gatherUploadInvocation():
   return { fn, args, raw: true };
 }
 
-// ---- visual debugger -------------------------------------------------------
+// ---- execution trace -------------------------------------------------------
 debugRunBtn.addEventListener("click", () => {
   if (debuggableRunId === undefined || debugPending) return;
   debugPending = true;
   debugRunBtn.disabled = true;
-  debugRunBtn.textContent = "tracing…";
+  debugRunBtn.textContent = "Building trace…";
   worker.postMessage({ type: "debug", id: debuggableRunId });
 });
 
@@ -1025,6 +1077,7 @@ const KIND_LABEL: Record<string, string> = {
 
 function openDebugger(msg: DebugResultMsg): void {
   debugData = msg;
+  dbgRaw.checked = false;
   debuggerEl.hidden = false;
 
   if (msg.reason) {
@@ -1044,32 +1097,49 @@ function openDebugger(msg: DebugResultMsg): void {
   }
 
   renderCallTree(msg);
+  renderTraceSteps();
+  debuggerEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
 
-  const steps = msg.steps;
+function renderTraceSteps(preserveSeq?: number): void {
+  const msg = debugData;
+  if (!msg) return;
+
+  debugSteps = dbgRaw.checked
+    ? msg.steps
+    : msg.steps.filter(
+        (step) =>
+          (step.kind !== "env-call" && step.kind !== "env-ret") || step.storage,
+      );
+
+  const steps = debugSteps;
   const hasTrace = steps.length > 0;
   dbgScrub.hidden = !hasTrace;
   dbgDetail.hidden = !hasTrace;
   if (!hasTrace) {
-    debuggerEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
     return;
   }
 
   const storageCount = steps.reduce((n, s) => n + (s.storage ? 1 : 0), 0);
-  dbgCount.textContent = `${fmtInt(steps.length)} steps · ${fmtInt(
+  const viewLabel = dbgRaw.checked ? "raw steps" : "semantic steps";
+  const rawSuffix = dbgRaw.checked
+    ? ""
+    : ` · ${fmtInt(msg.steps.length)} raw steps available`;
+  dbgCount.textContent = `${fmtInt(steps.length)} ${viewLabel}${rawSuffix} · ${fmtInt(
     msg.frames.length,
   )} frames · ${fmtInt(storageCount)} storage ops`;
 
   // ticks
   dbgTicks.replaceChildren();
   activeTick = undefined;
-  for (const step of steps) {
+  steps.forEach((step, i) => {
     const t = document.createElement("button");
     t.type = "button";
     t.className = `dtick ${step.kind}${step.storage ? " storage" : ""}`;
     t.title = `#${step.seq} ${step.display}`;
-    t.addEventListener("click", () => setDebugStep(step.seq));
+    t.addEventListener("click", () => setDebugStep(i));
     dbgTicks.appendChild(t);
-  }
+  });
 
   // ledger lane
   dbgLane.replaceChildren();
@@ -1082,23 +1152,23 @@ function openDebugger(msg: DebugResultMsg): void {
     dbgLane.appendChild(empty);
   } else {
     const denom = Math.max(steps.length - 1, 1);
-    for (const step of steps) {
-      if (!step.storage) continue;
+    steps.forEach((step, i) => {
+      if (!step.storage) return;
       const mark = document.createElement("button");
       mark.type = "button";
       mark.className = "lane-mark";
-      mark.style.left = `${(step.seq / denom) * 100}%`;
+      mark.style.left = `${(i / denom) * 100}%`;
       mark.title = `#${step.seq} ${step.display}`;
-      mark.addEventListener("click", () => setDebugStep(step.seq));
+      mark.addEventListener("click", () => setDebugStep(i));
       laneMarkBySeq.set(step.seq, mark);
       dbgLane.appendChild(mark);
-    }
+    });
   }
 
   dbgSlider.min = "0";
   dbgSlider.max = String(steps.length - 1);
-  setDebugStep(0);
-  debuggerEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  if (preserveSeq === undefined) setDebugStep(0);
+  else setDebugStepBySeq(preserveSeq);
 }
 
 function renderCallTree(msg: DebugResultMsg): void {
@@ -1144,7 +1214,7 @@ function renderCallTree(msg: DebugResultMsg): void {
     }
     el.appendChild(ret);
     if (frame.pushSeq >= 0) {
-      el.addEventListener("click", () => setDebugStep(frame.pushSeq));
+      el.addEventListener("click", () => setDebugStepBySeq(frame.pushSeq));
     }
     treeFrameEls[i] = el;
     dbgTree.appendChild(el);
@@ -1157,18 +1227,21 @@ function fmtDelta(n: number): string {
 
 function setDebugStep(i: number): void {
   const data = debugData;
-  if (!data || data.steps.length === 0) return;
-  dbgIdx = Math.max(0, Math.min(i, data.steps.length - 1));
-  const step = data.steps[dbgIdx]!;
+  if (!data || debugSteps.length === 0) return;
+  dbgIdx = Math.max(0, Math.min(i, debugSteps.length - 1));
+  const step = debugSteps[dbgIdx]!;
+  const previous = debugSteps[dbgIdx - 1];
+  const dCpu = previous ? Math.max(0, step.cpu - previous.cpu) : step.dCpu;
+  const dMem = previous ? Math.max(0, step.mem - previous.mem) : step.dMem;
 
   dbgSlider.value = String(dbgIdx);
-  dbgPos.textContent = `step ${dbgIdx + 1} / ${data.steps.length}`;
+  dbgPos.textContent = `step ${dbgIdx + 1} / ${debugSteps.length}`;
   dbgDisplay.textContent = step.display;
   dbgKind.textContent =
     (KIND_LABEL[step.kind] ?? step.kind) + (step.storage ? " · storage" : "");
   dbgName.textContent = step.name || "—";
-  dbgDcpu.textContent = fmtDelta(step.dCpu);
-  dbgDmem.textContent = fmtDelta(step.dMem);
+  dbgDcpu.textContent = fmtDelta(dCpu);
+  dbgDmem.textContent = fmtDelta(dMem);
 
   dbgCpuNum.textContent = fmtInt(step.cpu);
   dbgCpuFill.style.width = fillWidth(step.cpu, data.totalCpu || 1);
@@ -1189,13 +1262,24 @@ function setDebugStep(i: number): void {
   activeTreeFrame = step.frame >= 0 ? treeFrameEls[step.frame] : undefined;
   activeTreeFrame?.classList.add("active");
 
-  const last = data.steps.length - 1;
+  const last = debugSteps.length - 1;
   dbgBack.disabled = dbgIdx === 0;
   dbgFwd.disabled = dbgIdx === last;
   dbgOver.disabled = dbgIdx === last;
-  dbgStorageBtn.disabled = !data.steps.some(
-    (s) => s.seq > dbgIdx && s.storage,
+  dbgStorageBtn.disabled = !debugSteps.some(
+    (step, index) => index > dbgIdx && step.storage,
   );
+}
+
+function setDebugStepBySeq(seq: number): void {
+  if (debugSteps.length === 0) return;
+  const exact = debugSteps.findIndex((step) => step.seq === seq);
+  if (exact >= 0) {
+    setDebugStep(exact);
+    return;
+  }
+  const after = debugSteps.findIndex((step) => step.seq > seq);
+  setDebugStep(after >= 0 ? after : debugSteps.length - 1);
 }
 
 dbgSlider.addEventListener("input", () => {
@@ -1204,21 +1288,30 @@ dbgSlider.addEventListener("input", () => {
 dbgBack.addEventListener("click", () => setDebugStep(dbgIdx - 1));
 dbgFwd.addEventListener("click", () => setDebugStep(dbgIdx + 1));
 dbgOver.addEventListener("click", () => {
-  const step = debugData?.steps[dbgIdx];
+  const step = debugSteps[dbgIdx];
   if (!step) return;
   // On a frame push, jump past the matching pop; otherwise a single step.
   if (step.kind === "push-ctx" && step.matchPop >= 0) {
-    setDebugStep(step.matchPop + 1);
+    const afterPop = debugSteps.findIndex(
+      (candidate) => candidate.seq > step.matchPop,
+    );
+    setDebugStep(afterPop >= 0 ? afterPop : debugSteps.length - 1);
   } else {
     setDebugStep(dbgIdx + 1);
   }
 });
 dbgStorageBtn.addEventListener("click", () => {
-  const next = debugData?.steps.find((s) => s.seq > dbgIdx && s.storage);
-  if (next) setDebugStep(next.seq);
+  const next = debugSteps.findIndex(
+    (step, index) => index > dbgIdx && step.storage,
+  );
+  if (next >= 0) setDebugStep(next);
+});
+dbgRaw.addEventListener("change", () => {
+  const seq = debugSteps[dbgIdx]?.seq;
+  renderTraceSteps(seq);
 });
 window.addEventListener("keydown", (e) => {
-  if (debuggerEl.hidden || !debugData || debugData.steps.length === 0) return;
+  if (debuggerEl.hidden || !debugData || debugSteps.length === 0) return;
   const target = e.target as HTMLElement | null;
   if (
     target &&
