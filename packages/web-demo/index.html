@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>soroban-sim · instrument</title>
+    <title>soroban-sim · local contract simulation</title>
     <meta
       name="description"
-      content="In-browser Soroban transaction simulator — watch the needs-state rerun loop resolve ledger state round by round, offline or live against testnet."
+      content="Simulate a Stellar smart-contract transaction locally in your browser before submitting it, using a saved snapshot or current Testnet ledger state."
     />
   </head>
   <body>
@@ -19,12 +19,13 @@
       <header class="topbar">
         <div class="brand">
           <div class="wordmark">soroban<b>-</b>sim</div>
-          <div class="eyebrow">transaction simulator · in-browser wasm</div>
+          <h1>Simulate a Stellar smart-contract transaction locally before submitting it.</h1>
+          <div class="eyebrow">local execution · saved or testnet state</div>
         </div>
 
-        <div class="segmented" role="group" aria-label="Simulation mode">
-          <button id="mode-offline" aria-pressed="true">Offline</button>
-          <button id="mode-live" aria-pressed="false">Live · testnet</button>
+        <div class="segmented" role="group" aria-label="Ledger state source">
+          <button id="mode-offline" aria-pressed="true">Saved snapshot</button>
+          <button id="mode-live" aria-pressed="false">Testnet state</button>
         </div>
 
         <button
@@ -37,10 +38,118 @@
         </button>
 
         <p class="mode-help">
-          Same rerun loop. <b>Offline</b> seeds a committed snapshot into an
-          in-memory provider; <b>Live</b> fetches ledger state from testnet RPC.
+          Contract execution always stays in this browser. <b>Saved snapshot</b>
+          uses committed ledger entries; <b>Testnet state</b> asks Stellar RPC
+          only for missing entries. This preview never submits a transaction.
         </p>
       </header>
+
+      <!-- COMPONENT MODEL EXPLAINER -->
+      <details class="explainer-details">
+        <summary>How browser execution works</summary>
+        <section class="explainer" aria-labelledby="cm-h">
+        <div class="panel-head">
+          <span class="eyebrow" id="cm-h">WebAssembly Component Model</span>
+          <span class="sub">why this simulator runs in your browser at all</span>
+        </div>
+
+        <div class="cm-grid">
+          <article class="cm-card">
+            <span class="cm-step">01</span>
+            <h3>Core wasm speaks only numbers</h3>
+            <p>
+              A raw wasm module's imports and exports pass numeric values —
+              <code>i32</code>, <code>i64</code>, <code>f32</code>,
+              <code>f64</code>. No strings, no records, no lists. Anything
+              richer has to be hand-marshalled through linear memory by both
+              sides, with both sides agreeing on the layout by convention.
+            </p>
+          </article>
+
+          <article class="cm-card">
+            <span class="cm-step">02</span>
+            <h3>The Canonical ABI does the marshalling</h3>
+            <p>
+              A <b>component</b> wraps core wasm in a typed interface described
+              in <b>WIT</b>. The <b>Canonical ABI</b> pins down the layout: here,
+              each XDR <code>list&lt;u8&gt;</code> crosses as (ptr,&nbsp;len) —
+              one <code>cabi_realloc</code> into guest memory plus one memcpy —
+              the request record flattens to an 88-byte struct, and the
+              <code>outcome</code> variant lifts back as a discriminant byte
+              plus payload, copied out before a post-return free.
+            </p>
+          </article>
+
+          <article class="cm-card">
+            <span class="cm-step">03</span>
+            <h3>jco transpiles it to JS</h3>
+            <p>
+              <code>jco transpile</code> splits the 3.1&nbsp;MB component into
+              its core <code>.wasm</code> plus ~227&nbsp;KB of generated glue
+              that implements the Canonical ABI in JavaScript. Its 15 WASI
+              0.2 imports (stdio, clocks, seed) come from
+              <code>preview2-shim</code> — yet a whole successful run calls
+              exactly one: <code>insecure-seed</code>, once. Cold start
+              ~23&nbsp;ms; a warm call ~0.2&nbsp;ms; memory flat at
+              2.25&nbsp;MiB.
+            </p>
+          </article>
+
+          <article class="cm-card accent">
+            <span class="cm-step">04</span>
+            <h3>How soroban-sim uses it</h3>
+            <p>
+              World <code>simulator</code> exports <code>simulate</code>,
+              <code>simulate-transaction</code>, <code>simulate-trace</code>
+              and a <code>run-fixture</code> self-test; each simulate call
+              returns <code>complete(ssim)</code> or
+              <code>needs-state(keys)</code> — and holds <em>no state between
+              calls</em>: every round re-sends the whole snapshot, then reruns
+              deterministically. The Soroban <b>contracts stay plain core
+              wasm</b>, <em>not baked in</em>: their bytes arrive as
+              <code>ContractCode</code> ledger entries through that loop (or
+              uploaded here), interpreted by the embedded host.
+            </p>
+          </article>
+        </div>
+
+        <div class="cm-flow" aria-hidden="true">
+          <span class="cm-node">WIT world <b>simulator</b></span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node">component <code>.wasm</code></span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node">jco transpile</span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node">JS glue + core <code>.wasm</code></span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node accent">runs in this Web Worker</span>
+          <span class="cm-arrow">→</span>
+          <span class="cm-node">request lowered in · <b>388-byte SSIM</b> lifted out</span>
+        </div>
+
+        <div class="cm-call" aria-hidden="true">
+          <div class="cm-call-head">
+            <span class="cm-call-title">one <code>simulate()</code> call across the boundary</span>
+            <span class="cm-call-time">warm: ~0.2 ms</span>
+          </div>
+          <div class="cm-call-steps">
+            <span class="cm-cnode"><b>JS request object</b><i>records + <code>Uint8Array</code>s</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>lower</b><i><code>cabi_realloc</code> + memcpy per <code>list&lt;u8&gt;</code> · 88-B struct</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>guest wit-bindgen</b><i>reads linear memory</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode accent"><b>Rust host runs</b><i>embedded, metered</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>SSIM bytes</b><i><code>outcome</code> discriminant + payload</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>lift</b><i>copy out, post-return frees</i></span>
+            <span class="cm-arrow">→</span>
+            <span class="cm-cnode"><b>Uint8Array</b><i>388 B on the golden fixture</i></span>
+          </div>
+        </div>
+        </section>
+      </details>
 
       <div class="console">
         <!-- REQUEST -->
@@ -54,6 +163,51 @@
             <div class="fixture-list" id="fixtures"></div>
           </div>
 
+          <div class="field">
+            <label>Or any contract</label>
+            <input
+              type="file"
+              id="upload-file"
+              accept=".wasm,application/wasm"
+              class="sr-input"
+            />
+            <button class="upload-btn" id="upload-btn" type="button">
+              upload .wasm ⇪
+            </button>
+            <div
+              class="upload-card"
+              id="upload-card"
+              role="button"
+              tabindex="0"
+              aria-pressed="false"
+              hidden
+            >
+              <div class="up-top">
+                <span class="up-name" id="up-name"></span>
+                <span class="up-size" id="up-size"></span>
+              </div>
+              <div class="up-cid" id="up-cid"></div>
+              <div class="up-ladder" id="up-ladder" title="Labeling ladder: how much the UI can decode about this contract">
+                <span class="rung" data-rung="spec" title="contractspecv0 section found — typed function signatures">spec</span>
+                <span class="rung" data-rung="names" title="wasm export names only — args as raw ScVal XDR">names</span>
+                <span class="rung" data-rung="raw" title="no metadata — free-form fn + raw ScVal XDR args">raw</span>
+              </div>
+              <div class="up-fn-row" id="up-fn-row">
+                <label for="up-fn">fn</label>
+                <select id="up-fn" aria-label="Contract function"></select>
+                <input
+                  id="up-fn-free"
+                  type="text"
+                  placeholder="function name"
+                  aria-label="Function name"
+                  hidden
+                />
+              </div>
+              <div class="up-args" id="up-args"></div>
+              <p class="up-err" id="up-err" hidden></p>
+            </div>
+          </div>
+
           <p class="req-note" id="req-note"></p>
 
           <label class="cache-row hidden" id="cache-row">
@@ -64,11 +218,11 @@
           <button class="run" id="run">Run simulation ▸</button>
         </section>
 
-        <!-- RESOLUTION TIMELINE (hero) -->
+        <!-- CONTRACT-RELEVANT STATE RESOLUTION -->
         <section class="panel timeline-panel" aria-labelledby="tl-h">
           <div class="panel-head">
-            <span class="eyebrow" id="tl-h">Resolution timeline</span>
-            <span class="sub">needs-state → resolve → rerun</span>
+            <span class="eyebrow" id="tl-h">Contract state reads</span>
+            <span class="sub">missing entry → resolve → local rerun</span>
           </div>
 
           <div class="legend">
@@ -80,20 +234,25 @@
           <div class="timeline-scroll" id="timeline-scroll">
             <div class="timeline" id="timeline">
               <p class="timeline-empty" id="timeline-empty">
-                The snapshot starts empty. Run a simulation and each column is one
-                component run: the wasm returns needs-state, the provider resolves
-                the missing ledger key, the loop reruns — until it completes.
+                Run a simulation to see only the ledger entries requested while
+                executing the transaction. Network configuration is loaded as
+                simulator setup and kept out of this view.
               </p>
             </div>
           </div>
 
+          <div class="engine-state-summary" id="engine-state-summary" hidden>
+            <span><b id="engine-config-count">0</b> network settings loaded for the local host</span>
+            <span>hidden from contract state</span>
+          </div>
+
           <div class="metrics">
             <div class="metric">
-              <span class="m-label">rounds</span>
+              <span class="m-label">local passes</span>
               <span class="m-val" id="m-rounds">—</span>
             </div>
             <div class="metric">
-              <span class="m-label">keys requested</span>
+              <span class="m-label">execution entries</span>
               <span class="m-val" id="m-keys">—</span>
             </div>
             <div class="metric">
@@ -107,10 +266,10 @@
           </div>
         </section>
 
-        <!-- SUPPLIED SNAPSHOT -->
+        <!-- RESOLVED EXECUTION STATE -->
         <section class="panel" aria-labelledby="snap-h">
           <div class="panel-head">
-            <span class="eyebrow" id="snap-h">Supplied snapshot</span>
+            <span class="eyebrow" id="snap-h">Resolved execution state</span>
           </div>
           <div class="snap-counter">
             <span><b id="snap-present">0</b> present</span>
@@ -118,7 +277,8 @@
           </div>
           <div class="snap-list" id="snap-list">
             <p class="snap-empty" id="snap-empty">
-              Entries fold in here as the loop resolves them.
+              Contract code, data, accounts, and TTL entries appear here as the
+              local execution requests them.
             </p>
           </div>
         </section>
@@ -141,11 +301,231 @@
         </div>
         <span class="badge hidden" id="r-badge">matches CI golden 1082a3e4</span>
         <span class="errmsg" id="r-err" hidden></span>
+        <button class="debug-btn" id="debug-run" type="button" hidden>
+          Open execution trace
+        </button>
       </section>
       <p class="result-note" id="result-note" hidden>
         Deterministic SSIM bytes — the same rerun loop yields the same result in
         this Worker, the native runner, and CI.
       </p>
+
+      <!-- RUNNING-WASM STATE (populated on completion) -->
+      <section class="wasmstate" id="wasm-state" hidden aria-live="polite">
+        <div class="ws-head">
+          <span class="eyebrow">Running-wasm state</span>
+          <span class="sub">what the host actually did — metered, decoded from the SSIM envelope</span>
+        </div>
+
+        <div class="ws-grid">
+          <!-- BUDGET GAUGES -->
+          <section class="panel gauges" aria-labelledby="bud-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="bud-h">Host budget</span>
+              <span class="sub">real metering</span>
+            </div>
+
+            <div class="gauge">
+              <div class="gauge-top">
+                <span class="g-name">CPU instructions</span>
+                <span class="g-num" id="g-cpu-num">—</span>
+              </div>
+              <div class="gauge-track">
+                <div class="gauge-fill cpu" id="g-cpu-fill"></div>
+              </div>
+              <div class="gauge-scale" id="g-cpu-scale">of 100M per-tx limit</div>
+            </div>
+
+            <div class="gauge">
+              <div class="gauge-top">
+                <span class="g-name">Memory</span>
+                <span class="g-num" id="g-mem-num">—</span>
+              </div>
+              <div class="gauge-track">
+                <div class="gauge-fill mem" id="g-mem-fill"></div>
+              </div>
+              <div class="gauge-scale" id="g-mem-scale">of 40 MiB per-tx limit</div>
+            </div>
+
+            <div class="gauge-note" id="g-note"></div>
+          </section>
+
+          <!-- FOOTPRINT -->
+          <section class="panel footprint" aria-labelledby="fp-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="fp-h">Execution footprint</span>
+              <span class="sub">ledger keys touched</span>
+            </div>
+            <div class="fp-cols">
+              <div class="fp-col ro">
+                <div class="fp-colhead">
+                  <i class="fp-dot ro"></i> read-only
+                  <span class="fp-count" id="fp-ro-count">0</span>
+                </div>
+                <div class="fp-list" id="fp-ro">
+                  <p class="fp-empty">—</p>
+                </div>
+              </div>
+              <div class="fp-col rw">
+                <div class="fp-colhead">
+                  <i class="fp-dot rw"></i> read-write
+                  <span class="fp-count" id="fp-rw-count">0</span>
+                </div>
+                <div class="fp-list" id="fp-rw">
+                  <p class="fp-empty">—</p>
+                </div>
+              </div>
+            </div>
+            <div class="fp-res" id="fp-res"></div>
+          </section>
+
+          <!-- EVENTS + AUTH -->
+          <section class="panel eventsauth" aria-labelledby="ea-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="ea-h">Events &amp; authorization</span>
+              <span class="sub">emitted this run</span>
+            </div>
+            <div class="ea-block">
+              <div class="ea-title">
+                contract events <span class="ea-count" id="ev-count">0</span>
+              </div>
+              <div class="ea-list" id="ev-list">
+                <p class="ea-empty">no events emitted</p>
+              </div>
+            </div>
+            <div class="ea-block">
+              <div class="ea-title">
+                auth entries <span class="ea-count" id="auth-count">0</span>
+              </div>
+              <div class="ea-list" id="auth-list">
+                <p class="ea-empty">no auth recorded</p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- RAW SSIM OUTPUT -->
+        <details class="raw-details">
+          <summary>Inspect raw SSIM output</summary>
+          <section class="panel bytemap" aria-labelledby="bm-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="bm-h">SSIM byte map</span>
+              <span class="sub">the deterministic result envelope, region by region</span>
+            </div>
+            <div class="bm-legend" id="bm-legend"></div>
+            <div class="bm-scroll">
+              <div class="bm-hex" id="bm-hex"></div>
+            </div>
+            <div class="bm-note" id="bm-note"></div>
+          </section>
+        </details>
+      </section>
+
+      <!-- EXECUTION TRACE (populated on demand) -->
+      <section class="debugger" id="debugger" hidden aria-live="polite">
+        <div class="ws-head">
+          <span class="eyebrow">Execution trace</span>
+          <span class="sub"
+            >semantic contract frames, storage operations, and resource changes —
+            not source-line or individual Wasm-instruction stepping</span
+          >
+        </div>
+
+        <div class="dbg-reason" id="dbg-reason" hidden></div>
+
+        <section class="panel dbg-scrub" id="dbg-scrub" aria-labelledby="dbg-tl-h">
+          <div class="panel-head">
+            <span class="eyebrow" id="dbg-tl-h">Trace timeline</span>
+            <span class="sub" id="dbg-count">—</span>
+          </div>
+          <div class="dbg-legend">
+            <span><i class="dtick-chip frame"></i> frame push/pop</span>
+            <span><i class="dtick-chip storage"></i> storage op</span>
+            <span><i class="dtick-chip edge"></i> begin/end</span>
+            <label class="trace-raw">
+              <input id="dbg-raw" type="checkbox" /> show raw host calls
+            </label>
+          </div>
+          <div class="dbg-ticks" id="dbg-ticks"></div>
+          <input
+            type="range"
+            class="dbg-slider"
+            id="dbg-slider"
+            min="0"
+            max="0"
+            value="0"
+            step="1"
+            aria-label="Trace step"
+          />
+          <div class="dbg-lane-row">
+            <span class="dbg-lane-label">ledger lane</span>
+            <div class="dbg-lane" id="dbg-lane"></div>
+          </div>
+          <div class="dbg-controls">
+            <button id="dbg-back" type="button">⏴ back</button>
+            <button id="dbg-fwd" type="button">step ⏵</button>
+            <button id="dbg-over" type="button">step over frame ⭟</button>
+            <button id="dbg-storage-btn" type="button">run to storage op ⇥</button>
+            <span class="dbg-hint">← / → scrub</span>
+          </div>
+        </section>
+
+        <div class="dbg-grid">
+          <section class="panel dbg-detail" id="dbg-detail" aria-labelledby="dbg-sd-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="dbg-sd-h">Step detail</span>
+              <span class="sub" id="dbg-pos">—</span>
+            </div>
+            <div class="dbg-display" id="dbg-display">—</div>
+            <div class="dbg-meta">
+              <div class="dbg-kv">
+                <span class="k">kind</span>
+                <span class="v" id="dbg-kind">—</span>
+              </div>
+              <div class="dbg-kv">
+                <span class="k">name</span>
+                <span class="v" id="dbg-name">—</span>
+              </div>
+              <div class="dbg-kv">
+                <span class="k">Δ cpu</span>
+                <span class="v" id="dbg-dcpu">—</span>
+              </div>
+              <div class="dbg-kv">
+                <span class="k">Δ mem</span>
+                <span class="v" id="dbg-dmem">—</span>
+              </div>
+            </div>
+            <div class="gauge">
+              <div class="gauge-top">
+                <span class="g-name">CPU consumed so far</span>
+                <span class="g-num" id="dbg-cpu-num">—</span>
+              </div>
+              <div class="gauge-track">
+                <div class="gauge-fill cpu" id="dbg-cpu-fill"></div>
+              </div>
+              <div class="gauge-scale" id="dbg-cpu-scale">of this run's total</div>
+            </div>
+            <div class="gauge">
+              <div class="gauge-top">
+                <span class="g-name">Memory consumed so far</span>
+                <span class="g-num" id="dbg-mem-num">—</span>
+              </div>
+              <div class="gauge-track">
+                <div class="gauge-fill mem" id="dbg-mem-fill"></div>
+              </div>
+              <div class="gauge-scale" id="dbg-mem-scale">of this run's total</div>
+            </div>
+          </section>
+
+          <section class="panel dbg-tree-panel" aria-labelledby="dbg-ct-h">
+            <div class="panel-head">
+              <span class="eyebrow" id="dbg-ct-h">Call tree</span>
+              <span class="sub">contract calls, arguments, and returns</span>
+            </div>
+            <div class="dbg-tree" id="dbg-tree"></div>
+          </section>
+        </div>
+      </section>
 
       <!-- M0 golden browser run (mirror of #result) -->
       <div class="golden" id="golden" data-status="pending">

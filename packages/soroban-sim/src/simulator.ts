@@ -15,9 +15,11 @@ import type {
   LedgerEntry,
   Outcome,
   Request,
+  TraceOutcome,
   TransactionRequest,
 } from "./generated/soroban-sim-component.js";
 import type { EntryResolution, StateProvider } from "./state-provider.js";
+import { decodeTrace, type TraceStep } from "./trace.js";
 import {
   DEFAULT_LIMITS,
   type Limits,
@@ -31,6 +33,8 @@ export type ComponentSimulate = (request: Request) => Outcome;
 export type ComponentSimulateTransaction = (
   request: TransactionRequest,
 ) => Outcome;
+/** The two-pass traced component entry point. Mockable in tests. */
+export type ComponentSimulateTrace = (request: Request) => TraceOutcome;
 export interface Component {
   simulate: ComponentSimulate;
   /**
@@ -39,6 +43,11 @@ export interface Component {
    * throws if a component without it is used.
    */
   simulateTransaction?: ComponentSimulateTransaction;
+  /**
+   * Traced entry point. Optional for the same reason;
+   * {@link SorobanSimulator.simulateTrace} throws if a component without it is used.
+   */
+  simulateTrace?: ComponentSimulateTrace;
 }
 
 /** Optional cache layer (M2 #9 supplies a concrete implementation). */
@@ -109,6 +118,26 @@ export interface SimulateResult {
   requestedKeyCount: number;
 }
 
+export interface SimulateTraceResult {
+  /** Deterministic SSIM-encoded result bytes — byte-identical to {@link SimulateResult.resultXdr}. */
+  resultXdr: Uint8Array;
+  /**
+   * Decoded semantic trace steps (Begin .. End). Empty when the trace replay
+   * was unavailable — see {@link SimulateTraceResult.traceUnavailableReason}.
+   */
+  trace: TraceStep[];
+  /**
+   * Set when pass 1 completed but the enforcing trace replay could not run or
+   * diverged (e.g. failed invocation, address-credential auth). Callers
+   * degrade to diagnostics-only over `resultXdr`.
+   */
+  traceUnavailableReason?: string;
+  /** Number of component runs performed (>= 1). */
+  rounds: number;
+  /** Total distinct keys requested from the provider across all rounds. */
+  requestedKeyCount: number;
+}
+
 export interface SimulateProgress {
   /** Number of reruns triggered by needs-state so far (component runs minus 1). */
   rerunCount: number;
@@ -136,6 +165,22 @@ function mergeLimits(overrides?: Partial<Limits>): Limits {
 }
 
 const abortError = () => new DOMException("simulate aborted", "AbortError");
+
+/**
+ * One component run, normalized across entry points: either the loop is done
+ * with a value of type `T`, or the component needs more state and the loop
+ * resolves `missing` and reruns.
+ */
+type Round<T> =
+  | { readonly tag: "done"; readonly value: T }
+  | { readonly tag: "needs-state"; readonly missing: Uint8Array[] };
+
+/** Adapt the plain WIT `outcome` variant to the loop's Round shape. */
+function outcomeToRound(outcome: Outcome): Round<Uint8Array> {
+  return outcome.tag === "complete"
+    ? { tag: "done", value: outcome.val }
+    : { tag: "needs-state", missing: outcome.val };
+}
 
 /**
  * Resolve a batch through the provider while honoring cancellation and the
@@ -220,6 +265,24 @@ export class SorobanSimulator {
     });
   }
 
+  /** Build the per-round WIT request for the host-function entry points. */
+  private buildRequest(
+    input: SimulateInput,
+    ledgerEntries: LedgerEntry[],
+    knownAbsentKeys: Uint8Array[],
+  ): Request {
+    return {
+      hostFunctionXdr: input.hostFunctionXdr,
+      sourceAccountXdr: input.sourceAccountXdr,
+      ledgerContext: input.ledgerContext,
+      ledgerEntries,
+      knownAbsentKeys,
+      basePrngSeed: input.basePrngSeed ?? EMPTY,
+      enableDiagnostics: input.enableDiagnostics ?? false,
+      applyRpcAdjustments: input.applyRpcAdjustments ?? false,
+    };
+  }
+
   /**
    * Drive the host-function `simulate` component export through the rerun loop.
    */
@@ -227,21 +290,73 @@ export class SorobanSimulator {
     input: SimulateInput,
     runOpts: SimulateRunOptions = {},
   ): Promise<SimulateResult> {
-    return this.runLoop(
+    const { value, rounds, requestedKeyCount } = await this.runLoop(
       input.seedEntries,
       (ledgerEntries, knownAbsentKeys) =>
-        this.component.simulate({
-          hostFunctionXdr: input.hostFunctionXdr,
-          sourceAccountXdr: input.sourceAccountXdr,
-          ledgerContext: input.ledgerContext,
-          ledgerEntries,
-          knownAbsentKeys,
-          basePrngSeed: input.basePrngSeed ?? EMPTY,
-          enableDiagnostics: input.enableDiagnostics ?? false,
-          applyRpcAdjustments: input.applyRpcAdjustments ?? false,
-        }),
+        outcomeToRound(
+          this.component.simulate(
+            this.buildRequest(input, ledgerEntries, knownAbsentKeys),
+          ),
+        ),
       runOpts,
     );
+    return { resultXdr: value, rounds, requestedKeyCount };
+  }
+
+  /**
+   * Drive the two-pass `simulate-trace` component export through the SAME
+   * rerun loop as {@link simulate}. The result carries the identical SSIM bytes
+   * plus the decoded semantic trace; when the enforcing replay was unavailable
+   * the trace is empty and `traceUnavailableReason` says why.
+   */
+  async simulateTrace(
+    input: SimulateInput,
+    runOpts: SimulateRunOptions = {},
+  ): Promise<SimulateTraceResult> {
+    const runTrace = this.component.simulateTrace;
+    if (!runTrace) {
+      throw new Error(
+        "component does not export simulate-trace; rebuild the wasm + jco bindings",
+      );
+    }
+    type TraceRoundValue =
+      | { ssim: Uint8Array; trace: Uint8Array }
+      | { ssim: Uint8Array; reason: string };
+    const { value, rounds, requestedKeyCount } = await this.runLoop(
+      input.seedEntries,
+      (ledgerEntries, knownAbsentKeys): Round<TraceRoundValue> => {
+        const outcome = runTrace(
+          this.buildRequest(input, ledgerEntries, knownAbsentKeys),
+        );
+        switch (outcome.tag) {
+          case "complete":
+            return { tag: "done", value: outcome.val };
+          case "trace-unavailable":
+            return {
+              tag: "done",
+              value: { ssim: outcome.val.ssim, reason: outcome.val.reason },
+            };
+          case "needs-state":
+            return { tag: "needs-state", missing: outcome.val };
+        }
+      },
+      runOpts,
+    );
+    if ("reason" in value) {
+      return {
+        resultXdr: value.ssim,
+        trace: [],
+        traceUnavailableReason: value.reason,
+        rounds,
+        requestedKeyCount,
+      };
+    }
+    return {
+      resultXdr: value.ssim,
+      trace: decodeTrace(value.trace),
+      rounds,
+      requestedKeyCount,
+    };
   }
 
   /**
@@ -259,7 +374,7 @@ export class SorobanSimulator {
         "component does not export simulate-transaction; rebuild the wasm + jco bindings",
       );
     }
-    return this.runLoop(
+    const { value, rounds, requestedKeyCount } = await this.runLoop(
       input.seedEntries,
       (ledgerEntries, knownAbsentKeys) => {
         const request: TransactionRequest = {
@@ -271,10 +386,11 @@ export class SorobanSimulator {
           enableDiagnostics: input.enableDiagnostics ?? false,
           applyRpcAdjustments: input.applyRpcAdjustments ?? false,
         };
-        return runTx(request);
+        return outcomeToRound(runTx(request));
       },
       runOpts,
     );
+    return { resultXdr: value, rounds, requestedKeyCount };
   }
 
   /**
@@ -283,14 +399,14 @@ export class SorobanSimulator {
    * known-absent-key sets; everything else (needs-state resolution, limits,
    * cancellation, progress) is identical across entry points.
    */
-  private async runLoop(
+  private async runLoop<T>(
     seedEntries: LedgerEntry[] | undefined,
     runComponent: (
       ledgerEntries: LedgerEntry[],
       knownAbsentKeys: Uint8Array[],
-    ) => Outcome,
+    ) => Round<T>,
     runOpts: SimulateRunOptions,
-  ): Promise<SimulateResult> {
+  ): Promise<{ value: T; rounds: number; requestedKeyCount: number }> {
     const { signal, onProgress } = runOpts;
     const throwIfAborted = () => {
       if (signal?.aborted) {
@@ -312,14 +428,14 @@ export class SorobanSimulator {
       throwIfAborted();
 
       const rounds = tracker.enterRound();
-      const outcome: Outcome = runComponent(ledgerEntries, knownAbsentKeys);
+      const round: Round<T> = runComponent(ledgerEntries, knownAbsentKeys);
 
-      if (outcome.tag === "complete") {
-        return { resultXdr: outcome.val, rounds, requestedKeyCount };
+      if (round.tag === "done") {
+        return { value: round.value, rounds, requestedKeyCount };
       }
 
       // needs-state: resolve the un-attempted missing keys and rerun.
-      const missing = outcome.val;
+      const missing = round.missing;
       const batch: Uint8Array[] = [];
       for (const key of missing) {
         if (!attempted.has(hex(key))) batch.push(key);

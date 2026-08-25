@@ -52,7 +52,27 @@ world simulator {
         needs-state(list<list<u8>>),        // LedgerKey XDR that were Unknown; refetch and rerun
     }
 
+    // Pass 1 completed and the enforcing replay reproduced it exactly.
+    record trace-complete {
+        ssim: list<u8>,                     // byte-identical to what `simulate` returns
+        trace: list<u8>,                    // STRC-encoded semantic trace steps
+    }
+
+    // Pass 1 completed but the trace replay could not run or diverged;
+    // callers degrade to diagnostics-only over `ssim`.
+    record trace-fallback {
+        ssim: list<u8>,
+        reason: string,
+    }
+
+    variant trace-outcome {
+        complete(trace-complete),
+        needs-state(list<list<u8>>),        // LedgerKey XDR that were Unknown; refetch and rerun
+        trace-unavailable(trace-fallback),
+    }
+
     export simulate: func(request: request) -> result<outcome, string>;
     export simulate-transaction: func(request: transaction-request) -> result<outcome, string>;
+    export simulate-trace: func(request: request) -> result<trace-outcome, string>;
     export run-fixture: func() -> result<list<u8>, string>;
 }

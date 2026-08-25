@@ -3,6 +3,7 @@ import type {
   LedgerContext,
   Outcome,
   Request,
+  TraceOutcome,
   TransactionRequest,
 } from "./generated/soroban-sim-component.js";
 import type { EntryResolution, StateProvider } from "./state-provider.js";
@@ -259,5 +260,114 @@ describe("SorobanSimulator.simulateTransaction loop", () => {
     await expect(sim.simulateTransaction(TX_INPUT)).rejects.toThrow(
       /simulate-transaction/,
     );
+  });
+});
+
+/**
+ * Minimal STRC buffer (crates/soroban-sim-core/src/trace.rs layout): one
+ * `begin` step with cpu=7, mem=3. Hand-assembled so the test pins the wire
+ * format rather than trusting a TS encoder.
+ */
+function strcOneBegin(): Uint8Array {
+  const name = "begin";
+  const display = "begin";
+  const bytes = [
+    0x53, 0x54, 0x52, 0x43, 0x30, 0x00, // "STRC0\0"
+    0, 0, 0, 1, // count = 1
+    0, 0, 0, 0, // seq = 0
+    0, // kind = Begin
+    0, 0, 0, name.length, ...[...name].map((c) => c.charCodeAt(0)),
+    0, 0, 0, display.length, ...[...display].map((c) => c.charCodeAt(0)),
+    0, 0, 0, 0, 0, 0, 0, 7, // cpu = 7
+    0, 0, 0, 0, 0, 0, 0, 3, // mem = 3
+  ];
+  return new Uint8Array(bytes);
+}
+
+/** Component whose simulate-trace() replays a scripted sequence. */
+function scriptedTraceComponent(
+  script: (request: Request, call: number) => TraceOutcome,
+): Component & { traceCalls: Request[] } {
+  const traceCalls: Request[] = [];
+  return {
+    traceCalls,
+    // simulate() is unused on this path but required by the interface.
+    simulate(): Outcome {
+      throw new Error("simulate() should not be called on the trace path");
+    },
+    simulateTrace(request: Request): TraceOutcome {
+      traceCalls.push({
+        ...request,
+        ledgerEntries: [...request.ledgerEntries],
+        knownAbsentKeys: [...request.knownAbsentKeys],
+      });
+      return script(request, traceCalls.length - 1);
+    },
+  };
+}
+
+describe("SorobanSimulator.simulateTrace loop", () => {
+  it("reruns on needs-state, then returns the decoded trace + ssim", async () => {
+    const keyA = new Uint8Array([0x01]);
+    const keyB = new Uint8Array([0x02]);
+    const entryA = new Uint8Array([0xde, 0xad]);
+    const ssim = new Uint8Array([0x2a, 0x2b]);
+    const component = scriptedTraceComponent((_req, call) =>
+      call === 0
+        ? { tag: "needs-state", val: [keyA, keyB] }
+        : { tag: "complete", val: { ssim, trace: strcOneBegin() } },
+    );
+    const provider = inMemoryProvider({
+      [keyHex(keyA)]: {
+        status: "present",
+        entry: { entryXdr: entryA, liveUntilLedger: 500 },
+      },
+      [keyHex(keyB)]: { status: "absent" },
+    });
+    const sim = await SorobanSimulator.create({
+      networkPassphrase: "Test",
+      provider,
+      component,
+    });
+    const result = await sim.simulateTrace(INPUT);
+    expect(result.resultXdr).toEqual(ssim);
+    expect(result.traceUnavailableReason).toBeUndefined();
+    expect(result.trace).toEqual([
+      { seq: 0, kind: "begin", name: "begin", display: "begin", cpu: 7n, mem: 3n },
+    ]);
+    expect(result.rounds).toBe(2);
+    expect(result.requestedKeyCount).toBe(2);
+    // The rerun folded the resolved entry + absent key like the plain loop.
+    const second = component.traceCalls[1]!;
+    expect(second.ledgerEntries).toEqual([
+      { entryXdr: entryA, liveUntilLedger: 500 },
+    ]);
+    expect(second.knownAbsentKeys.map(keyHex)).toEqual([keyHex(keyB)]);
+  });
+
+  it("surfaces trace-unavailable as ssim + reason with an empty trace", async () => {
+    const ssim = new Uint8Array([0x11]);
+    const component = scriptedTraceComponent(() => ({
+      tag: "trace-unavailable",
+      val: { ssim, reason: "pass 1 failed; no recorded footprint to replay" },
+    }));
+    const sim = await SorobanSimulator.create({
+      networkPassphrase: "Test",
+      component,
+    });
+    const result = await sim.simulateTrace(INPUT);
+    expect(result.resultXdr).toEqual(ssim);
+    expect(result.trace).toEqual([]);
+    expect(result.traceUnavailableReason).toMatch(/no recorded footprint/);
+    expect(result.rounds).toBe(1);
+  });
+
+  it("throws when the component lacks simulate-trace", async () => {
+    const component = scriptedComponent(() => complete(new Uint8Array([1])));
+    const sim = await SorobanSimulator.create({
+      networkPassphrase: "Test",
+      component,
+    });
+    await expect(sim.simulateTrace(INPUT)).rejects.toThrow(/simulate-trace/);
   });
 });

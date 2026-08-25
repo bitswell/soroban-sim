@@ -3,7 +3,8 @@ import { expect, test } from "@playwright/test";
 /**
  * Interactive demo — OFFLINE path only (deterministic, no network; CI-safe).
  * Drives the same rerun loop as the golden gate but through the UI: selecting a
- * fixture, running, and asserting the timeline resolves and the result decodes.
+ * fixture, running, and asserting contract-relevant state resolves and the
+ * result decodes.
  * The live-testnet path is intentionally not exercised here — it depends on
  * external RPC and is presented in-product as "may fail".
  */
@@ -36,13 +37,28 @@ test.describe("interactive demo (offline)", () => {
     const rounds = Number(await page.locator("#m-rounds").textContent());
     expect(rounds).toBeGreaterThan(1);
 
-    // Timeline rendered one column per round.
+    // Contract state is the primary view. Host configuration was resolved for
+    // local execution, but is collapsed instead of presented as contract reads.
     const cols = await page.locator("#timeline .round").count();
     expect(cols).toBeGreaterThan(1);
+    await expect(
+      page.locator("#timeline .rkind", { hasText: "ConfigSetting" }),
+    ).toHaveCount(0);
+    await expect(page.locator("#snap-list")).not.toContainText("ConfigSetting");
+    await expect(page.locator("#engine-state-summary")).toBeVisible();
+    const executionEntries = Number(await page.locator("#m-keys").textContent());
+    expect(executionEntries).toBeLessThan(rounds);
 
     // Snapshot accumulated present entries.
     const present = Number(await page.locator("#snap-present").textContent());
     expect(present).toBeGreaterThan(0);
+
+    // Selecting a different request invalidates the completed output instead
+    // of leaving results that describe the previous fixture on screen.
+    await page.getByRole("button", { name: /SAC — transfer/ }).click();
+    await expect(resultPanel).toBeHidden();
+    await expect(page.locator("#timeline-empty")).toBeVisible();
+    await expect(page.locator("#m-keys")).toHaveText("—");
   });
 
   test("switching to a deeper fixture works", async ({ page }) => {
