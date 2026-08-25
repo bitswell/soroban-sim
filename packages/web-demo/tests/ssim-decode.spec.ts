@@ -58,6 +58,20 @@ async function decodeInPage(page: import("@playwright/test").Page, b64: string) 
       footprint: fp && {
         readOnly: fp.readOnly.map((k: { label: string }) => k.label),
         readWrite: fp.readWrite.map((k: { label: string }) => k.label),
+        readOnlyKeys: fp.readOnly.map(
+          (k: { role?: string; key?: string; detail: string }) => ({
+            role: k.role,
+            key: k.key,
+            detail: k.detail,
+          }),
+        ),
+        readWriteKeys: fp.readWrite.map(
+          (k: { role?: string; key?: string; detail: string }) => ({
+            role: k.role,
+            key: k.key,
+            detail: k.detail,
+          }),
+        ),
         instructions: fp.instructions,
         readBytes: fp.readBytes,
         writeBytes: fp.writeBytes,
@@ -91,6 +105,20 @@ test.describe("SSIM decode + label layer", () => {
     expect(s.footprint!.readOnly.length).toBeGreaterThan(0);
     expect(s.footprint!.readOnly.join(" ")).toContain("ContractData");
     expect(s.footprint!.readOnly.join(" ")).toContain("ContractCode");
+    expect(s.footprint!.readOnlyKeys).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "contract-instance",
+          key: "Contract instance",
+        }),
+        expect.objectContaining({ role: "contract-code" }),
+      ]),
+    );
+    expect(
+      s.footprint!.readOnlyKeys.find(
+        (key: { role?: string }) => key.role === "contract-instance",
+      )?.detail,
+    ).toMatch(/^C[A-Z2-7]{5}…[A-Z2-7]{6} · persistent$/);
     expect(s.footprint!.instructions).toBeGreaterThan(0);
 
     // Framing fully consumed (decodeSsim throws on trailing bytes) — sanity on
@@ -117,6 +145,12 @@ test.describe("SSIM decode + label layer", () => {
 
     // Read-write footprint touched (the two account balance entries).
     expect(s.footprint!.readWrite.length).toBeGreaterThan(0);
+    expect(
+      s.footprint!.readWriteKeys.every(
+        (key: { role?: string }) =>
+          key.role !== "contract-instance" && key.role !== "contract-code",
+      ),
+    ).toBe(true);
     expect(s.footprint!.readBytes).toBeGreaterThan(0);
     expect(s.footprint!.writeBytes).toBeGreaterThan(0);
     expect(Number(s.footprint!.resourceFee)).toBeGreaterThan(0);

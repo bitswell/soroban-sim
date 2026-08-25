@@ -8,6 +8,7 @@ import type {
   ContractInfoMsg,
   DebugResultMsg,
   DemoMode,
+  FootprintKey,
   RoundMsg,
   UploadFnInfo,
   UploadInfoMsg,
@@ -140,6 +141,10 @@ const fpRo = $("fp-ro");
 const fpRw = $("fp-rw");
 const fpRoCount = $("fp-ro-count");
 const fpRwCount = $("fp-rw-count");
+const fpRuntimeWrap = $("fp-runtime-wrap");
+const fpRuntime = $("fp-runtime");
+const fpRuntimeCount = $("fp-runtime-count");
+const fpProtocolSummary = $("fp-protocol-summary");
 const fpRes = $("fp-res");
 const evList = $("ev-list");
 const evCount = $("ev-count");
@@ -795,9 +800,8 @@ function renderWasmState(msg: Extract<WorkerToMain, { type: "sim-result" }>): vo
   gNote.textContent =
     "Metered by soroban-env-host as it executed the contract's core wasm — the real CPU + linear-memory the run consumed, before any RPC fee padding.";
 
-  // --- footprint (ledger keys the run actually touched) ---
-  renderFootprint(fpRo, fpRoCount, msg.readOnly);
-  renderFootprint(fpRw, fpRwCount, msg.readWrite);
+  // --- footprint (contract access separated from host/runtime support) ---
+  renderExecutionFootprint(msg);
   fpRes.replaceChildren();
   if (msg.resources) {
     const r = msg.resources;
@@ -900,33 +904,92 @@ function renderSubmissionRequirements(
     : "resource fee unavailable";
 }
 
+function isRuntimeFootprintKey(key: FootprintKey): boolean {
+  return key.role === "contract-instance" || key.role === "contract-code";
+}
+
+function semanticFootprintKind(key: FootprintKey): string {
+  if (key.role === "contract-storage") return "Contract storage";
+  if (key.role === "contract-instance") return "Contract instance";
+  if (key.role === "contract-code") return "Wasm code";
+  return key.kind;
+}
+
+function renderExecutionFootprint(
+  msg: Extract<WorkerToMain, { type: "sim-result" }>,
+): void {
+  const readOnly = (msg.readOnly ?? []).filter((key) => key.kind !== "ConfigSetting");
+  const readWrite = (msg.readWrite ?? []).filter((key) => key.kind !== "ConfigSetting");
+  const contractReads = readOnly.filter((key) => !isRuntimeFootprintKey(key));
+  const contractMayWrite = readWrite.filter((key) => !isRuntimeFootprintKey(key));
+  const runtime = [
+    ...readOnly.filter(isRuntimeFootprintKey).map((key) => ({ key, mode: "read-only" })),
+    ...readWrite.filter(isRuntimeFootprintKey).map((key) => ({ key, mode: "read-write" })),
+  ];
+  const maintenanceKinds = new Set(
+    (msg.stateChanges ?? [])
+      .filter((change) => change.category === "maintenance")
+      .map((change) => change.kind),
+  );
+
+  renderFootprint(fpRo, fpRoCount, contractReads);
+  renderFootprint(fpRw, fpRwCount, contractMayWrite);
+  renderRuntimeFootprint(runtime, maintenanceKinds);
+  fpProtocolSummary.textContent = `${readOnly.length} read-only · ${readWrite.length} read-write`;
+}
+
 function renderFootprint(
   list: HTMLElement,
   counter: HTMLElement,
-  keys: Extract<WorkerToMain, { type: "sim-result" }>["readOnly"],
+  keys: FootprintKey[],
 ): void {
   list.replaceChildren();
-  const arr = (keys ?? []).filter((key) => key.kind !== "ConfigSetting");
-  counter.textContent = String(arr.length);
-  if (arr.length === 0) {
+  counter.textContent = String(keys.length);
+  if (keys.length === 0) {
     const p = document.createElement("p");
     p.className = "fp-empty";
     p.textContent = "none";
     list.appendChild(p);
     return;
   }
-  for (const k of arr) {
+  for (const k of keys) {
     const row = document.createElement("div");
     row.className = "fp-key";
     const kind = document.createElement("div");
     kind.className = "fp-kind";
-    kind.textContent = k.kind;
+    kind.textContent = semanticFootprintKind(k);
     const detail = document.createElement("div");
     detail.className = "fp-detail";
     detail.textContent = k.detail || k.label;
     detail.title = k.label;
     row.append(kind, detail);
     list.appendChild(row);
+  }
+}
+
+function renderRuntimeFootprint(
+  entries: { key: FootprintKey; mode: string }[],
+  maintenanceKinds: Set<string>,
+): void {
+  fpRuntime.replaceChildren();
+  fpRuntimeCount.textContent = String(entries.length);
+  fpRuntimeWrap.hidden = entries.length === 0;
+  for (const { key, mode } of entries) {
+    const restored =
+      mode === "read-write" &&
+      maintenanceKinds.has(key.role === "contract-code" ? "ContractCode" : "ContractData");
+    const action = restored ? "Restore" : mode === "read-only" ? "Load" : "May update";
+    const row = document.createElement("div");
+    row.className = `fp-key runtime ${restored ? "restored" : "loaded"}`;
+    const kind = document.createElement("div");
+    kind.className = "fp-kind";
+    kind.textContent = `${action} ${semanticFootprintKind(key)}`;
+    const detail = document.createElement("div");
+    detail.className = "fp-detail";
+    detail.textContent = key.detail || key.label;
+    detail.title = `${key.label} · protocol ${mode}`;
+    row.append(kind, detail);
+    fpRuntime.appendChild(row);
   }
 }
 

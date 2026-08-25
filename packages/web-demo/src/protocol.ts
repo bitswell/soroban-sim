@@ -110,10 +110,14 @@ export type MainToWorker =
 export interface FootprintKey {
   /** Coarse arm class: ContractData, ContractCode, Account, … */
   kind: string;
-  /** Short discriminator (address tail, code hash, setting id). */
+  /** Human discriminator (storage key, contract address, code hash, setting id). */
   detail: string;
   /** Full human label, e.g. "ContractData CDLZ…CYSC · persistent". */
   label: string;
+  /** Semantic identity used to separate contract access from host support. */
+  role?: "contract-storage" | "contract-instance" | "contract-code";
+  /** Decoded storage key or code hash, when one exists. */
+  key?: string;
 }
 
 /** A contract event the run emitted, decoded for display. */

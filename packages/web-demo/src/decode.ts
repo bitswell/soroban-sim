@@ -25,6 +25,8 @@ export interface KeyLabel {
   kind: string;
   detail: string;
   label: string;
+  role?: "contract-storage" | "contract-instance" | "contract-code";
+  key?: string;
 }
 
 /**
@@ -44,10 +46,17 @@ export function ledgerKeyLabel(bytes: Uint8Array): KeyLabel {
   }
   const v = (lk as { value?: unknown }).value;
 
-  const mk = (kind: string, detail: string): KeyLabel => ({
+  const mk = (
+    kind: string,
+    detail: string,
+    role?: KeyLabel["role"],
+    key?: string,
+  ): KeyLabel => ({
     kind,
     detail,
     label: detail ? `${kind} ${detail}` : kind,
+    role,
+    key,
   });
 
   try {
@@ -59,11 +68,31 @@ export function ledgerKeyLabel(bytes: Uint8Array): KeyLabel {
         ).toString();
         const dur = field(v, "durability") as { name?: string } | string;
         const durName = typeof dur === "string" ? dur : (dur?.name ?? "");
-        return mk("ContractData", `${addr.slice(0, 4)}…${addr.slice(-4)} · ${durName}`);
+        const keyScVal = field(v, "key");
+        if (tagName(keyScVal) === "scvLedgerKeyContractInstance") {
+          return mk(
+            "ContractData",
+            `${shortAddress(addr)} · ${durName}`,
+            "contract-instance",
+            "Contract instance",
+          );
+        }
+        const key = keyScVal ? scValLabel(toXdrBytes(keyScVal)).display : "unknown key";
+        return mk(
+          "ContractData",
+          `${key} · ${shortAddress(addr)} · ${durName}`,
+          "contract-storage",
+          key,
+        );
       }
       case "contractCode":
         // LedgerKeyContractCode = discriminant(4) + Hash(32).
-        return mk("ContractCode", hex(bytes, 4, 36).slice(0, 8));
+        return mk(
+          "ContractCode",
+          `${hex(bytes, 4, 36).slice(0, 12)}…`,
+          "contract-code",
+          hex(bytes, 4, 36),
+        );
       case "account":
         // LedgerKeyAccount = discriminant(4) + PublicKey{type(4)+ed25519(32)}.
         return mk(

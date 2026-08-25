@@ -31,6 +31,15 @@ test("Nido Status Message write simulates locally against Testnet", async ({ pag
   await expect(page.locator("#result-panel")).toBeVisible({ timeout: 120_000 });
   await expect(page.locator("#result-note")).toContainText("executed in this Worker");
   await expect(page.locator("#r-value")).toContainText("Void · void");
+  await expect(page.locator("#fp-rw-count")).toHaveText("1");
+  await expect(page.locator("#fp-rw")).toContainText("Contract storage");
+  await expect(page.locator("#fp-rw")).toContainText("Messages");
+  await expect(page.locator("#fp-runtime-count")).toHaveText("2");
+  await expect(page.locator("#fp-runtime")).toContainText("Restore Contract instance");
+  await expect(page.locator("#fp-runtime")).toContainText("Restore Wasm code");
+  await expect(page.locator("#fp-protocol-summary")).toHaveText(
+    "0 read-only · 3 read-write",
+  );
   await expect(page.locator("#impact-list .impact-item")).toHaveCount(1);
   await expect(page.locator("#impact-list")).toContainText("Host-managed restoration");
   await expect(page.locator("#submit-status")).toContainText("not submitted");

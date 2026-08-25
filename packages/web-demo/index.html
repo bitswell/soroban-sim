@@ -438,12 +438,16 @@
           <section class="panel footprint" aria-labelledby="fp-h">
             <div class="panel-head">
               <span class="eyebrow" id="fp-h">Execution footprint</span>
-              <span class="sub">ledger keys touched</span>
+              <span class="sub">contract access vs. runtime support</span>
             </div>
+            <p class="fp-intro">
+              What the contract reads or may write. Contract loading and archival
+              restoration are separated below.
+            </p>
             <div class="fp-cols">
               <div class="fp-col ro">
                 <div class="fp-colhead">
-                  <i class="fp-dot ro"></i> read-only
+                  <i class="fp-dot ro"></i> contract reads
                   <span class="fp-count" id="fp-ro-count">0</span>
                 </div>
                 <div class="fp-list" id="fp-ro">
@@ -452,7 +456,7 @@
               </div>
               <div class="fp-col rw">
                 <div class="fp-colhead">
-                  <i class="fp-dot rw"></i> read-write
+                  <i class="fp-dot rw"></i> contract may write
                   <span class="fp-count" id="fp-rw-count">0</span>
                 </div>
                 <div class="fp-list" id="fp-rw">
@@ -460,6 +464,25 @@
                 </div>
               </div>
             </div>
+            <div class="fp-runtime" id="fp-runtime-wrap" hidden>
+              <div class="fp-runtime-head">
+                <span>Runtime support</span>
+                <span class="fp-count" id="fp-runtime-count">0</span>
+              </div>
+              <p>Contract instance and Wasm entries the host must load or restore.</p>
+              <div class="fp-list" id="fp-runtime"></div>
+            </div>
+            <details class="fp-protocol">
+              <summary>
+                Protocol footprint
+                <span id="fp-protocol-summary">0 read-only · 0 read-write</span>
+              </summary>
+              <p>
+                “Read-write” is the transaction access mode, not proof of a contract
+                storage write. Entries restored from the archive are read-write because
+                transaction preparation may modify them.
+              </p>
+            </details>
             <div class="fp-res" id="fp-res"></div>
           </section>
 

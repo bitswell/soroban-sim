@@ -1211,6 +1211,12 @@ body {
 }
 
 /* footprint */
+.fp-intro {
+  margin: 0 0 12px;
+  color: var(--ink-faint);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
 .fp-cols {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1270,6 +1276,70 @@ body {
 }
 .fp-col.rw .fp-key {
   border-left-color: var(--pending);
+}
+.fp-runtime {
+  border-top: 1px solid var(--grid);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.fp-runtime-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-dim);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.fp-runtime-head + p {
+  color: var(--ink-faint);
+  font-size: 10px;
+  line-height: 1.5;
+  margin: 4px 0 8px;
+}
+.fp-runtime .fp-key {
+  border-left-color: var(--verify);
+}
+.fp-runtime .fp-key.restored {
+  border-left-color: var(--pending);
+}
+.fp-protocol {
+  border-top: 1px solid var(--grid);
+  margin-top: 12px;
+  padding-top: 10px;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+.fp-protocol summary {
+  align-items: center;
+  color: var(--ink-dim);
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.fp-protocol summary::marker {
+  content: "";
+}
+.fp-protocol summary::before {
+  content: "+";
+  color: var(--known);
+}
+.fp-protocol[open] summary::before {
+  content: "−";
+}
+.fp-protocol summary span {
+  margin-left: auto;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.fp-protocol p {
+  line-height: 1.55;
+  margin: 8px 0 0 18px;
 }
 .fp-key .fp-kind {
   color: var(--ink);

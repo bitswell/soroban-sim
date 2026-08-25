@@ -55,6 +55,16 @@ test.describe("interactive demo (offline)", () => {
     const present = Number(await page.locator("#snap-present").textContent());
     expect(present).toBeGreaterThan(0);
 
+    // The primary footprint hides host scaffolding from contract access while
+    // still explaining the instance and Wasm entries needed to execute.
+    await expect(page.locator("#fp-ro-count")).toHaveText("0");
+    await expect(page.locator("#fp-rw-count")).toHaveText("0");
+    await expect(page.locator("#fp-runtime")).toContainText("Load Contract instance");
+    await expect(page.locator("#fp-runtime")).toContainText("Load Wasm code");
+    await expect(page.locator("#fp-protocol-summary")).toHaveText(
+      "2 read-only · 0 read-write",
+    );
+
     // Selecting a different request invalidates the completed output instead
     // of leaving results that describe the previous fixture on screen.
     await page.getByRole("button", { name: /SAC — transfer/ }).click();
