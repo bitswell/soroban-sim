@@ -1,5 +1,9 @@
 # Milestone 0 feasibility
 
+> Historical note: the original M0 investigation below used env-host 28.0.2.
+> The live workbench now pins env-host/simulation 27.0.1 to match Testnet; the
+> current 388-byte golden SHA is `3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca`.
+
 ## Sources reviewed
 
 Local / registry sources inspected before implementation:
@@ -31,7 +35,7 @@ Native fixture simulation passes | `cargo test -p soroban-sim-core`
 Simulator component builds for `wasm32-wasip2` | `cargo build -p soroban-sim-component --target wasm32-wasip2 --release`
 Runs under Wasmtime | `pnpm run test:wasmtime`
 Jco output runs in browser Worker | `pnpm run build:jco && pnpm run test:browser`
-Native and browser/WASI results match | all compare `1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f`
+Native and browser/WASI results match | all compare `3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca`
 No network / persistent filesystem access | component WIT imports no filesystem or sockets; fixture uses in-memory snapshot
 Build/test commands documented | `README.md`, package scripts, CI workflow
 
@@ -53,7 +57,7 @@ pnpm run test:browser
 ```text
 ScVal::I32(42)
 encoded output len: 388
-encoded output sha256: 1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f
+encoded output sha256: 3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca
 ```
 
 The fixture invokes real contract wasm bytes through `soroban-env-host` and `soroban-wasmi`; it is not a TypeScript model.
@@ -98,7 +102,7 @@ The clock/random/CLI imports come from Rust `std`, WASI Preview 2 support, `getr
 
 ## Build complications / blockers
 
-1. `soroban-simulation` compiles for `wasm32-wasip2` with `soroban-env-host 28.0.2`. No source patch was needed for M0.
+1. `soroban-simulation` compiles for `wasm32-wasip2` with the current `soroban-env-host 27.0.1` pin. No upstream source patch is needed.
 2. Rust `wasm32-wasip2` emits WASI imports from `std`; Jco supplies browser shims through `@bytecodealliance/preview2-shim`.
 3. `NetworkConfig` is not Stellar XDR. M0 uses deterministic fixture config. Production API needs a canonical encoding or config-setting snapshot loading.
 4. `SnapshotSource::get` cannot represent unknown directly: `None` means absent. M1 must record missing keys and abort recognizably.

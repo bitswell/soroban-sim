@@ -5,7 +5,8 @@
  *
  * Regenerate (from repo root) via the differential harness if the encoder ever
  * changes:
- *   - `add_i32`: `runFixture()` output (the M0 golden; 388 bytes / sha 1082a3e4).
+ *   - `add_i32`: protocol-28 capture retained as a decoder sample; the runtime
+ *                golden is verified separately by fixture-worker.spec.ts.
  *   - `sac`:     `native-sac-transfer` parity fixture, `applyRpcAdjustments=true`,
  *                `enableDiagnostics=true`, zero PRNG seed.
  */

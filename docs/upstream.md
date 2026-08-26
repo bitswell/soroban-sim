@@ -2,14 +2,16 @@
 
 ## Pins
 
-Soroban Sim M0 pins:
+The live Testnet workbench pins:
 
-- `rs-soroban-env` tag `v28.0.2`
-- tag commit `5061e9c40ce6fc74ade9b9b3b49465b0cf7fdccb`
-- `soroban-env-host = 28.0.2`
-- `soroban-simulation = 28.0.2`
-- `stellar-xdr = 28.0.0` through upstream crates
+- `rs-soroban-env` tag `v27.0.1`
+- `soroban-env-host = 27.0.1`
+- `soroban-simulation = 27.0.1`
+- `stellar-xdr = 27.0.0` through upstream crates
 - `soroban-wasmi = 0.31.1-soroban.20.0.1`
+
+The source observations later in this document were originally gathered against
+28.0.2; re-check private/internal API details when upgrading the live host.
 
 Snapshot-source prior art inspected:
 

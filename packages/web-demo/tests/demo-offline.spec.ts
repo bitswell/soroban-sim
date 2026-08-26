@@ -22,6 +22,8 @@ test.describe("interactive demo (offline)", () => {
 
     // Run button becomes enabled once the worker is ready.
     const run = page.locator("#run");
+    await page.locator("#advanced-inputs summary").click();
+    await page.getByRole("button", { name: /add_i32/ }).click();
     await expect(run).toBeEnabled({ timeout: 60_000 });
 
     // add_i32 is the default fixture; run it.
@@ -53,6 +55,16 @@ test.describe("interactive demo (offline)", () => {
     const present = Number(await page.locator("#snap-present").textContent());
     expect(present).toBeGreaterThan(0);
 
+    // The primary footprint hides host scaffolding from contract access while
+    // still explaining the instance and Wasm entries needed to execute.
+    await expect(page.locator("#fp-ro-count")).toHaveText("0");
+    await expect(page.locator("#fp-rw-count")).toHaveText("0");
+    await expect(page.locator("#fp-runtime")).toContainText("Load Contract instance");
+    await expect(page.locator("#fp-runtime")).toContainText("Load Wasm code");
+    await expect(page.locator("#fp-protocol-summary")).toHaveText(
+      "2 read-only · 0 read-write",
+    );
+
     // Selecting a different request invalidates the completed output instead
     // of leaving results that describe the previous fixture on screen.
     await page.getByRole("button", { name: /SAC — transfer/ }).click();
@@ -63,10 +75,11 @@ test.describe("interactive demo (offline)", () => {
 
   test("switching to a deeper fixture works", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator("#run")).toBeEnabled({ timeout: 60_000 });
+    await page.locator("#advanced-inputs summary").click();
 
     // Select the SAC transfer fixture (deepest loop; returns void).
     await page.getByRole("button", { name: /SAC — transfer/ }).click();
+    await expect(page.locator("#run")).toBeEnabled({ timeout: 60_000 });
     await page.locator("#run").click();
 
     await expect(page.locator("#result-panel")).toBeVisible({ timeout: 60_000 });

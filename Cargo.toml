@@ -15,10 +15,11 @@ rust-version = "1.84"
 [workspace.dependencies]
 anyhow = "1.0.103"
 sha2 = "0.10.9"
-# Exact crates.io releases corresponding to rs-soroban-env tag v28.0.2
-# (git commit 5061e9c40ce6fc74ade9b9b3b49465b0cf7fdccb).
-soroban-env-host = { version = "=28.0.2", default-features = true }
-soroban-simulation = { version = "=28.0.2" }
+# Exact crates.io releases corresponding to the protocol currently running on
+# Testnet. A browser preflight must execute with the same host protocol as the
+# ledger snapshot it resolves; upgrade these together when the network moves.
+soroban-env-host = { version = "=27.0.1", default-features = true }
+soroban-simulation = { version = "=27.0.1" }
 static_assertions = "1.1.0"
 wit-bindgen = "0.60.0"
 

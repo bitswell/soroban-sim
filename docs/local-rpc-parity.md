@@ -1,16 +1,19 @@
 # Local protocol-28 RPC parity runbook
 
-Capture parity fixtures from a **local Stellar RPC pinned to protocol 28** — the
-same ledger protocol our pinned host (`soroban-env-host` 28.0.2 → network
-protocol 28) runs. This closes the raw-instruction / fee-metering residual that
-the existing testnet fixtures carry, and unlocks deterministic parity against our
-own custom-wasm contracts.
+> Historical capture runbook: the live workbench now pins protocol 27 to match
+> Testnet. Use this document only when regenerating the committed protocol-28
+> `local-add-i32` comparison fixture.
+
+This procedure captured a fixture from a **local Stellar RPC pinned to protocol
+28** while the repository also pinned `soroban-env-host` 28.0.2. To repeat it
+today, temporarily build a protocol-28 host on a separate branch; the live
+workbench must remain on Testnet's current protocol.
 
 ## Why this closes the residual
 
-The committed fixtures under `fixtures/parity/` were captured from **public
-Stellar testnet at ledger protocol 27**. `soroban-sim-core` links
-`soroban-env-host` 28.0.2, whose network interface protocol is **28**. The host's
+The public-Testnet fixtures were captured at ledger protocol 27. At the time of
+this experiment, `soroban-sim-core` linked `soroban-env-host` 28.0.2, whose
+network interface protocol was **28**. The host's
 replay-safety guard (`check_ledger_protocol_supported`) rejects any ledger
 protocol != 28, so the differential harness pins the simulated ledger context to
 protocol 28 when replaying those p27 fixtures. RESULT / FOOTPRINT / AUTH / EVENT

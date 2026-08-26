@@ -1,10 +1,9 @@
 # Differential testing plan
 
 Status: **oracles A, B, and C are GREEN; RPC equivalence (M3) demonstrated for
-three captured cases — a read-only invoke, a write+auth+event invoke, and a
-custom-wasm invoke captured at the host's own protocol 28 — with the adjustment
-model proven identical to stellar-rpc and a residual accepted down to a
-documented <0.03% env-host patch-version metering skew.** This document describes
+three captured cases — two Testnet protocol-27 invokes and one historical
+protocol-28 custom-wasm invoke — with the adjustment model proven identical to
+stellar-rpc and raw-metering residuals documented explicitly.** This document describes
 the oracles, comparison fields, fuzz dimensions, and where each check lives.
 
 - **Oracle A** (intra-native, iterative-rerun == complete run) —
@@ -14,7 +13,7 @@ the oracles, comparison fields, fuzz dimensions, and where each check lives.
   `fixtures/golden/`, the core-crate tests, `scripts/wasmtime-fixture.mjs`
   (`node scripts/wasmtime-fixture.mjs`), and the web-demo Playwright spec. Green
   across all three runtimes against the committed `add_i32` golden (388 bytes,
-  sha256 prefix `1082a3e4`).
+  sha256 prefix `3b678efa`).
 - **Oracle C** (order/batching convergence + absent-injection safety) —
   property harness in the core crate. Green under `cargo test -p soroban-sim-core`.
 - **RPC equivalence (M3)** — `packages/soroban-sim/src/differential/`
@@ -26,7 +25,7 @@ the oracles, comparison fields, fuzz dimensions, and where each check lives.
 `soroban-sim` runs the same Soroban simulation logic in three places:
 
 1. **native Rust** — `soroban-sim-core` linked against `soroban-simulation`
-   `28.0.2`, driven by `cargo test`;
+   `27.0.1`, driven by `cargo test`;
 2. **wasmtime** — the `soroban-sim-component` WASM component invoked out of
    process (`scripts/wasmtime-fixture.mjs` / `pnpm run test:wasmtime`);
 3. **browser Worker** — the same component loaded via jco in the web demo,
@@ -64,7 +63,7 @@ of stress-testing them:
   abort with `(Storage, InternalError)`. A malformed-fixture test guards this.
 - **Byte-stable encoding.** `encode_simulation_result` output is byte-identical
   across runtimes and reruns. The `add_i32` golden is the anchor: 388 bytes,
-  sha256 prefix `1082a3e4`. `run_fixture()` and
+  sha256 prefix `3b678efa`. `run_fixture()` and
   `fixtures/golden/add_i32.fixture.json` must not change behavior.
 
 A dedicated test asserts that a genuine budget/limit failure
@@ -321,53 +320,42 @@ local-add-i32), which proves the divergence is in raw metering, **not** in the
 adjustment config — if the adjustment differed, raw and adjusted deltas would not
 coincide. It has **two independent components**:
 
-1. **Protocol-metering delta (testnet fixtures).** The host pins ledger protocol
-   to 28 (`check_ledger_protocol_supported` rejects != 28), while the two
-   `native-sac-*` fixtures were captured from testnet at protocol 27. Raw CPU
-   metering changed between p27 and p28, so those fixtures carry a protocol-driven
-   component (~0.08–0.11% on fee).
-2. **Env-host patch-metering skew (proven by `local-add-i32`).** Capturing at a
-   *matching* protocol 28 shrinks the residual (0.028% fee) but does **not** zero
-   it — refuting "matching protocol closes it outright." Root cause, grounded via
-   `docker exec stellar-p28 stellar-core version`: the local quickstart core's
-   protocol-28 host reports `soroban-env-host` package version **28.0.0**, whereas
-   this repo pins **`=28.0.2`**. The 28.0.0→28.0.2 patch releases recalibrated CPU
-   metering, leaving the ~2.3% raw-instruction / 0.028% fee remainder even at
-   matching protocol.
+1. **Exact-protocol Testnet fixtures.** The browser host and both
+   `native-sac-*` fixtures use protocol 27. Result, footprint, auth, events, and
+   byte counts match. The recorded RPC build still differs from the exact
+   27.0.1 crate compiled here, leaving an 11,551 raw-instruction / 8-stroop
+   build-calibration residual.
+2. **Historical cross-protocol custom fixture.** `local-add-i32` was captured
+   against protocol 28 and is replayed by the protocol-27 live host. Semantic
+   fields still match; raw metering differs by 10,675 instructions / 27 stroops.
 
-### Decision: accept the sub-0.03% residual, keep env-host 28.0.2
+### Decision: exact network protocol first; report build residuals
 
-We keep `soroban-env-host =28.0.2` and accept the residual as a known,
-documented, `divergent-explained` difference (asserted **NOT** a MISMATCH). All
-semantic fields — result, footprint (RO+RW), auth, contract events, read/write
-bytes — are byte-equal to live RPC; only a raw CPU-metering number attributable to
-a patch-version build skew differs, by <0.03% on fee. Two paths would drive it to
-zero if ever required, both explicitly declined for now:
-
-- pin this repo to `soroban-env-host 28.0.0` to match the deployed network's core
-  (a downgrade from 28.0.2), or
-- point the local capture at a core built against 28.0.2 (e.g. a newer
-  `stellar/quickstart` `-t nightly` once it embeds 28.0.2) and re-capture.
+The live workbench pins `soroban-env-host =27.0.1` because preflight must use the
+same ledger protocol as Testnet. Remaining build-level resource differences are
+kept as `divergent-explained` rather than being force-passed. Semantic fields —
+result, footprint (RO+RW), auth, contract events, and read/write bytes — remain
+byte-equal to the recorded RPC outputs.
 
 **Protocol-version pin (a real finding, root-caused).** The host's
 replay-safety guard `check_ledger_protocol_supported` (invoked from
 `Host::set_ledger_info` during recording *setup*, `host.rs:572`) rejects any
-ledger protocol != 28 with a bare `Error(Context, InternalError)` — thrown
+ledger protocol != 27 with a bare `Error(Context, InternalError)` — thrown
 before diagnostics are enabled, which is why a protocol mismatch carries no debug
 info and no `fn_call` event. Driving a fixture as-captured (pv 27) therefore
 yields `Complete`-with-inline-error. Both invocations are protocol-invariant, so
 the harness pins the local ledger context to the host's supported protocol
-(`HOST_PROTOCOL_VERSION = 28`); result, footprint, auth, and event parity are
+(`HOST_PROTOCOL_VERSION = 27`); result, footprint, auth, and event parity are
 unaffected — only the raw metering shifts, which is exactly the residual above.
 
 **Scope — do not overclaim.** This demonstrates RPC parity across three cases: a
 read-only SAC call, a write+auth+event SAC call, and a **custom-wasm** contract
-(`add-i32`) captured at the host's own protocol 28. Invocation result, footprint
+(`add-i32`) captured at protocol 28. Invocation result, footprint
 (RO and RW), auth entries, contract events, and read/write bytes all match a live
 RPC byte-for-byte, and the resource/fee adjustment model is proven identical
 (RpcDefault instructions = raw + 50000 on all three). Raw instruction/fee numbers
-match modulo the accepted <0.03% env-host `28.0.0`-vs-`28.0.2` skew documented
-above. It does **not** yet establish general RPC authority across *arbitrary*
+carry the explicitly reported build/protocol residuals documented above. It
+does **not** yet establish general RPC authority across *arbitrary*
 custom-wasm contracts or state-archival/restore paths — those extend the fixture
 set via `pnpm run capture:parity` and remain future work.
 

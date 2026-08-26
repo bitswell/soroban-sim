@@ -2,7 +2,7 @@
 
 Status: **review / proposal — nothing here is applied.** Any ABI-affecting WIT
 change needs explicit approval and must not land while PR #16 (visual debugger)
-is open. The M0 golden (388-byte SSIM, sha256 `1082a3e4…`) and the Playwright
+is open. The M0 golden (388-byte SSIM, sha256 `3b678efa…`) and the Playwright
 suite are invariants every proposal below preserves.
 
 Reviewed on branch `review/component-model`. Every number in this document was

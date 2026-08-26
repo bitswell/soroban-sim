@@ -37,9 +37,9 @@ Implemented spike:
 
 Pinned upstream:
 
-- `soroban-simulation = 28.0.2`
-- `soroban-env-host = 28.0.2`
-- `rs-soroban-env` tag `v28.0.2`, git commit `5061e9c40ce6fc74ade9b9b3b49465b0cf7fdccb`
+- `soroban-simulation = 27.0.1`
+- `soroban-env-host = 27.0.1` (matches the current Testnet protocol)
+- `stellar-xdr = 27.0.0` through upstream crates
 - `soroban-wasmi = 0.31.1-soroban.20.0.1` through `soroban-env-host`
 - fixture contract uses `soroban-sdk = 27.0.5`
 
@@ -61,8 +61,8 @@ Pinned upstream:
   entries, and contract events are byte-identical to RPC. An `AdjustmentSource`
   knob (`apply-rpc-adjustments`) reproduces stellar-rpc's resource/fee adjustment
   model exactly (RpcDefault instructions = raw metered + 50000 on both); the only
-  residual is a small raw-CPU-metering delta from the captured fixtures being
-  protocol 27 vs the host's protocol 28, classified `divergent-explained`.
+  residual is a small raw-CPU-metering delta between the exact env-host build
+  compiled here and the RPC core build, classified `divergent-explained`.
   Re-capture with `pnpm run capture:parity <case>`.
 
 ## Requirements
@@ -102,7 +102,7 @@ Golden fixture:
 
 ```text
 len=388
-sha256=1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f
+sha256=3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca
 ```
 
 ## Measured M0 numbers
@@ -128,8 +128,9 @@ Measured on macOS arm64, Rust 1.97.1, Wasmtime 48.0.0, Chromium 151.
   `apply-rpc-adjustments` (`AdjustmentSource::RpcDefault`) reproduces
   stellar-rpc's adjustment model exactly; the parity harness confirms adjusted
   instructions = raw + 50000 on both fixtures. A small residual remains in the
-  *raw* metered numbers because the fixtures were captured at protocol 27 while
-  the host runs protocol 28 — a metering delta, not an adjustment difference.
+  *raw* metered numbers because RPC core and this browser component can use
+  different env-host patch builds. The custom local fixture is additionally a
+  protocol-28 capture replayed by the protocol-27 live-workbench host.
 - No authorization-enforcement API (recording-mode auth is captured but not
   enforced against a supplied auth tree) yet.
 
