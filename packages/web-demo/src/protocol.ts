@@ -28,6 +28,11 @@ export interface RoundKey {
   status: "present" | "absent";
   /** liveUntilLedger TTL, present entries only. */
   ttl?: number;
+  /** Decoded value for a present ContractData storage entry. */
+  value?: {
+    type: string;
+    display: string;
+  };
 }
 
 // ---- main -> worker -------------------------------------------------------

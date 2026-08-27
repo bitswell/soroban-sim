@@ -1,5 +1,69 @@
 import { expect, test } from "@playwright/test";
 
+test("present contract reads show their decoded value", async ({ page }) => {
+  await page.addInitScript(() => {
+    class FakeWorker {
+      onmessage: ((event: { data: unknown }) => void) | null = null;
+      onerror: ((event: { message?: string }) => void) | null = null;
+
+      constructor() {
+        (window as unknown as { testWorker: FakeWorker }).testWorker = this;
+        setTimeout(() => this.onmessage?.({ data: { type: "ready" } }), 0);
+      }
+
+      postMessage(): void {}
+      terminate(): void {}
+    }
+
+    Object.defineProperty(window, "Worker", {
+      configurable: true,
+      value: FakeWorker,
+    });
+  });
+
+  await page.goto("/");
+  await page.evaluate(() => {
+    const worker = (window as unknown as {
+      testWorker: {
+        onmessage: ((event: { data: unknown }) => void) | null;
+      };
+    }).testWorker;
+    worker.onmessage?.({
+      data: {
+        type: "round",
+        id: 0,
+        roundIndex: 1,
+        rerunCount: 1,
+        requestedKeyCount: 1,
+        roundMs: 1,
+        keys: [
+          {
+            label: "ContractData Message · CBXVJX…JFGNDM · persistent",
+            kind: "ContractData",
+            detail: "Message · CBXVJX…JFGNDM · persistent",
+            role: "contract-storage",
+            key: "Message",
+            status: "present",
+            ttl: 4_500_000,
+            value: {
+              type: "String",
+              display: "Hello from contract storage",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  await expect(page.locator("#timeline .rvalue")).toContainText("read value");
+  await expect(page.locator("#timeline .rvalue")).toContainText(
+    "String · Hello from contract storage",
+  );
+  await expect(page.locator("#snap-list .s-value")).toContainText(
+    "String · Hello from contract storage",
+  );
+});
+
 test.describe("deployed contract / XDR workbench", () => {
   test("creates one disposable Testnet identity and keeps its secret out of the UI", async ({
     page,

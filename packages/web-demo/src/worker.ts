@@ -39,6 +39,7 @@ import {
   authLabel,
   buildCallFrames,
   type CallFrame,
+  contractDataValueLabel,
   contractEventLabel,
   footprintLabels,
   ledgerChangeLabel,
@@ -191,6 +192,10 @@ class RecordingProvider implements StateProvider {
       if (decodedKey !== undefined) key.key = decodedKey;
       if (res.status === "present" && res.entry.liveUntilLedger !== undefined) {
         key.ttl = res.entry.liveUntilLedger;
+      }
+      if (res.status === "present" && role === "contract-storage") {
+        const value = contractDataValueLabel(res.entry.entryXdr);
+        if (value !== undefined) key.value = value;
       }
       return key;
     });

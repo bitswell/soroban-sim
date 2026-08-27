@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
+import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { ADD_I32_SSIM_B64, SAC_TRANSFER_SSIM_B64 } from "./ssim-samples.js";
 
 /**
@@ -84,6 +85,41 @@ async function decodeInPage(page: import("@playwright/test").Page, b64: string) 
 }
 
 test.describe("SSIM decode + label layer", () => {
+  test("decodes a ContractData storage value", async ({ page }) => {
+    const entry = new xdr.LedgerEntry({
+      lastModifiedLedgerSeq: 123,
+      data: xdr.LedgerEntryData.contractData(
+        new xdr.ContractDataEntry({
+          ext: xdr.ExtensionPoint.v0(),
+          contract: Address.fromString(
+            "CBXVJXHPSYORSAHPX4I6NYPQMDJWK2STQCE6JTIM7FNV4OZSIDJFGNDM",
+          ).toScAddress(),
+          key: xdr.ScVal.scvSymbol("Message"),
+          durability: xdr.ContractDataDurability.fromName("persistent"),
+          val: nativeToScVal("Hello from contract storage", { type: "string" }),
+        }),
+      ),
+      ext: xdr.LedgerEntryExt.v0(),
+    });
+    const b64 = entry.toXdr("base64");
+
+    await page.goto("/");
+    const value = await page.evaluate(async (encoded: string) => {
+      const decodePath = "/src/decode.ts";
+      const { contractDataValueLabel } = await import(
+        /* @vite-ignore */ decodePath
+      );
+      const bin = atob(encoded);
+      const bytes = Uint8Array.from(bin, (char) => char.charCodeAt(0));
+      return contractDataValueLabel(bytes);
+    }, b64);
+
+    expect(value).toEqual({
+      type: "String",
+      display: "Hello from contract storage",
+    });
+  });
+
   test("decodes the add_i32 golden: budget > 0 and a non-empty footprint", async ({
     page,
   }) => {

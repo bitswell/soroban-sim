@@ -896,6 +896,26 @@ function presentKey(key: TimelineKey): KeyPresentation {
   }
 }
 
+function compactReadValue(value: string, max = 120): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+function readValueElement(key: TimelineKey, className: string): HTMLElement | undefined {
+  if (key.role !== "contract-storage" || key.status !== "present" || !key.value) {
+    return undefined;
+  }
+  const row = document.createElement("div");
+  row.className = className;
+  const label = document.createElement("span");
+  label.textContent = "read value";
+  const value = document.createElement("code");
+  const full = `${key.value.type} · ${key.value.display}`;
+  value.textContent = compactReadValue(full);
+  value.title = full;
+  row.append(label, value);
+  return row;
+}
+
 function appendTimelineConnector(label: string): void {
   const connector = document.createElement("div");
   connector.className = "dependency-arrow";
@@ -974,6 +994,9 @@ function appendTimelineRound(key: TimelineKey, roundIndex: number): HTMLElement 
   detail.title = key.label;
   cell.appendChild(detail);
 
+  const readValue = readValueElement(key, "rvalue");
+  if (readValue) cell.appendChild(readValue);
+
   const hint = document.createElement("div");
   hint.className = "rhint";
   hint.textContent = presentation.hint;
@@ -1040,6 +1063,8 @@ function appendSnapshotRow(key: RoundMsg["keys"][number]): void {
   detail.textContent = `${key.kind} · ${presentation.detail}`;
   detail.title = key.label;
   copy.append(label, detail);
+  const readValue = readValueElement(key, "s-value");
+  if (readValue) copy.appendChild(readValue);
   const ttl = document.createElement("span");
   ttl.className = "s-ttl";
   ttl.textContent = key.status === "present" && key.ttl ? `ttl ${shortTtl(key.ttl)}` : "—";

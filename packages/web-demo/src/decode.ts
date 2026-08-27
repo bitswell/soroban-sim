@@ -253,6 +253,20 @@ function ledgerEntryView(bytes: Uint8Array): LedgerEntryView {
   }
 }
 
+/** Decode the stored ScVal from a full ContractData LedgerEntry. */
+export function contractDataValueLabel(bytes: Uint8Array): ScValLabel | undefined {
+  try {
+    const entry = xdr.LedgerEntry.fromXdr(bytes as unknown as Buffer);
+    const data = field(entry, "data") as { type?: string; value?: unknown };
+    if (data?.type !== "contractData") return undefined;
+    const val = field(data.value, "val");
+    if (!val || tagName(val) === "scvContractInstance") return undefined;
+    return scValLabel(toXdrBytes(val));
+  } catch {
+    return undefined;
+  }
+}
+
 /** Turn SSIM's optional before/after entry pair into a display-ready change. */
 export function ledgerChangeLabel(
   before: Uint8Array | undefined,
