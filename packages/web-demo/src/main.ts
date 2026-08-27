@@ -1074,6 +1074,7 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   resultNote.hidden = false;
   rErr.hidden = true;
   resultPanel.classList.remove("error");
+  const resultReady = msg.ok && !msg.emptyResult;
   resultContext.hidden = false;
   const liveWorkbench =
     msg.requestKind === "contract" || msg.requestKind === "xdr";
@@ -1091,10 +1092,19 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
     : "deterministic snapshot";
 
   if (msg.ok) {
-    rValue.textContent = `${msg.scValType} · ${msg.scValDisplay}`;
+    const declaredOption = msg.declaredResultType?.startsWith("Option<");
+    rValue.textContent = declaredOption
+      ? `${msg.declaredResultType} · ${msg.emptyResult ? "None" : `Some(${msg.scValDisplay})`}`
+      : `${msg.scValType} · ${msg.scValDisplay}`;
     rLen.textContent = `${msg.resultLen} B`;
     rSha.textContent = msg.sha256;
+    if (msg.emptyResult) {
+      resultPanel.classList.add("error");
+      rErr.hidden = false;
+      rErr.textContent = `No value exists for this lookup. The contract declares ${msg.declaredResultType}; the missing storage entry is represented as None (raw ScVal::Void).`;
+    }
   } else {
+    resultPanel.classList.add("error");
     rValue.textContent = "host error";
     rLen.textContent = `${msg.resultLen} B`;
     rSha.textContent = msg.sha256;
@@ -1113,11 +1123,13 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   }
 
   resultNote.textContent = liveWorkbench
-    ? `RPC supplied ledger entries at Testnet ledger ${fmtInt(msg.ledgerSequence ?? 0)}. The transaction executed in this Worker and was not submitted.`
+    ? msg.emptyResult
+      ? `RPC supplied ledger entries at Testnet ledger ${fmtInt(msg.ledgerSequence ?? 0)}. Execution completed in this Worker, but the contract returned None because the requested storage entry does not exist.`
+      : `RPC supplied ledger entries at Testnet ledger ${fmtInt(msg.ledgerSequence ?? 0)}. The transaction executed in this Worker and was not submitted.`
     : "Deterministic SSIM bytes — the same rerun loop yields the same result in this Worker, the native runner, and CI.";
 
   if (
-    msg.ok &&
+    resultReady &&
     msg.preparedTransactionXdr &&
     msg.sourceAccount &&
     activeContractInvocation
@@ -1255,10 +1267,13 @@ function renderStateImpact(
 function renderSubmissionRequirements(
   msg: Extract<WorkerToMain, { type: "sim-result" }>,
 ): void {
+  const resultReady = msg.ok && !msg.emptyResult;
   const restoreCount = (msg.stateChanges ?? []).filter(
     (change) => change.category === "maintenance",
   ).length;
-  submitStatus.textContent = msg.ok
+  submitStatus.textContent = msg.emptyResult
+    ? "no value returned · storage entry does not exist · not submitted"
+    : msg.ok
     ? preparedTransactionXdr
       ? restoreCount > 0
         ? `locally prepared · restores ${restoreCount} archived ${restoreCount === 1 ? "entry" : "entries"} · ready to sign · not submitted`
@@ -1287,8 +1302,10 @@ function renderSubmissionRequirements(
     ? `${fmtInt(Number(msg.resources.resourceFee))} stroops minimum resource fee`
     : "resource fee unavailable";
   reviewSubmitBtn.disabled =
-    !preparedTransactionXdr || !msg.ok || !authorizerMatches;
-  submissionBoundary.textContent = preparedTransactionXdr
+    !preparedTransactionXdr || !resultReady || !authorizerMatches;
+  submissionBoundary.textContent = msg.emptyResult
+    ? "The contract returned None for this lookup, so there is no value to sign or submit. Change the argument or create the missing state first."
+    : preparedTransactionXdr
     ? authorizerMatches
       ? "This exact envelope ran locally. Review is the first point where a wallet prompt or Testnet broadcast is allowed."
       : "The contract recorded authorization for a different address. Select that wallet (or correct the contract argument), then simulate again."
@@ -1765,7 +1782,8 @@ function onContractInfo(msg: ContractInfoMsg): void {
     for (const fn of msg.fns) {
       const option = document.createElement("option");
       option.value = fn.name;
-      option.textContent = `${fn.name}(${fn.args.map((arg) => arg.name).join(", ")})`;
+      const resultType = fn.outputs?.length ? fn.outputs.join(", ") : "Void";
+      option.textContent = `${fn.name}(${fn.args.map((arg) => arg.name).join(", ")}) → ${resultType}`;
       contractFn.appendChild(option);
     }
     if (msg.fns.some((fn) => fn.name === "get_message")) {

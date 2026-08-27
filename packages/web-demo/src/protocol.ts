@@ -230,6 +230,10 @@ export interface SimResultMsg {
   ok: boolean;
   /** Inline host/contract error string, when ok === false. */
   errorText?: string;
+  /** Return type declared by the loaded contract spec, when available. */
+  declaredResultType?: string;
+  /** A successful Option<T> invocation returned None (raw ScVal::Void). */
+  emptyResult?: boolean;
   /** Snapshot tallies the loop accumulated. */
   present: number;
   absent: number;
@@ -367,6 +371,8 @@ export interface UploadFnArg {
 export interface UploadFnInfo {
   name: string;
   args: UploadFnArg[];
+  /** Human-readable declared return types, e.g. Option<String>. */
+  outputs?: string[];
 }
 export interface UploadInfoMsg {
   type: "upload-info";

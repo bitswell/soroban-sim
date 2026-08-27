@@ -715,6 +715,8 @@ interface RunMeta {
   operationCount?: number;
   /** Initial exact envelope, before local transaction data + auth are applied. */
   rawTransaction?: Transaction;
+  /** Return type declared by the loaded contract spec, when available. */
+  declaredResultType?: string;
 }
 
 function assemblePreparedTransaction(
@@ -763,6 +765,11 @@ async function postSimResult(
       decoded.result.ok && decoded.result.scValXdr.length > 0
         ? scValLabel(decoded.result.scValXdr)
         : { type: "Void", display: "void" };
+    const emptyResult = Boolean(
+      decoded.result.ok &&
+        scv.type === "Void" &&
+        meta.declaredResultType?.startsWith("Option<"),
+    );
 
     // Turn the decoded XDR slices into display-ready state, all worker-side.
     // Each label helper is internally guarded (returns undefined / a "—" marker
@@ -827,6 +834,10 @@ async function postSimResult(
       scValDisplay: scv.display,
       ok: decoded.result.ok,
       errorText: decoded.result.ok ? undefined : decoded.result.error,
+      ...(meta.declaredResultType
+        ? { declaredResultType: meta.declaredResultType }
+        : {}),
+      emptyResult,
       present: recording.present,
       absent: recording.absent,
       instructions: decoded.simulatedInstructions,
@@ -899,6 +910,16 @@ function specTypeToInput(typeName: string): UploadArgInput {
   }
 }
 
+/** Turn the useful subset of ScSpecTypeDef into contract-developer notation. */
+function specTypeLabel(typeDef: unknown): string {
+  const typeName = String(xf(typeDef, "type") ?? "Unknown");
+  if (typeName === "scSpecTypeOption") {
+    const option = xf(typeDef, "option");
+    return `Option<${specTypeLabel(xf(option, "valueType"))}>`;
+  }
+  return typeName.replace(/^scSpecType/, "") || "Unknown";
+}
+
 async function handleUploadParse(msg: UploadParseMsg): Promise<void> {
   try {
     const bytes = msg.bytes;
@@ -928,6 +949,7 @@ async function handleUploadParse(msg: UploadParseMsg): Promise<void> {
         spec = parsed;
         fns = funcs.map((f) => ({
           name: String(xf(f, "name")),
+          outputs: ((xf(f, "outputs") as unknown[]) ?? []).map(specTypeLabel),
           args: ((xf(f, "inputs") as unknown[]) ?? []).map((inp) => {
             const t = xf(inp, "type");
             const typeName =
@@ -993,6 +1015,12 @@ interface CallableState {
   spec?: InstanceType<typeof contract.Spec>;
   fns: UploadFnInfo[];
   ladder: "spec" | "names" | "raw";
+}
+
+function functionResultType(state: CallableState, fn: string): string | undefined {
+  const outputs = state.fns.find((candidate) => candidate.name === fn)?.outputs;
+  if (!outputs) return undefined;
+  return outputs.length === 0 ? "Void" : outputs.join(", ");
 }
 
 /** Convert raw arg strings into ScVals via a discovered spec (or b64 XDR). */
@@ -1196,6 +1224,9 @@ async function handleSimulateUpload(msg: SimulateUploadMsg): Promise<void> {
       requestKind: "upload",
       sourceAccount: DEFAULT_SIMULATION_SOURCE,
       operationCount: 1,
+      ...(functionResultType(state, msg.fn)
+        ? { declaredResultType: functionResultType(state, msg.fn) }
+        : {}),
     });
   } catch (error) {
     post({
@@ -1222,6 +1253,7 @@ function specFunctions(
 ): UploadFnInfo[] {
   return spec.funcs().map((fn) => ({
     name: String(xf(fn, "name")),
+    outputs: ((xf(fn, "outputs") as unknown[]) ?? []).map(specTypeLabel),
     args: ((xf(fn, "inputs") as unknown[]) ?? []).map((input) => {
       const typeDef = xf(input, "type");
       const typeName =
@@ -1431,6 +1463,9 @@ async function handleSimulateContract(msg: SimulateContractMsg): Promise<void> {
       sourceAccount: msg.sourceAccount ?? DEFAULT_SIMULATION_SOURCE,
       operationCount: 1,
       rawTransaction,
+      ...(functionResultType(state, msg.fn)
+        ? { declaredResultType: functionResultType(state, msg.fn) }
+        : {}),
     });
   } catch (error) {
     post({
