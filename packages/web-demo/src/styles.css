@@ -650,8 +650,12 @@ body {
   border-color: var(--known);
 }
 .chip.absent {
-  background-image: var(--hatch);
-  border-color: var(--ink-faint);
+  background: color-mix(in srgb, var(--danger) 12%, var(--panel-2));
+  border-color: var(--danger);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--danger) 70%, transparent);
+}
+.legend .legend-absent {
+  color: var(--danger);
 }
 .chip.reference {
   background: color-mix(in srgb, var(--pending) 8%, transparent);
@@ -908,7 +912,7 @@ body {
   font-weight: 500;
 }
 .snap-counter .abs {
-  color: var(--ink-dim);
+  color: var(--danger);
 }
 .snap-list {
   display: flex;
@@ -941,9 +945,15 @@ body {
 .snap-row.present .dot {
   background: var(--known);
 }
+.snap-row.absent {
+  border-color: color-mix(in srgb, var(--danger) 65%, var(--grid));
+  background: color-mix(in srgb, var(--danger) 6%, var(--panel-2));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--danger) 70%, transparent);
+}
 .snap-row.absent .dot {
-  background-image: var(--hatch);
-  border: 1px solid var(--ink-faint);
+  background: color-mix(in srgb, var(--danger) 12%, var(--panel-2));
+  border: 1px solid var(--danger);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--danger) 70%, transparent);
 }
 .snap-row .s-copy {
   min-width: 0;
