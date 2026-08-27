@@ -37,9 +37,9 @@ Implemented spike:
 
 Pinned upstream:
 
-- `soroban-simulation = 27.0.1`
-- `soroban-env-host = 27.0.1` (matches the current Testnet protocol)
-- `stellar-xdr = 27.0.0` through upstream crates
+- `soroban-simulation = 28.0.0`
+- `soroban-env-host = 28.0.0` (matches the current Testnet protocol)
+- `stellar-xdr = 28.0.0` through upstream crates
 - `soroban-wasmi = 0.31.1-soroban.20.0.1` through `soroban-env-host`
 - fixture contract uses `soroban-sdk = 27.0.5`
 
@@ -129,8 +129,8 @@ Measured on macOS arm64, Rust 1.97.1, Wasmtime 48.0.0, Chromium 151.
   stellar-rpc's adjustment model exactly; the parity harness confirms adjusted
   instructions = raw + 50000 on both fixtures. A small residual remains in the
   *raw* metered numbers because RPC core and this browser component can use
-  different env-host patch builds. The custom local fixture is additionally a
-  protocol-28 capture replayed by the protocol-27 live-workbench host.
+  different env-host patch builds. The custom local fixture and live-workbench
+  host both use protocol 28.
 - No authorization-enforcement API (recording-mode auth is captured but not
   enforced against a supplied auth tree) yet.
 

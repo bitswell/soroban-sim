@@ -31,7 +31,7 @@ import type { ConnectedWallet } from "./wallet.js";
 
 /** The committed add_i32 golden the CI gate and native runner also produce. */
 const GOLDEN_LEN = 388;
-const GOLDEN_SHA = "3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca";
+const GOLDEN_SHA = "1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f";
 // ---- element handles -------------------------------------------------------
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -197,7 +197,7 @@ const submitErr = $("submit-err");
 const submitProgress = $("submit-progress");
 const confirmSubmitBtn = $<HTMLButtonElement>("confirm-submit");
 
-/** Per-transaction host budget caps (soroban-env-host, protocol 27). */
+/** Per-transaction host budget caps (soroban-env-host, protocol 28). */
 const CPU_CAP = 100_000_000;
 const MEM_CAP = 40 * 1024 * 1024;
 const TESTNET_RPC_URL = "https://soroban-testnet.stellar.org";
@@ -1671,13 +1671,23 @@ function failRunText(message: string): void {
   resultPanel.hidden = false;
   resultNote.hidden = true;
   resultPanel.classList.add("error");
+  const protocolMismatch =
+    /browser host supports protocol \d+.*Testnet is on protocol \d+/i.test(message);
   const rpcFailure = /rpc|testnet|fetch|network|ledger advanced/i.test(message);
-  rValue.textContent = rpcFailure ? "testnet state unavailable" : "simulation failed";
+  rValue.textContent = protocolMismatch
+    ? "browser host upgrade required"
+    : rpcFailure
+      ? "testnet state unavailable"
+      : "simulation failed";
   rLen.textContent = "—";
   rSha.textContent = "—";
   rBadge.classList.add("hidden");
   rErr.hidden = false;
-  rErr.textContent = rpcFailure ? `${message} — retry to pin a fresh ledger.` : message;
+  rErr.textContent = protocolMismatch
+    ? `${message}. This preview must be rebuilt with matching protocol support.`
+    : rpcFailure
+      ? `${message} — retry to pin a fresh ledger.`
+      : message;
 }
 
 // ---- deployed Testnet contract --------------------------------------------
