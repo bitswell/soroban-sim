@@ -244,6 +244,109 @@ body {
   font-weight: 500;
 }
 
+/* Testnet identity + wallet boundary */
+.identity-card {
+  margin-top: 14px;
+  border: 1px solid var(--grid);
+  background: var(--panel-2);
+  padding: 11px;
+}
+.identity-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.identity-head p,
+.identity-view p {
+  margin: 4px 0 0;
+  color: var(--ink-dim);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.network-pill {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--pending) 55%, var(--grid));
+  color: var(--pending);
+  padding: 3px 6px;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.identity-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 10px 0;
+  border: 1px solid var(--grid);
+}
+.identity-tabs button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  font: 500 9px var(--display);
+  padding: 8px 6px;
+  cursor: pointer;
+}
+.identity-tabs button + button { border-left: 1px solid var(--grid); }
+.identity-tabs button[aria-pressed="true"] {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--known) 14%, transparent);
+}
+.identity-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.identity-row > span { color: var(--ink-dim); font-size: 9px; }
+.identity-row code {
+  color: var(--ink);
+  font-size: 9.5px;
+  overflow-wrap: anywhere;
+}
+.identity-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-dim);
+  font-size: 9.5px;
+  margin: 8px 0;
+}
+.identity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pending);
+}
+.identity-dot.ready { background: var(--verify); }
+.identity-dot.error { background: var(--danger); }
+.identity-action,
+.submit-action {
+  appearance: none;
+  width: 100%;
+  border: 1px solid var(--known);
+  background: color-mix(in srgb, var(--known) 14%, var(--panel));
+  color: var(--ink);
+  font: 500 10px var(--display);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.identity-action:disabled,
+.submit-action:disabled { opacity: 0.45; cursor: default; }
+.identity-link,
+.dialog-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  font: 10px var(--mono);
+  padding: 6px 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.identity-caution { color: var(--ink-faint) !important; }
+
 /* ---- console grid ------------------------------------------------------ */
 .console {
   order: 2;
@@ -1560,6 +1663,69 @@ body {
   font-size: 10.5px;
   font-weight: 400;
   text-align: right;
+}
+.submission-boundary {
+  color: var(--ink-dim);
+  font-size: 9.5px;
+  line-height: 1.5;
+  margin: 12px 0 9px;
+}
+.submit-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  border: 1px solid var(--grid);
+  background: var(--panel);
+  color: var(--ink);
+  padding: 0;
+}
+.submit-dialog::backdrop { background: rgb(4 8 15 / 76%); }
+.submit-dialog-card { padding: 18px; }
+.submit-dialog .panel-head { align-items: center; }
+.dialog-close {
+  font-size: 20px;
+  line-height: 1;
+  padding: 0 4px;
+  text-decoration: none;
+}
+.submit-warning {
+  border-left: 3px solid var(--pending);
+  background: color-mix(in srgb, var(--pending) 8%, transparent);
+  color: var(--ink-dim);
+  font-size: 11px;
+  padding: 9px 10px;
+}
+.submit-review { margin: 14px 0; }
+.submit-review > div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  border-bottom: 1px solid var(--grid-soft);
+  padding: 8px 0;
+}
+.submit-review dt { color: var(--ink-faint); font-size: 9px; text-transform: uppercase; }
+.submit-review dd { margin: 0; color: var(--ink); font-size: 10px; overflow-wrap: anywhere; }
+.review-xdr { border: 1px solid var(--grid); padding: 9px 10px; }
+.review-xdr summary { color: var(--ink-dim); font-size: 10px; cursor: pointer; }
+.review-xdr code {
+  display: block;
+  max-height: 120px;
+  overflow: auto;
+  color: var(--ink-faint);
+  font-size: 8.5px;
+  overflow-wrap: anywhere;
+  margin-top: 8px;
+}
+.submit-progress {
+  color: var(--known);
+  font-size: 10px;
+  margin-top: 12px;
+}
+.dialog-actions {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
 }
 
 /* ssim byte map */

@@ -40,7 +40,8 @@
         <p class="mode-help">
           Contract execution always stays in this browser. <b>Saved snapshot</b>
           uses committed ledger entries; <b>Testnet state</b> asks Stellar RPC
-          only for missing entries. This preview never submits a transaction.
+          only for missing entries. Signing and submission happen only after a
+          separate review step.
         </p>
       </header>
 
@@ -209,9 +210,56 @@
             </div>
             <div class="up-args" id="contract-args"></div>
             <p class="up-err" id="contract-err" hidden></p>
-            <p class="simulation-source">
-              Simulation source <code>GALD…OJIX</code> · no key is stored or used
-              to sign.
+
+            <section class="identity-card" aria-labelledby="identity-h">
+              <div class="identity-head">
+                <div>
+                  <span class="eyebrow" id="identity-h">Transaction identity</span>
+                  <p>The fee payer supplies the G-account envelope; the contract authorizer may be a G- or C-account.</p>
+                </div>
+                <span class="network-pill">Testnet only</span>
+              </div>
+              <div class="identity-tabs" role="group" aria-label="Transaction identity source">
+                <button id="identity-local" type="button" aria-pressed="true">Local test account</button>
+                <button id="identity-wallet" type="button" aria-pressed="false">Connect wallet</button>
+              </div>
+
+              <div class="identity-view" id="local-identity-view">
+                <div class="identity-row">
+                  <span>Fee payer + suggested authorizer</span>
+                  <code id="local-identity-address">creating…</code>
+                </div>
+                <div class="identity-state">
+                  <span class="identity-dot" id="local-identity-dot"></span>
+                  <span id="local-identity-status">Checking Testnet account…</span>
+                </div>
+                <button class="identity-action" id="fund-identity" type="button" disabled>
+                  Fund with Friendbot
+                </button>
+                <p class="identity-caution">
+                  A disposable G-account is stored only in this browser. Its secret
+                  is never displayed or sent to RPC. Do not fund it on Mainnet.
+                </p>
+              </div>
+
+              <div class="identity-view" id="wallet-identity-view" hidden>
+                <div id="wallet-disconnected">
+                  <p>Choose Nido, Freighter, xBull, or Albedo. Nido supplies a C-account; this browser's local G-account remains the fee payer.</p>
+                  <button class="identity-action" id="connect-wallet" type="button">Choose wallet</button>
+                </div>
+                <div id="wallet-connected" hidden>
+                  <div class="identity-row">
+                    <span id="wallet-name">Wallet</span>
+                    <code id="wallet-address">—</code>
+                  </div>
+                  <button class="identity-link" id="disconnect-wallet" type="button">Disconnect</button>
+                </div>
+                <p class="up-err" id="wallet-err" hidden></p>
+              </div>
+            </section>
+
+            <p class="simulation-source" id="simulation-source">
+              Fund the local account to simulate the exact envelope that can be signed and submitted.
             </p>
           </div>
 
@@ -525,7 +573,7 @@
           <section class="panel submission" aria-labelledby="submission-h">
             <div class="panel-head">
               <span class="eyebrow" id="submission-h">Submission requirements</span>
-              <span class="sub">preflight only</span>
+              <span class="sub">explicit boundary</span>
             </div>
             <div class="submission-list">
               <div><span>status</span><b id="submit-status">not submitted</b></div>
@@ -533,6 +581,12 @@
               <div><span>authorization</span><b id="submit-auth">—</b></div>
               <div><span>resource fee</span><b id="submit-fee">—</b></div>
             </div>
+            <p class="submission-boundary" id="submission-boundary">
+              Run a local simulation first. No wallet prompt or network submission can happen during simulation.
+            </p>
+            <button class="submit-action" id="review-submit" type="button" disabled>
+              Review sign &amp; submit
+            </button>
           </section>
         </div>
 
@@ -673,6 +727,36 @@
         Simulation runs in a Web Worker — the UI thread only renders progress.
       </footer>
     </div>
+
+    <dialog class="submit-dialog" id="submit-dialog" aria-labelledby="submit-dialog-h">
+      <form method="dialog" class="submit-dialog-card">
+        <div class="panel-head">
+          <span class="eyebrow" id="submit-dialog-h">Review Testnet submission</span>
+          <button class="dialog-close" value="cancel" aria-label="Close review">×</button>
+        </div>
+        <p class="submit-warning">
+          Local simulation is finished. The next action can open a wallet and broadcast a real Testnet transaction.
+        </p>
+        <dl class="submit-review">
+          <div><dt>Contract call</dt><dd id="review-call">—</dd></div>
+          <div><dt>Fee payer</dt><dd id="review-source">—</dd></div>
+          <div><dt>Authorizer</dt><dd id="review-authorizer">—</dd></div>
+          <div><dt>Resource fee</dt><dd id="review-fee">—</dd></div>
+        </dl>
+        <details class="review-xdr">
+          <summary>Inspect prepared transaction XDR</summary>
+          <code id="review-xdr">—</code>
+        </details>
+        <p class="up-err" id="submit-err" hidden></p>
+        <div class="submit-progress" id="submit-progress" hidden></div>
+        <div class="dialog-actions">
+          <button class="identity-link" value="cancel">Cancel</button>
+          <button class="submit-action" id="confirm-submit" value="default" type="button">
+            Sign &amp; submit to Testnet
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

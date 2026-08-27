@@ -23,7 +23,18 @@ import type {
   StateProvider,
   TraceStep,
 } from "@theahaco/soroban-sim";
-import { Address, contract, rpc, StrKey, xdr } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Address,
+  BASE_FEE,
+  contract,
+  Operation,
+  rpc,
+  StrKey,
+  type Transaction,
+  TransactionBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
 import {
   authLabel,
   buildCallFrames,
@@ -700,6 +711,39 @@ interface RunMeta {
   ledgerSequence?: number;
   sourceAccount?: string;
   operationCount?: number;
+  /** Initial exact envelope, before local transaction data + auth are applied. */
+  rawTransaction?: Transaction;
+}
+
+function assemblePreparedTransaction(
+  raw: Transaction,
+  transactionData: Uint8Array,
+  authEntries: Uint8Array[],
+): string {
+  const operation = raw.operations[0];
+  if (!operation || operation.type !== "invokeHostFunction") {
+    throw new Error("only a single contract invocation can be prepared");
+  }
+  const sorobanData = xdr.SorobanTransactionData.fromXdr(
+    transactionData as unknown as Buffer,
+  );
+  const auth = authEntries.map((entry) =>
+    xdr.SorobanAuthorizationEntry.fromXdr(entry as unknown as Buffer),
+  );
+  const builder = TransactionBuilder.cloneFrom(raw, {
+    fee: raw.fee,
+    networkPassphrase: NETWORK_PASSPHRASE,
+    sorobanData,
+  });
+  builder.clearOperations();
+  builder.addOperation(
+    Operation.invokeHostFunction({
+      source: operation.source,
+      func: operation.func,
+      auth,
+    }),
+  );
+  return builder.build().toEnvelope().toXdr("base64");
 }
 
 async function postSimResult(
@@ -726,6 +770,14 @@ async function postSimResult(
       : undefined;
     const contractEvents = decoded.contractEvents.map((e) => contractEventLabel(e));
     const auth = decoded.auth.map((a) => authLabel(a));
+    const preparedTransactionXdr =
+      meta.rawTransaction && decoded.transactionData && decoded.result.ok
+        ? assemblePreparedTransaction(
+            meta.rawTransaction,
+            decoded.transactionData,
+            decoded.auth,
+          )
+        : undefined;
     let stateChanges: StateChangeLabel[] = decoded.modifiedEntries.map((change) =>
       ledgerChangeLabel(change.before, change.after),
     );
@@ -797,6 +849,7 @@ async function postSimResult(
       ledgerSequence: meta.ledgerSequence,
       sourceAccount: meta.sourceAccount,
       operationCount: meta.operationCount,
+      preparedTransactionXdr,
       regions,
       resultHex,
       debuggable: debuggable && decoded.result.ok,
@@ -1320,22 +1373,49 @@ async function handleSimulateContract(msg: SimulateContractMsg): Promise<void> {
       }),
     );
     const hostFunctionXdr = new Uint8Array(hostFunction.toXdr());
-    const sourceAccountXdr = defaultSourceAccountXdr();
+    let sourceAccountXdr = defaultSourceAccountXdr();
+    let rawTransaction: Transaction | undefined;
+    if (msg.sourceAccount && msg.sourceAccountSequence !== undefined) {
+      rawTransaction = new TransactionBuilder(
+        new Account(msg.sourceAccount, msg.sourceAccountSequence),
+        {
+          fee: BASE_FEE,
+          networkPassphrase: NETWORK_PASSPHRASE,
+        },
+      )
+        .addOperation(Operation.invokeHostFunction({ func: hostFunction }))
+        .setTimeout(300)
+        .build();
+      sourceAccountXdr = invokeFromEnvelope(
+        new Uint8Array(rawTransaction.toEnvelope().toXdr()),
+      ).sourceAccountXdr;
+    }
     const sim = await SorobanSimulator.create({
       networkPassphrase: NETWORK_PASSPHRASE,
       provider: recording,
     });
-    const result = await sim.simulate(
-      {
-        hostFunctionXdr,
-        sourceAccountXdr,
-        ledgerContext: snapshot.ledgerContext,
-        basePrngSeed: new Uint8Array(32),
-        enableDiagnostics: false,
-        applyRpcAdjustments: true,
-      },
-      { signal: controller.signal },
-    );
+    const result = rawTransaction
+      ? await sim.simulateTransaction(
+          {
+            transactionXdr: new Uint8Array(rawTransaction.toEnvelope().toXdr()),
+            ledgerContext: snapshot.ledgerContext,
+            basePrngSeed: new Uint8Array(32),
+            enableDiagnostics: false,
+            applyRpcAdjustments: true,
+          },
+          { signal: controller.signal },
+        )
+      : await sim.simulate(
+          {
+            hostFunctionXdr,
+            sourceAccountXdr,
+            ledgerContext: snapshot.ledgerContext,
+            basePrngSeed: new Uint8Array(32),
+            enableDiagnostics: false,
+            applyRpcAdjustments: true,
+          },
+          { signal: controller.signal },
+        );
     stashDebugContext(msg.id, {
       networkPassphrase: NETWORK_PASSPHRASE,
       ledgerContext: snapshot.ledgerContext,
@@ -1346,8 +1426,9 @@ async function handleSimulateContract(msg: SimulateContractMsg): Promise<void> {
     await postSimResult(msg.id, result, recording, started, true, {
       requestKind: "contract",
       ledgerSequence: snapshot.ledgerSequence,
-      sourceAccount: DEFAULT_SIMULATION_SOURCE,
+      sourceAccount: msg.sourceAccount ?? DEFAULT_SIMULATION_SOURCE,
       operationCount: 1,
+      rawTransaction,
     });
   } catch (error) {
     post({

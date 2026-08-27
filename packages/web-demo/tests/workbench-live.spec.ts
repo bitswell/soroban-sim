@@ -5,6 +5,7 @@ import {
   BASE_FEE,
   Contract,
   Networks,
+  rpc,
   TransactionBuilder,
 } from "@stellar/stellar-sdk";
 
@@ -20,6 +21,11 @@ test("Nido Status Message write simulates locally against Testnet", async ({ pag
   test.setTimeout(180_000);
 
   await page.goto("/");
+  await page.locator("#fund-identity").click();
+  await expect(page.locator("#local-identity-status")).toContainText(
+    "ready to pay fees",
+    { timeout: 45_000 },
+  );
   const load = page.locator("#load-contract");
   await expect(load).toBeEnabled({ timeout: 60_000 });
   await load.click();
@@ -43,6 +49,21 @@ test("Nido Status Message write simulates locally against Testnet", async ({ pag
   await expect(page.locator("#impact-list .impact-item")).toHaveCount(1);
   await expect(page.locator("#impact-list")).toContainText("Host-managed restoration");
   await expect(page.locator("#submit-status")).toContainText("not submitted");
+  await expect(page.locator("#submit-status")).toContainText("ready to sign");
+  await expect(page.locator("#review-submit")).toBeEnabled();
+  await page.locator("#review-submit").click();
+  await expect(page.locator("#submit-dialog")).toBeVisible();
+  await expect(page.locator("#review-call")).toContainText("update_message");
+  await expect(page.locator("#review-xdr")).not.toHaveText("—");
+  const preparedXdr = await page.locator("#review-xdr").textContent();
+  const prepared = TransactionBuilder.fromXdr(
+    preparedXdr!,
+    Networks.TESTNET,
+  );
+  const rpcCheck = await new rpc.Server(
+    "https://soroban-testnet.stellar.org",
+  ).simulateTransaction(prepared);
+  expect("error" in rpcCheck ? rpcCheck.error : undefined).toBeUndefined();
 });
 
 test("valid transaction XDR takes the same local Testnet path", async ({ page }) => {

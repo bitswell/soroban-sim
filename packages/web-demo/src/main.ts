@@ -1,5 +1,12 @@
 import "./styles.css";
 import {
+  Networks,
+  rpc,
+  StrKey,
+  type Transaction,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
+import {
   FIXTURES,
   fixtureById,
   LIVE_FIXTURE_ID,
@@ -14,13 +21,17 @@ import type {
   UploadInfoMsg,
   WorkerToMain,
 } from "./protocol.js";
+import {
+  ensureTestnetIdentity,
+  fundTestnetIdentity,
+  loadTestnetKeypair,
+  type TestnetIdentity,
+} from "./testnet-identity.js";
+import type { ConnectedWallet } from "./wallet.js";
 
 /** The committed add_i32 golden the CI gate and native runner also produce. */
 const GOLDEN_LEN = 388;
 const GOLDEN_SHA = "3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca";
-const DEFAULT_SIMULATION_SOURCE =
-  "GALD63KYDPYZLJLY2VD722RI6HAW3RIKU5AROSPAXTL5JRDJB5NGOJIX";
-
 // ---- element handles -------------------------------------------------------
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -55,6 +66,22 @@ const contractArgs = $("contract-args");
 const contractErr = $("contract-err");
 const transactionXdr = $<HTMLTextAreaElement>("transaction-xdr");
 const xdrErr = $("xdr-err");
+const identityLocal = $<HTMLButtonElement>("identity-local");
+const identityWallet = $<HTMLButtonElement>("identity-wallet");
+const localIdentityView = $("local-identity-view");
+const walletIdentityView = $("wallet-identity-view");
+const localIdentityAddress = $("local-identity-address");
+const localIdentityDot = $("local-identity-dot");
+const localIdentityStatus = $("local-identity-status");
+const fundIdentityBtn = $<HTMLButtonElement>("fund-identity");
+const connectWalletBtn = $<HTMLButtonElement>("connect-wallet");
+const disconnectWalletBtn = $<HTMLButtonElement>("disconnect-wallet");
+const walletDisconnected = $("wallet-disconnected");
+const walletConnected = $("wallet-connected");
+const walletName = $("wallet-name");
+const walletAddress = $("wallet-address");
+const walletErr = $("wallet-err");
+const simulationSource = $("simulation-source");
 
 const timeline = $("timeline");
 const timelineScroll = $("timeline-scroll");
@@ -158,10 +185,24 @@ const submitStatus = $("submit-status");
 const submitSource = $("submit-source");
 const submitAuth = $("submit-auth");
 const submitFee = $("submit-fee");
+const submissionBoundary = $("submission-boundary");
+const reviewSubmitBtn = $<HTMLButtonElement>("review-submit");
+const submitDialog = $<HTMLDialogElement>("submit-dialog");
+const reviewCall = $("review-call");
+const reviewSource = $("review-source");
+const reviewAuthorizer = $("review-authorizer");
+const reviewFee = $("review-fee");
+const reviewXdr = $("review-xdr");
+const submitErr = $("submit-err");
+const submitProgress = $("submit-progress");
+const confirmSubmitBtn = $<HTMLButtonElement>("confirm-submit");
 
 /** Per-transaction host budget caps (soroban-env-host, protocol 27). */
 const CPU_CAP = 100_000_000;
 const MEM_CAP = 40 * 1024 * 1024;
+const TESTNET_RPC_URL = "https://soroban-testnet.stellar.org";
+const NIDO_WALLET_ID = "nido";
+const testnetRpc = new rpc.Server(TESTNET_RPC_URL);
 
 /** Byte-map region colors, keyed by SSIM framing field. Theme-independent. */
 const REGION_COLOR: Record<string, string> = {
@@ -189,10 +230,170 @@ themeBtn.addEventListener("click", () => {
   localStorage.setItem("sim-theme", next);
 });
 
+// ---- Testnet identity + wallet selection ---------------------------------
+function shortAddress(address: string): string {
+  return `${address.slice(0, 8)}…${address.slice(-8)}`;
+}
+
+function selectedAuthorizer(): string {
+  return identityMode === "wallet" && connectedWallet
+    ? connectedWallet.address
+    : localIdentity.publicKey;
+}
+
+function selectedFeePayer(): string | undefined {
+  if (identityMode === "local") return localIdentity.publicKey;
+  if (!connectedWallet) return undefined;
+  return StrKey.isValidEd25519PublicKey(connectedWallet.address)
+    ? connectedWallet.address
+    : localIdentity.publicKey;
+}
+
+function suggestAuthorizer(): void {
+  const input = contractArgs.querySelector<HTMLInputElement>(
+    'input[data-arg="author"]',
+  );
+  if (input) input.value = selectedAuthorizer();
+}
+
+function renderIdentity(): void {
+  identityLocal.setAttribute("aria-pressed", String(identityMode === "local"));
+  identityWallet.setAttribute("aria-pressed", String(identityMode === "wallet"));
+  localIdentityView.hidden = identityMode !== "local";
+  walletIdentityView.hidden = identityMode !== "wallet";
+  localIdentityAddress.textContent = localIdentity.publicKey;
+  localIdentityAddress.title = localIdentity.publicKey;
+  localIdentityDot.className = `identity-dot${localIdentityFunded ? " ready" : ""}`;
+  localIdentityStatus.textContent = localIdentityFunded
+    ? "Funded on Testnet · ready to pay fees"
+    : "Not funded · local simulation can run, but no transaction can be submitted";
+  fundIdentityBtn.disabled = localIdentityFunded;
+  fundIdentityBtn.textContent = localIdentityFunded
+    ? "Funded by Friendbot ✓"
+    : "Fund with Friendbot";
+
+  walletDisconnected.hidden = connectedWallet !== undefined;
+  walletConnected.hidden = connectedWallet === undefined;
+  if (connectedWallet) {
+    walletName.textContent = `${connectedWallet.name} ${connectedWallet.id === NIDO_WALLET_ID ? "smart account" : "wallet"}`;
+    walletAddress.textContent = connectedWallet.address;
+    walletAddress.title = connectedWallet.address;
+  }
+
+  const feePayer = selectedFeePayer();
+  if (identityMode === "wallet" && !connectedWallet) {
+    simulationSource.textContent =
+      "Connect a wallet to suggest its address in contract arguments and prepare a signable envelope.";
+  } else if (!localIdentityFunded && feePayer === localIdentity.publicKey) {
+    simulationSource.textContent =
+      "Simulation can use a public placeholder. Fund the local account to run the exact envelope that can be submitted.";
+  } else if (connectedWallet?.id === NIDO_WALLET_ID) {
+    simulationSource.textContent =
+      "The local G-account pays the fee; Nido's C-account authorizes the contract call.";
+  } else {
+    simulationSource.textContent = `Exact envelope source ${feePayer ? shortAddress(feePayer) : "unavailable"} · signing remains a separate step.`;
+  }
+}
+
+async function accountSequence(address: string): Promise<string | undefined> {
+  try {
+    return (await testnetRpc.getAccount(address)).sequenceNumber();
+  } catch {
+    return undefined;
+  }
+}
+
+async function exactSource(): Promise<
+  { address: string; sequence: string } | undefined
+> {
+  const address = selectedFeePayer();
+  if (!address) return undefined;
+  const sequence = await accountSequence(address);
+  if (!sequence) return undefined;
+  if (address === localIdentity.publicKey && !localIdentityFunded) {
+    localIdentityFunded = true;
+    renderIdentity();
+  }
+  return { address, sequence };
+}
+
+identityLocal.addEventListener("click", () => {
+  identityMode = "local";
+  suggestAuthorizer();
+  renderIdentity();
+  invalidateRunUI();
+});
+identityWallet.addEventListener("click", () => {
+  identityMode = "wallet";
+  suggestAuthorizer();
+  renderIdentity();
+  invalidateRunUI();
+});
+fundIdentityBtn.addEventListener("click", () => {
+  fundIdentityBtn.disabled = true;
+  fundIdentityBtn.textContent = "Requesting Friendbot…";
+  localIdentityStatus.textContent = "Funding disposable Testnet account…";
+  void fundTestnetIdentity(localIdentity.publicKey)
+    .then(async () => {
+      // Friendbot can return just before RPC indexes the account. Poll briefly.
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        if (await accountSequence(localIdentity.publicKey)) {
+          localIdentityFunded = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      if (!localIdentityFunded) {
+        throw new Error("Friendbot funded the account, but RPC has not indexed it yet");
+      }
+      renderIdentity();
+      invalidateRunUI();
+    })
+    .catch((error: unknown) => {
+      localIdentityDot.className = "identity-dot error";
+      localIdentityStatus.textContent =
+        error instanceof Error ? error.message : String(error);
+      fundIdentityBtn.disabled = false;
+      fundIdentityBtn.textContent = "Retry Friendbot";
+    });
+});
+connectWalletBtn.addEventListener("click", () => {
+  walletErr.hidden = true;
+  connectWalletBtn.disabled = true;
+  connectWalletBtn.textContent = "Opening wallet selector…";
+  void import("./wallet.js")
+    .then(({ connectWallet }) => connectWallet())
+    .then((wallet) => {
+      connectedWallet = wallet;
+      suggestAuthorizer();
+      renderIdentity();
+      invalidateRunUI();
+    })
+    .catch((error: unknown) => {
+      walletErr.hidden = false;
+      walletErr.textContent =
+        error instanceof Error ? error.message : String(error);
+    })
+    .finally(() => {
+      connectWalletBtn.disabled = false;
+      connectWalletBtn.textContent = "Choose wallet";
+    });
+});
+disconnectWalletBtn.addEventListener("click", () => {
+  void import("./wallet.js")
+    .then(({ disconnectWallet }) => disconnectWallet())
+    .finally(() => {
+      connectedWallet = undefined;
+      renderIdentity();
+      invalidateRunUI();
+    });
+});
+
 // ---- app state -------------------------------------------------------------
 let mode: DemoMode = "offline";
 let selectedId = FIXTURES[0]!.id;
 let running = false;
+let preparingSource = false;
 let runId = 0;
 let workerStartupMs = 0;
 let workerReady = false;
@@ -206,6 +407,26 @@ type RequestKind = "contract" | "xdr" | "fixture" | "upload";
 let requestKind: RequestKind = "contract";
 let contractInfo: ContractInfoMsg | undefined;
 let contractLoadId = 0;
+
+type IdentityMode = "local" | "wallet";
+let identityMode: IdentityMode = "local";
+let localIdentity: TestnetIdentity;
+let localIdentityFunded = false;
+let connectedWallet: ConnectedWallet | undefined;
+let preparedTransactionXdr: string | undefined;
+let preparedContext:
+  | {
+      contractId: string;
+      fn: string;
+      source: string;
+      authorizer: string;
+      resourceFee: string;
+    }
+  | undefined;
+let activeContractInvocation:
+  | { contractId: string; fn: string; authorizer: string }
+  | undefined;
+let submitting = false;
 
 // upload-any-contract state
 let uploadInfo: UploadInfoMsg | undefined;
@@ -459,6 +680,11 @@ function resetRunUI(): void {
   submitSource.textContent = "—";
   submitAuth.textContent = "—";
   submitFee.textContent = "—";
+  submissionBoundary.textContent =
+    "Run a local simulation first. No wallet prompt or network submission can happen during simulation.";
+  reviewSubmitBtn.disabled = true;
+  preparedTransactionXdr = undefined;
+  preparedContext = undefined;
   // debugger resets with every new run
   debugRunBtn.hidden = true;
   debugRunBtn.disabled = false;
@@ -516,12 +742,23 @@ function beginRun(): void {
   runBtn.dataset.running = "true";
 }
 
-function startRun(): void {
-  if (!workerReady || running || runBtn.disabled) return;
+async function startRun(): Promise<void> {
+  if (!workerReady || running || preparingSource || runBtn.disabled) return;
   if (requestKind === "contract") {
     const invocation = gatherContractInvocation();
     if (!invocation) return;
+    preparingSource = true;
+    runBtn.disabled = true;
+    runBtn.textContent = "Preparing source…";
+    const source = await exactSource();
+    preparingSource = false;
+    if (!workerReady || running) return;
     beginRun();
+    activeContractInvocation = {
+      contractId: invocation.contractId,
+      fn: invocation.fn,
+      authorizer: selectedAuthorizer(),
+    };
     worker.postMessage({
       type: "simulate-contract",
       id: runId,
@@ -529,6 +766,8 @@ function startRun(): void {
       fn: invocation.fn,
       args: invocation.args,
       raw: invocation.raw,
+      sourceAccount: source?.address,
+      sourceAccountSequence: source?.sequence,
     });
     return;
   }
@@ -603,7 +842,7 @@ function endRun(): void {
 
 runBtn.addEventListener("click", () => {
   if (running) cancelRun();
-  else startRun();
+  else void startRun();
 });
 
 // ---- render a resolved round ----------------------------------------------
@@ -760,6 +999,22 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
     ? `RPC supplied ledger entries at Testnet ledger ${fmtInt(msg.ledgerSequence ?? 0)}. The transaction executed in this Worker and was not submitted.`
     : "Deterministic SSIM bytes — the same rerun loop yields the same result in this Worker, the native runner, and CI.";
 
+  if (
+    msg.ok &&
+    msg.preparedTransactionXdr &&
+    msg.sourceAccount &&
+    activeContractInvocation
+  ) {
+    preparedTransactionXdr = msg.preparedTransactionXdr;
+    preparedContext = {
+      contractId: activeContractInvocation.contractId,
+      fn: activeContractInvocation.fn,
+      source: msg.sourceAccount,
+      authorizer: activeContractInvocation.authorizer,
+      resourceFee: msg.resources?.resourceFee ?? "0",
+    };
+  }
+
   renderWasmState(msg);
 }
 
@@ -887,22 +1142,141 @@ function renderSubmissionRequirements(
     (change) => change.category === "maintenance",
   ).length;
   submitStatus.textContent = msg.ok
-    ? restoreCount > 0
-      ? `preflight complete · restores ${restoreCount} archived ${restoreCount === 1 ? "entry" : "entries"} · not submitted`
-      : "preflight complete · not submitted"
+    ? preparedTransactionXdr
+      ? restoreCount > 0
+        ? `locally prepared · restores ${restoreCount} archived ${restoreCount === 1 ? "entry" : "entries"} · ready to sign · not submitted`
+        : "locally prepared · ready to sign · not submitted"
+      : "local preflight complete · placeholder source · not submitted"
     : "fix simulation error before submission";
   submitSource.textContent = msg.sourceAccount
     ? `${msg.sourceAccount.slice(0, 6)}…${msg.sourceAccount.slice(-6)}`
     : "source comes from final envelope";
   const auth = msg.auth ?? [];
+  const addressAuth = auth.filter(
+    (entry) => entry.credentials.toLowerCase() === "address",
+  );
+  const authorizerMatches = addressAuth.every(
+    (entry) => entry.address === preparedContext?.authorizer,
+  );
   submitAuth.textContent =
     auth.length === 0
       ? "no contract auth recorded"
-      : `${auth.length} contract auth ${auth.length === 1 ? "entry" : "entries"} to authorize`;
+      : addressAuth.length === 0
+        ? `${auth.length} source-account auth ${auth.length === 1 ? "entry" : "entries"}`
+        : authorizerMatches
+          ? `${addressAuth.length} address auth ${addressAuth.length === 1 ? "entry" : "entries"} match selected wallet`
+          : "recorded auth does not match the selected wallet";
   submitFee.textContent = msg.resources
     ? `${fmtInt(Number(msg.resources.resourceFee))} stroops minimum resource fee`
     : "resource fee unavailable";
+  reviewSubmitBtn.disabled =
+    !preparedTransactionXdr || !msg.ok || !authorizerMatches;
+  submissionBoundary.textContent = preparedTransactionXdr
+    ? authorizerMatches
+      ? "This exact envelope ran locally. Review is the first point where a wallet prompt or Testnet broadcast is allowed."
+      : "The contract recorded authorization for a different address. Select that wallet (or correct the contract argument), then simulate again."
+    : "This run used a public placeholder source. Fund or connect a Testnet G-account, then simulate again to produce a signable envelope.";
 }
+
+function openSubmissionReview(): void {
+  if (!preparedTransactionXdr || !preparedContext) return;
+  reviewCall.textContent = `${shortAddress(preparedContext.contractId)} · ${preparedContext.fn}(…)`;
+  reviewSource.textContent = preparedContext.source;
+  reviewAuthorizer.textContent = preparedContext.authorizer;
+  reviewFee.textContent = `${fmtInt(Number(preparedContext.resourceFee))} stroops minimum resource fee`;
+  reviewXdr.textContent = preparedTransactionXdr;
+  submitErr.hidden = true;
+  submitProgress.hidden = true;
+  confirmSubmitBtn.disabled = false;
+  confirmSubmitBtn.textContent = "Sign & submit to Testnet";
+  submitDialog.showModal();
+}
+
+async function waitForTransaction(hash: string): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const result = await testnetRpc.getTransaction(hash);
+    if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) return;
+    if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
+      throw new Error("Testnet included the transaction, but contract execution failed");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`Submission is still pending: ${hash}`);
+}
+
+async function signAndSubmitPrepared(): Promise<void> {
+  if (submitting || !preparedTransactionXdr || !preparedContext) return;
+  submitting = true;
+  confirmSubmitBtn.disabled = true;
+  submitErr.hidden = true;
+  submitProgress.hidden = false;
+  try {
+    let hash: string | undefined;
+    let transaction: Transaction | undefined;
+    if (identityMode === "wallet" && connectedWallet) {
+      submitProgress.textContent = `Waiting for ${connectedWallet.name} approval…`;
+      const { signWithWallet } = await import("./wallet.js");
+      const signed = await signWithWallet(
+        preparedTransactionXdr,
+        connectedWallet.address,
+      );
+      if (signed.submitted) {
+        // Nido's relayer returns the transaction hash in the SEP-43 result slot.
+        hash = signed.signedTxXdr;
+      } else {
+        transaction = TransactionBuilder.fromXdr(
+          signed.signedTxXdr,
+          Networks.TESTNET,
+        ) as Transaction;
+        if (StrKey.isValidContract(connectedWallet.address)) {
+          // The wallet supplied C-account auth; the disposable G-account still
+          // signs the transaction envelope and pays the fee.
+          transaction.sign(loadTestnetKeypair());
+        }
+      }
+    } else {
+      submitProgress.textContent = "Signing with the disposable local Testnet account…";
+      transaction = TransactionBuilder.fromXdr(
+        preparedTransactionXdr,
+        Networks.TESTNET,
+      ) as Transaction;
+      transaction.sign(loadTestnetKeypair());
+    }
+
+    if (transaction) {
+      submitProgress.textContent = "Broadcasting to Stellar RPC…";
+      const sent = await testnetRpc.sendTransaction(transaction);
+      if (sent.status === "ERROR") {
+        throw new Error("Stellar RPC rejected the prepared transaction");
+      }
+      if (sent.status === "TRY_AGAIN_LATER") {
+        throw new Error("Stellar RPC is busy; simulate again before retrying");
+      }
+      hash = sent.hash;
+    }
+    if (!hash) throw new Error("the signer returned no transaction hash");
+
+    submitProgress.textContent = `Submitted ${shortAddress(hash)} · waiting for ledger inclusion…`;
+    await waitForTransaction(hash);
+    submitProgress.textContent = `Confirmed on Testnet · ${hash}`;
+    submitStatus.textContent = "confirmed on Testnet";
+    submissionBoundary.textContent = `Submitted transaction ${hash}`;
+    confirmSubmitBtn.textContent = "Confirmed ✓";
+  } catch (error) {
+    submitErr.hidden = false;
+    submitErr.textContent = error instanceof Error ? error.message : String(error);
+    confirmSubmitBtn.disabled = false;
+    confirmSubmitBtn.textContent = "Retry sign & submit";
+    submitProgress.hidden = true;
+  } finally {
+    submitting = false;
+  }
+}
+
+reviewSubmitBtn.addEventListener("click", openSubmissionReview);
+confirmSubmitBtn.addEventListener("click", () => {
+  void signAndSubmitPrepared();
+});
 
 function isRuntimeFootprintKey(key: FootprintKey): boolean {
   return key.role === "contract-instance" || key.role === "contract-code";
@@ -1087,6 +1461,13 @@ function renderAuth(
       c.title = a.contract;
       item.appendChild(c);
     }
+    if (a.address) {
+      const authorizer = document.createElement("div");
+      authorizer.className = "ea-data";
+      authorizer.textContent = `authorizer ${a.address.slice(0, 6)}…${a.address.slice(-6)}`;
+      authorizer.title = a.address;
+      item.appendChild(authorizer);
+    }
     authList.appendChild(item);
   }
 }
@@ -1203,7 +1584,7 @@ function renderContractArgs(): void {
         text.type = "text";
         text.placeholder = ARG_PLACEHOLDER[arg.input] ?? "";
         if (arg.name === "author" && arg.input === "address") {
-          text.value = DEFAULT_SIMULATION_SOURCE;
+          text.value = selectedAuthorizer();
         } else if (arg.name === "message" && arg.input === "string") {
           text.value = "Simulated locally with soroban-sim";
         }
@@ -1843,6 +2224,8 @@ window.addEventListener("keydown", (e) => {
 });
 
 // ---- boot ------------------------------------------------------------------
+localIdentity = ensureTestnetIdentity();
+renderIdentity();
 contractLoadBtn.disabled = true;
 syncModeUi();
 renderFixtures();

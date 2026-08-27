@@ -87,6 +87,10 @@ export interface SimulateContractMsg {
   args: string[];
   /** true => args are base64 ScVal XDR instead of spec-typed values. */
   raw: boolean;
+  /** Real Testnet fee payer used to build the exact envelope, when available. */
+  sourceAccount?: string;
+  /** Current on-chain sequence of `sourceAccount`, before this transaction. */
+  sourceAccountSequence?: string;
 }
 /** Simulate a caller-supplied transaction envelope locally against Testnet state. */
 export interface SimulateXdrMsg {
@@ -136,6 +140,8 @@ export interface EventLabel {
 export interface AuthEntryLabel {
   /** Credentials kind: SourceAccount | Address. */
   credentials: string;
+  /** G- or C-address that must authorize address credentials. */
+  address?: string;
   /** Invoked contract (C… address), for a contract-fn root invocation. */
   contract?: string;
   /** Invoked function name, for a contract-fn root invocation. */
@@ -252,6 +258,11 @@ export interface SimResultMsg {
   sourceAccount?: string;
   /** Operation count for a supplied transaction envelope. */
   operationCount?: number;
+  /**
+   * Exact unsigned envelope with local transaction data + recorded auth applied.
+   * Present only when the contract run supplied a real, funded source account.
+   */
+  preparedTransactionXdr?: string;
   /** Region map of the SSIM envelope, for the byte-map view. */
   regions?: ByteRegion[];
   /** Lowercase hex of the SSIM envelope (omitted for very large envelopes). */

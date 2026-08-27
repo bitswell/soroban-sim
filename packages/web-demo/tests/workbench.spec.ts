@@ -1,6 +1,33 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("deployed contract / XDR workbench", () => {
+  test("creates one disposable Testnet identity and keeps its secret out of the UI", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const address = await page.locator("#local-identity-address").textContent();
+    expect(address).toMatch(/^G[A-Z2-7]+$/);
+    await expect(page.locator("#review-submit")).toBeDisabled();
+    await expect(page.locator("#submission-boundary")).toContainText(
+      "No wallet prompt or network submission",
+    );
+
+    const secret = await page.evaluate(() => {
+      const raw = localStorage.getItem("soroban-sim.testnet-identity.v1");
+      return raw ? (JSON.parse(raw) as { secret: string }).secret : "missing";
+    });
+    expect(secret).toMatch(/^S[A-Z2-7]+$/);
+    await expect(page.locator("body")).not.toContainText(secret);
+
+    await page.reload();
+    await expect(page.locator("#local-identity-address")).toHaveText(address!);
+    await page.locator("#identity-wallet").click();
+    await expect(page.locator("#wallet-identity-view")).toContainText("Nido");
+    await expect(page.locator("#wallet-identity-view")).toContainText(
+      "local G-account remains the fee payer",
+    );
+  });
+
   test("defaults to a guided Testnet contract call and explains local execution", async ({
     page,
   }) => {
