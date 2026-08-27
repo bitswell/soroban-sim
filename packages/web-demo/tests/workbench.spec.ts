@@ -110,6 +110,20 @@ test.describe("deployed contract / XDR workbench", () => {
     await expect(page.locator(".mode-help")).toContainText(
       "Contract execution always stays in this browser",
     );
+
+    await expect(page.locator("#golden")).toHaveCount(0);
+    await page.getByText("How browser execution works", { exact: true }).click();
+    const explainer = page.locator(".explainer");
+    const executionMap = page.locator(".browser-execution-map");
+    await expect(explainer).toContainText("RPC supplies state");
+    await expect(executionMap).toContainText("It does not execute the contract");
+    await expect(executionMap).toContainText("Run Soroban locally");
+    await expect(executionMap).toContainText(
+      "Use this in place of RPC simulateTransaction during local development",
+    );
+    await expect(executionMap).toContainText("Only after “Review sign & submit”");
+    await expect(executionMap).toContainText("Sign the envelope");
+    await expect(executionMap).toContainText("Broadcast to Testnet");
   });
 
   test("rejects malformed contract ids before making an RPC request", async ({ page }) => {

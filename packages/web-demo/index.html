@@ -10,9 +10,8 @@
     />
   </head>
   <body>
-    <!-- M0 golden anchor: the run-fixture Worker path writes JSON here and sets
-         data-status=done. The Playwright gate reads len/sha256/elapsedMs from it.
-         Visually hidden; the same data is mirrored into the golden strip below. -->
+    <!-- Hidden CI anchor: the run-fixture Worker path writes JSON here and sets
+         data-status=done. The Playwright gate reads len/sha256/elapsedMs from it. -->
     <pre id="result">pending</pre>
 
     <div class="shell">
@@ -48,11 +47,86 @@
       <!-- COMPONENT MODEL EXPLAINER -->
       <details class="explainer-details">
         <summary>How browser execution works</summary>
-        <section class="explainer" aria-labelledby="cm-h">
-        <div class="panel-head">
-          <span class="eyebrow" id="cm-h">WebAssembly Component Model</span>
-          <span class="sub">why this simulator runs in your browser at all</span>
-        </div>
+        <section class="explainer" aria-labelledby="browser-execution-h">
+          <div class="panel-head">
+            <span class="eyebrow" id="browser-execution-h">Local preflight pipeline</span>
+            <span class="sub">RPC supplies state; this browser executes the contract</span>
+          </div>
+
+          <div class="browser-execution-map">
+            <div class="browser-lane">
+              <div class="browser-lane-label">
+                <b>Simulation</b>
+                <span>no signing · no submission</span>
+              </div>
+              <div class="browser-flow browser-flow-simulation">
+                <article class="browser-step request-step">
+                  <span class="browser-step-number">01 · Request</span>
+                  <h3>Choose a contract call</h3>
+                  <p>Use the guided form, paste unsigned transaction XDR, or upload contract Wasm.</p>
+                </article>
+                <span class="browser-flow-arrow" aria-hidden="true">→</span>
+                <article class="browser-step rpc-step">
+                  <span class="browser-step-number">02 · Testnet RPC</span>
+                  <h3>Fetch ledger state</h3>
+                  <p>RPC returns missing entries from one pinned ledger. It does not execute the contract.</p>
+                </article>
+                <span class="browser-flow-arrow" aria-hidden="true">→</span>
+                <article class="browser-step worker-step">
+                  <span class="browser-step-number">03 · Browser Worker</span>
+                  <h3>Run Soroban locally</h3>
+                  <p>The embedded host executes the contract Wasm and reruns when it discovers another key.</p>
+                </article>
+                <span class="browser-flow-arrow" aria-hidden="true">→</span>
+                <article class="browser-step result-step">
+                  <span class="browser-step-number">04 · Local result</span>
+                  <h3>Inspect preflight</h3>
+                  <p>Review the return value, reads, writes, auth, events, and resource use.</p>
+                </article>
+              </div>
+            </div>
+
+            <p class="browser-replacement-note">
+              <b>Use this in place of RPC <code>simulateTransaction</code> during local development.</b>
+              RPC is still used to retrieve live Testnet ledger entries, but contract execution stays in this browser.
+            </p>
+
+            <div class="browser-boundary">
+              <span>separate action</span>
+              <b>Only after “Review sign &amp; submit”</b>
+            </div>
+
+            <div class="browser-lane submission-lane">
+              <div class="browser-lane-label">
+                <b>Submission</b>
+                <span>explicit and optional</span>
+              </div>
+              <div class="browser-flow browser-flow-submission">
+                <article class="browser-step review-step">
+                  <span class="browser-step-number">05 · Review</span>
+                  <h3>Confirm the result</h3>
+                  <p>Check the call, fee, authorization, and expected state changes.</p>
+                </article>
+                <span class="browser-flow-arrow" aria-hidden="true">→</span>
+                <article class="browser-step wallet-step">
+                  <span class="browser-step-number">06 · Wallet</span>
+                  <h3>Sign the envelope</h3>
+                  <p>Your wallet is requested only after you choose to continue.</p>
+                </article>
+                <span class="browser-flow-arrow" aria-hidden="true">→</span>
+                <article class="browser-step submit-step">
+                  <span class="browser-step-number">07 · RPC</span>
+                  <h3>Broadcast to Testnet</h3>
+                  <p>The signed transaction is finally sent to the network.</p>
+                </article>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel-head component-head">
+            <span class="eyebrow">Under the hood: WebAssembly Component Model</span>
+            <span class="sub">why this simulator runs in your browser at all</span>
+          </div>
 
         <div class="cm-grid">
           <article class="cm-card">
@@ -102,8 +176,8 @@
             <p>
               World <code>simulator</code> exports <code>simulate</code>,
               <code>simulate-transaction</code>, <code>simulate-trace</code>
-              and a <code>run-fixture</code> self-test; each simulate call
-              returns <code>complete(ssim)</code> or
+              and contract-inspection functions; each simulate call returns
+              <code>complete(ssim)</code> or
               <code>needs-state(keys)</code> — and holds <em>no state between
               calls</em>: every round re-sends the whole snapshot, then reruns
               deterministically. The Soroban <b>contracts stay plain core
@@ -125,7 +199,7 @@
           <span class="cm-arrow">→</span>
           <span class="cm-node accent">runs in this Web Worker</span>
           <span class="cm-arrow">→</span>
-          <span class="cm-node">request lowered in · <b>388-byte SSIM</b> lifted out</span>
+          <span class="cm-node">request lowered in · <b>SSIM result</b> lifted out</span>
         </div>
 
         <div class="cm-call" aria-hidden="true">
@@ -146,7 +220,7 @@
             <span class="cm-arrow">→</span>
             <span class="cm-cnode"><b>lift</b><i>copy out, post-return frees</i></span>
             <span class="cm-arrow">→</span>
-            <span class="cm-cnode"><b>Uint8Array</b><i>388 B on the golden fixture</i></span>
+            <span class="cm-cnode"><b>Uint8Array</b><i>typed SSIM result bytes</i></span>
           </div>
         </div>
         </section>
@@ -432,7 +506,6 @@
           <span class="k">sha-256</span>
           <span class="v sha" id="r-sha">—</span>
         </div>
-        <span class="badge hidden" id="r-badge">matches CI golden 3b678efa</span>
         <span class="errmsg" id="r-err" hidden></span>
         <button class="debug-btn" id="debug-run" type="button" hidden>
           Open execution trace
@@ -713,15 +786,6 @@
           </section>
         </div>
       </section>
-
-      <!-- M0 golden browser run (mirror of #result) -->
-      <div class="golden" id="golden" data-status="pending">
-        <span class="g-dot"></span>
-        <span
-          >CI golden · <b>runFixture()</b> in this browser Worker →
-          <span id="golden-text">running…</span></span
-        >
-      </div>
 
       <footer class="footer">
         <span class="live-dot"></span>

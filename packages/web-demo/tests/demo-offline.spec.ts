@@ -13,12 +13,11 @@ test.describe("interactive demo (offline)", () => {
   test("add_i32 resolves round-by-round to I32 · 42", async ({ page }) => {
     await page.goto("/");
 
-    // Golden strip mirrors the runFixture browser run and should confirm the
-    // byte-identical CI output on load.
-    await expect(page.locator("#golden")).toHaveAttribute("data-status", "done", {
+    // The deterministic fixture gate remains available to CI without adding
+    // implementation-specific status copy to the product UI.
+    await expect(page.locator("#result")).toHaveAttribute("data-status", "done", {
       timeout: 60_000,
     });
-    await expect(page.locator("#golden-text")).toContainText("byte-identical");
 
     // Run button becomes enabled once the worker is ready.
     const run = page.locator("#run");

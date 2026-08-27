@@ -29,9 +29,6 @@ import {
 } from "./testnet-identity.js";
 import type { ConnectedWallet } from "./wallet.js";
 
-/** The committed add_i32 golden the CI gate and native runner also produce. */
-const GOLDEN_LEN = 388;
-const GOLDEN_SHA = "1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f";
 // ---- element handles -------------------------------------------------------
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -102,15 +99,11 @@ const resultPanel = $("result-panel");
 const rValue = $("r-value");
 const rLen = $("r-len");
 const rSha = $("r-sha");
-const rBadge = $("r-badge");
 const rErr = $("r-err");
 const resultNote = $("result-note");
 const resultContext = $("result-context");
 const rNetwork = $("r-network");
 const rLedger = $("r-ledger");
-
-const golden = $("golden");
-const goldenText = $("golden-text");
 
 // upload-any-contract
 const uploadFile = $<HTMLInputElement>("upload-file");
@@ -481,7 +474,6 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
         null,
         2,
       );
-      renderGolden(msg.len, msg.sha256);
       return;
     }
     case "round": {
@@ -533,14 +525,6 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
       return;
     }
   }
-}
-
-function renderGolden(len: number, sha: string): void {
-  const match = len === GOLDEN_LEN && sha === GOLDEN_SHA;
-  golden.dataset.status = match ? "done" : "error";
-  goldenText.innerHTML = match
-    ? `<b>${len} B</b> · sha <code>${sha.slice(0, 8)}</code> ✓ byte-identical to CI`
-    : `unexpected output (${len} B, sha ${sha.slice(0, 8)})`;
 }
 
 // ---- fixture picker --------------------------------------------------------
@@ -671,7 +655,6 @@ function resetRunUI(): void {
   resultPanel.hidden = true;
   resultNote.hidden = true;
   resultContext.hidden = true;
-  rBadge.classList.add("hidden");
   rErr.hidden = true;
   resultPanel.classList.remove("error");
   wasmState.hidden = true;
@@ -1136,11 +1119,6 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
     rErr.hidden = false;
     rErr.textContent = msg.errorText ?? "inline failure";
   }
-  // Honest badge: only the dedicated runFixture strip proves the CI golden.
-  // The interactive add_i32 run uses a full tx envelope, so its bytes differ;
-  // we never claim a byte-match here.
-  rBadge.classList.add("hidden");
-
   // The worker stashed a trace-replay context for this run — offer the debugger.
   if (msg.debuggable) {
     debuggableRunId = msg.id;
@@ -1706,7 +1684,6 @@ function failRunText(message: string): void {
       : "simulation failed";
   rLen.textContent = "—";
   rSha.textContent = "—";
-  rBadge.classList.add("hidden");
   rErr.hidden = false;
   rErr.textContent = protocolMismatch
     ? `${message}. This preview must be rebuilt with matching protocol support.`
