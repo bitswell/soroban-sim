@@ -51,6 +51,18 @@ test.describe("interactive demo (offline)", () => {
     const executionEntries = Number(await page.locator("#m-keys").textContent());
     expect(executionEntries).toBeLessThan(rounds);
 
+    // Contract loading is explained as a dependency rather than three
+    // anonymous XDR arm labels: instance -> embedded hash -> Wasm entry.
+    await expect(page.locator("#timeline")).toContainText("Contract instance");
+    await expect(page.locator("#timeline")).toContainText("Wasm hash");
+    await expect(page.locator("#timeline")).toContainText("Wasm binary");
+    await expect(page.locator("#timeline .dependency-arrow")).toContainText([
+      "contains",
+      "loads",
+    ]);
+    await expect(page.locator("#snap-list")).toContainText("Contract instance");
+    await expect(page.locator("#snap-list")).toContainText("Wasm binary");
+
     // Snapshot accumulated present entries.
     const present = Number(await page.locator("#snap-present").textContent());
     expect(present).toBeGreaterThan(0);

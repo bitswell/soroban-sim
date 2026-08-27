@@ -20,6 +20,10 @@ export interface RoundKey {
   kind: string;
   /** Short discriminator (address tail, code hash, setting id). */
   detail: string;
+  /** Semantic identity used to explain contract loading vs. contract storage. */
+  role?: "contract-storage" | "contract-instance" | "contract-code";
+  /** Decoded storage key or full code hash, when one exists. */
+  key?: string;
   /** Whether the provider resolved the key present or absent. */
   status: "present" | "absent";
   /** liveUntilLedger TTL, present entries only. */

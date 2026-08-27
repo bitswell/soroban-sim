@@ -653,6 +653,11 @@ body {
   background-image: var(--hatch);
   border-color: var(--ink-faint);
 }
+.chip.reference {
+  background: color-mix(in srgb, var(--pending) 8%, transparent);
+  border-style: dashed;
+  border-color: var(--pending);
+}
 
 .timeline-scroll {
   overflow-x: auto;
@@ -668,10 +673,10 @@ body {
 }
 .timeline {
   display: flex;
-  align-items: stretch;
-  gap: 12px;
+  align-items: center;
+  gap: 6px;
   height: 100%;
-  min-height: 172px;
+  min-height: 180px;
 }
 .timeline-empty {
   color: var(--ink-faint);
@@ -684,11 +689,11 @@ body {
 }
 
 .round {
-  width: 64px;
+  width: 150px;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   animation: slidein 0.28s cubic-bezier(0.2, 0.7, 0.3, 1);
 }
 @keyframes slidein {
@@ -705,21 +710,25 @@ body {
   font-size: 9px;
   color: var(--ink-faint);
   letter-spacing: 0.1em;
-  text-align: center;
+  text-transform: uppercase;
 }
 .cell {
   width: 100%;
-  aspect-ratio: 1 / 1;
+  min-height: 132px;
   border: 1.5px solid var(--pending);
   position: relative;
   background: transparent;
+  padding: 28px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
   box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--pending) 22%, transparent);
 }
 .cell.present {
   border-color: var(--known);
-  background: var(--known);
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--known) 60%, #06101f),
-    0 0 12px color-mix(in srgb, var(--known) 45%, transparent);
+  background: color-mix(in srgb, var(--known) 12%, var(--panel-2));
+  box-shadow: inset 3px 0 0 var(--known),
+    0 0 12px color-mix(in srgb, var(--known) 24%, transparent);
   animation: flip 0.18s ease-out;
 }
 .cell.absent {
@@ -738,30 +747,106 @@ body {
 }
 .cell .ttl {
   position: absolute;
-  bottom: 2px;
-  right: 3px;
-  font-size: 7.5px;
-  color: rgba(255, 255, 255, 0.82);
+  top: 9px;
+  right: 10px;
+  font-size: 8px;
+  color: var(--ink-dim);
   letter-spacing: 0;
 }
+.cell-status {
+  position: absolute;
+  top: 9px;
+  left: 10px;
+  color: var(--ink-dim);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.cell.present .cell-status {
+  color: var(--known);
+}
+.cell.absent .cell-status {
+  color: var(--ink-faint);
+}
 .round .rkind {
-  font-size: 9.5px;
-  text-align: center;
+  font-size: 14px;
+  font-weight: 500;
   color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.25;
 }
 .round .rdetail {
-  font-size: 8.5px;
-  text-align: center;
+  font-size: 9.5px;
   color: var(--ink-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.round .rhint {
+  margin-top: auto;
+  padding-top: 7px;
+  border-top: 1px solid var(--grid-soft);
+  color: var(--ink-faint);
+  font-size: 8.5px;
+  line-height: 1.4;
 }
 .round.active .cell {
   outline: 1px solid color-mix(in srgb, var(--pending) 60%, transparent);
+}
+.dependency-arrow {
+  width: 32px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  color: var(--ink-faint);
+  text-align: center;
+}
+.dependency-arrow span {
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dependency-arrow b {
+  color: var(--known);
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 1;
+}
+.wasm-reference {
+  width: 146px;
+  min-height: 132px;
+  flex: 0 0 auto;
+  border: 1px dashed var(--pending);
+  background: color-mix(in srgb, var(--pending) 7%, var(--panel-2));
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: slidein 0.28s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+.wasm-reference .reference-meta {
+  color: var(--pending);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.wasm-reference strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+}
+.wasm-reference code {
+  color: var(--pending);
+  font-size: 9.5px;
+  overflow-wrap: anywhere;
+}
+.wasm-reference > span:last-child {
+  margin-top: auto;
+  padding-top: 7px;
+  border-top: 1px solid var(--grid-soft);
+  color: var(--ink-faint);
+  font-size: 8.5px;
+  line-height: 1.4;
 }
 
 /* metrics readout under timeline */
@@ -839,18 +924,19 @@ body {
 }
 .snap-row {
   display: grid;
-  grid-template-columns: 8px 1fr auto;
-  gap: 8px;
-  align-items: center;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: start;
   border: 1px solid var(--grid);
   background: var(--panel-2);
-  padding: 7px 9px;
+  padding: 10px;
   font-size: 11px;
   animation: slidein 0.24s ease-out;
 }
 .snap-row .dot {
   width: 8px;
   height: 8px;
+  margin-top: 3px;
 }
 .snap-row.present .dot {
   background: var(--known);
@@ -859,16 +945,29 @@ body {
   background-image: var(--hatch);
   border: 1px solid var(--ink-faint);
 }
+.snap-row .s-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
 .snap-row .s-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+.snap-row .s-detail {
+  color: var(--ink-dim);
+  font-size: 9.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .snap-row .s-ttl {
   font-size: 9.5px;
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* ---- result bar -------------------------------------------------------- */

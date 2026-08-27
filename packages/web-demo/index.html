@@ -349,22 +349,23 @@
         <!-- CONTRACT-RELEVANT STATE RESOLUTION -->
         <section class="panel timeline-panel" aria-labelledby="tl-h">
           <div class="panel-head">
-            <span class="eyebrow" id="tl-h">Contract state reads</span>
-            <span class="sub">missing entry → resolve → local rerun</span>
+            <span class="eyebrow" id="tl-h">Contract execution reads</span>
+            <span class="sub">Contract instance → Wasm hash → Wasm binary</span>
           </div>
 
           <div class="legend">
             <span><i class="chip pending"></i> pending</span>
             <span><i class="chip present"></i> present</span>
             <span><i class="chip absent"></i> absent</span>
+            <span><i class="chip reference"></i> value found inside an entry</span>
           </div>
 
           <div class="timeline-scroll" id="timeline-scroll">
             <div class="timeline" id="timeline">
               <p class="timeline-empty" id="timeline-empty">
-                Run a simulation to see only the ledger entries requested while
-                executing the transaction. Network configuration is loaded as
-                simulator setup and kept out of this view.
+                Run a simulation to see how the contract instance identifies
+                its Wasm, followed by any storage the executing contract reads.
+                Network configuration stays out of this view.
               </p>
             </div>
           </div>
@@ -397,7 +398,7 @@
         <!-- RESOLVED EXECUTION STATE -->
         <section class="panel" aria-labelledby="snap-h">
           <div class="panel-head">
-            <span class="eyebrow" id="snap-h">Resolved execution state</span>
+            <span class="eyebrow" id="snap-h">Resolved ledger entries</span>
           </div>
           <div class="snap-counter">
             <span><b id="snap-present">0</b> present</span>
@@ -405,8 +406,8 @@
           </div>
           <div class="snap-list" id="snap-list">
             <p class="snap-empty" id="snap-empty">
-              Contract code, data, accounts, and TTL entries appear here as the
-              local execution requests them.
+              Each entry supplied to local execution appears here with its
+              contract role and ledger type.
             </p>
           </div>
         </section>

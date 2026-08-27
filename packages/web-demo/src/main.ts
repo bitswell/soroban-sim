@@ -696,6 +696,9 @@ function resetRunUI(): void {
   debugSteps = [];
   dbgRaw.checked = false;
   activeRound = undefined;
+  lastTimelineRole = undefined;
+  sawContractInstance = false;
+  renderedWasmHashes = new Set();
 }
 
 /** Remove output that no longer describes the selected request. */
@@ -847,6 +850,141 @@ runBtn.addEventListener("click", () => {
 
 // ---- render a resolved round ----------------------------------------------
 let activeRound: HTMLElement | undefined;
+let lastTimelineRole: RoundMsg["keys"][number]["role"] | undefined;
+let sawContractInstance = false;
+let renderedWasmHashes = new Set<string>();
+
+type TimelineKey = RoundMsg["keys"][number];
+
+interface KeyPresentation {
+  title: string;
+  detail: string;
+  hint: string;
+}
+
+function shortHash(hash: string): string {
+  if (hash.includes("…") || hash.length <= 24) return hash;
+  return `${hash.slice(0, 12)}…${hash.slice(-8)}`;
+}
+
+function presentKey(key: TimelineKey): KeyPresentation {
+  switch (key.role) {
+    case "contract-instance":
+      return {
+        title: "Contract instance",
+        detail: key.detail,
+        hint: "Deployment metadata containing the executable Wasm hash",
+      };
+    case "contract-code":
+      return {
+        title: "Wasm binary",
+        detail: `hash ${shortHash(key.key ?? key.detail)}`,
+        hint: "ContractCode ledger entry loaded by that hash",
+      };
+    case "contract-storage":
+      return {
+        title: "Contract storage",
+        detail: key.detail,
+        hint: "State requested by the executing contract",
+      };
+    default:
+      return {
+        title: key.kind,
+        detail: key.detail || "—",
+        hint: "Ledger entry supplied to local execution",
+      };
+  }
+}
+
+function appendTimelineConnector(label: string): void {
+  const connector = document.createElement("div");
+  connector.className = "dependency-arrow";
+  connector.setAttribute("aria-label", label);
+  const relation = document.createElement("span");
+  relation.textContent = label;
+  const arrow = document.createElement("b");
+  arrow.textContent = "→";
+  connector.append(relation, arrow);
+  timeline.appendChild(connector);
+}
+
+function appendWasmHashReference(key: TimelineKey): void {
+  const fullHash = key.key ?? key.detail;
+  if (renderedWasmHashes.has(fullHash)) return;
+  renderedWasmHashes.add(fullHash);
+
+  if (sawContractInstance) appendTimelineConnector("contains");
+
+  const reference = document.createElement("div");
+  reference.className = "wasm-reference";
+  const meta = document.createElement("span");
+  meta.className = "reference-meta";
+  meta.textContent = "value inside instance";
+  const title = document.createElement("strong");
+  title.textContent = "Wasm hash";
+  const hash = document.createElement("code");
+  hash.textContent = shortHash(fullHash);
+  hash.title = fullHash;
+  const note = document.createElement("span");
+  note.textContent = "Key for the ContractCode ledger entry";
+  reference.append(meta, title, hash, note);
+  timeline.appendChild(reference);
+
+  appendTimelineConnector("loads");
+}
+
+function appendTimelineRound(key: TimelineKey, roundIndex: number): HTMLElement {
+  if (key.role === "contract-code") appendWasmHashReference(key);
+  if (key.role === "contract-storage" && lastTimelineRole === "contract-code") {
+    appendTimelineConnector("then executes");
+  }
+
+  const presentation = presentKey(key);
+  const col = document.createElement("div");
+  col.className = `round active ${key.role ?? "ledger-entry"}`;
+
+  const rnum = document.createElement("div");
+  rnum.className = "rnum";
+  rnum.textContent = `R${roundIndex} · ledger read`;
+  col.appendChild(rnum);
+
+  const cell = document.createElement("div");
+  cell.className = `cell ${key.status}`;
+
+  const status = document.createElement("span");
+  status.className = "cell-status";
+  status.textContent = key.status;
+  cell.appendChild(status);
+
+  if (key.ttl !== undefined) {
+    const ttl = document.createElement("span");
+    ttl.className = "ttl";
+    ttl.textContent = `ttl ${shortTtl(key.ttl)}`;
+    cell.appendChild(ttl);
+  }
+
+  const kind = document.createElement("div");
+  kind.className = "rkind";
+  kind.textContent = presentation.title;
+  cell.appendChild(kind);
+
+  const detail = document.createElement("div");
+  detail.className = "rdetail";
+  detail.textContent = presentation.detail;
+  detail.title = key.label;
+  cell.appendChild(detail);
+
+  const hint = document.createElement("div");
+  hint.className = "rhint";
+  hint.textContent = presentation.hint;
+  cell.appendChild(hint);
+
+  col.appendChild(cell);
+  timeline.appendChild(col);
+  lastTimelineRole = key.role;
+  if (key.role === "contract-instance") sawContractInstance = true;
+  return col;
+}
 
 function renderRound(msg: RoundMsg): void {
   const configKeys = msg.keys.filter((key) => key.kind === "ConfigSetting");
@@ -874,40 +1012,9 @@ function renderRound(msg: RoundMsg): void {
   timelineEmpty.hidden = true;
   if (activeRound) activeRound.classList.remove("active");
 
-  const col = document.createElement("div");
-  col.className = "round active";
-
-  const rnum = document.createElement("div");
-  rnum.className = "rnum";
-  rnum.textContent = `R${msg.roundIndex}`;
-  col.appendChild(rnum);
-
-  // usually one key per round; render the primary key's cell + labels
-  const key = newExecutionKeys[0]!;
-  const cell = document.createElement("div");
-  cell.className = `cell ${key.status}`;
-  if (key.ttl !== undefined) {
-    const ttl = document.createElement("span");
-    ttl.className = "ttl";
-    ttl.textContent = shortTtl(key.ttl);
-    cell.appendChild(ttl);
+  for (const key of newExecutionKeys) {
+    activeRound = appendTimelineRound(key, msg.roundIndex);
   }
-  col.appendChild(cell);
-
-  const kind = document.createElement("div");
-  kind.className = "rkind";
-  kind.textContent = key.kind;
-  kind.title = key.label;
-  col.appendChild(kind);
-
-  const detail = document.createElement("div");
-  detail.className = "rdetail";
-  detail.textContent = key.detail || "—";
-  detail.title = key.label;
-  col.appendChild(detail);
-
-  timeline.appendChild(col);
-  activeRound = col;
 
   // Append only transaction-relevant entries to the state rail.
   for (const k of newExecutionKeys) appendSnapshotRow(k);
@@ -918,18 +1025,25 @@ function renderRound(msg: RoundMsg): void {
 
 function appendSnapshotRow(key: RoundMsg["keys"][number]): void {
   snapEmpty.hidden = true;
+  const presentation = presentKey(key);
   const row = document.createElement("div");
   row.className = `snap-row ${key.status}`;
   const dot = document.createElement("span");
   dot.className = "dot";
-  const label = document.createElement("span");
+  const copy = document.createElement("span");
+  copy.className = "s-copy";
+  const label = document.createElement("strong");
   label.className = "s-label";
-  label.textContent = key.label;
-  label.title = key.label;
+  label.textContent = presentation.title;
+  const detail = document.createElement("span");
+  detail.className = "s-detail";
+  detail.textContent = `${key.kind} · ${presentation.detail}`;
+  detail.title = key.label;
+  copy.append(label, detail);
   const ttl = document.createElement("span");
   ttl.className = "s-ttl";
   ttl.textContent = key.status === "present" && key.ttl ? `ttl ${shortTtl(key.ttl)}` : "—";
-  row.append(dot, label, ttl);
+  row.append(dot, copy, ttl);
   snapList.appendChild(row);
 
   if (key.status === "present") presentCount += 1;
@@ -948,6 +1062,9 @@ function shortTtl(ttl: number): string {
 function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   endRun();
   if (activeRound) activeRound.classList.remove("active");
+  // A completed run should teach from the beginning of the dependency chain,
+  // even if progress rendering followed the newest request while it ran.
+  timelineScroll.scrollLeft = 0;
 
   mRounds.textContent = String(msg.rounds);
   mKeys.textContent = String(executionEntryLabels.size);

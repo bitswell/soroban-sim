@@ -169,7 +169,7 @@ class RecordingProvider implements StateProvider {
     this.cumulativeKeys += keyXdrs.length;
 
     const keys: RoundKey[] = keyXdrs.map((keyXdr, i) => {
-      const { kind, detail, label } = ledgerKeyLabel(keyXdr);
+      const { kind, detail, label, role, key: decodedKey } = ledgerKeyLabel(keyXdr);
       const res = resolutions[i]!;
       if (res.status === "present") {
         this.present += 1;
@@ -187,6 +187,8 @@ class RecordingProvider implements StateProvider {
         detail,
         status: res.status,
       };
+      if (role !== undefined) key.role = role;
+      if (decodedKey !== undefined) key.key = decodedKey;
       if (res.status === "present" && res.entry.liveUntilLedger !== undefined) {
         key.ttl = res.entry.liveUntilLedger;
       }
