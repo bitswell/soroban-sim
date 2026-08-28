@@ -20,10 +20,19 @@ export interface RoundKey {
   kind: string;
   /** Short discriminator (address tail, code hash, setting id). */
   detail: string;
+  /** Semantic identity used to explain contract loading vs. contract storage. */
+  role?: "contract-storage" | "contract-instance" | "contract-code";
+  /** Decoded storage key or full code hash, when one exists. */
+  key?: string;
   /** Whether the provider resolved the key present or absent. */
   status: "present" | "absent";
   /** liveUntilLedger TTL, present entries only. */
   ttl?: number;
+  /** Decoded value for a present ContractData storage entry. */
+  value?: {
+    type: string;
+    display: string;
+  };
 }
 
 // ---- main -> worker -------------------------------------------------------
@@ -87,6 +96,10 @@ export interface SimulateContractMsg {
   args: string[];
   /** true => args are base64 ScVal XDR instead of spec-typed values. */
   raw: boolean;
+  /** Real Testnet fee payer used to build the exact envelope, when available. */
+  sourceAccount?: string;
+  /** Current on-chain sequence of `sourceAccount`, before this transaction. */
+  sourceAccountSequence?: string;
 }
 /** Simulate a caller-supplied transaction envelope locally against Testnet state. */
 export interface SimulateXdrMsg {
@@ -136,6 +149,8 @@ export interface EventLabel {
 export interface AuthEntryLabel {
   /** Credentials kind: SourceAccount | Address. */
   credentials: string;
+  /** G- or C-address that must authorize address credentials. */
+  address?: string;
   /** Invoked contract (C… address), for a contract-fn root invocation. */
   contract?: string;
   /** Invoked function name, for a contract-fn root invocation. */
@@ -220,6 +235,10 @@ export interface SimResultMsg {
   ok: boolean;
   /** Inline host/contract error string, when ok === false. */
   errorText?: string;
+  /** Return type declared by the loaded contract spec, when available. */
+  declaredResultType?: string;
+  /** A successful Option<T> invocation returned None (raw ScVal::Void). */
+  emptyResult?: boolean;
   /** Snapshot tallies the loop accumulated. */
   present: number;
   absent: number;
@@ -252,6 +271,11 @@ export interface SimResultMsg {
   sourceAccount?: string;
   /** Operation count for a supplied transaction envelope. */
   operationCount?: number;
+  /**
+   * Exact unsigned envelope with local transaction data + recorded auth applied.
+   * Present only when the contract run supplied a real, funded source account.
+   */
+  preparedTransactionXdr?: string;
   /** Region map of the SSIM envelope, for the byte-map view. */
   regions?: ByteRegion[];
   /** Lowercase hex of the SSIM envelope (omitted for very large envelopes). */
@@ -352,6 +376,8 @@ export interface UploadFnArg {
 export interface UploadFnInfo {
   name: string;
   args: UploadFnArg[];
+  /** Human-readable declared return types, e.g. Option<String>. */
+  outputs?: string[];
 }
 export interface UploadInfoMsg {
   type: "upload-info";

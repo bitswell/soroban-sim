@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+// The first Worker on a fresh macOS CI runner must compile the embedded 3 MB
+// component and finish its startup self-test. Wait for that deterministic gate
+// before posting another simulation into the same Worker queue.
+const COLD_WORKER_TIMEOUT = 120_000;
+
 /**
  * Execution trace — offline, deterministic. After a completed run the worker
  * stashes the accumulated entries; "Open execution trace" re-invokes the
@@ -13,6 +18,9 @@ async function runFixtureAndOpenDebugger(
   fixtureName?: RegExp,
 ): Promise<void> {
   await page.goto("/");
+  await expect(page.locator("#result")).toHaveAttribute("data-status", "done", {
+    timeout: COLD_WORKER_TIMEOUT,
+  });
   await page.locator("#advanced-inputs summary").click();
   await page
     .getByRole("button", { name: fixtureName ?? /add_i32/ })
@@ -30,7 +38,8 @@ async function runFixtureAndOpenDebugger(
 test.describe("execution trace (offline)", () => {
   test("add_i32: trace replays with steps, frame push, and budget attribution", async ({
     page,
-  }) => {
+  }, testInfo) => {
+    testInfo.setTimeout(240_000);
     await runFixtureAndOpenDebugger(page);
 
     // Enforcing replay succeeded — no degraded-mode banner, scrubber visible.

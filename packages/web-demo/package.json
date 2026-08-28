@@ -12,6 +12,8 @@
     "test": "playwright test --project=chromium"
   },
   "dependencies": {
+    "@creit.tech/stellar-wallets-kit": "2.2.0",
+    "@nidohq/stellar-wallets-kit-module": "0.1.0",
     "@stellar/stellar-sdk": "^17.0.0",
     "@theahaco/soroban-sim": "workspace:*"
   },

@@ -1,7 +1,20 @@
 packages:
   - "packages/*"
 
+overrides:
+  # stellar-wallets-kit still accepts the patched 7.x line.
+  protobufjs: 7.5.6
+
 onlyBuiltDependencies:
   - esbuild
 allowBuilds:
+  '@reown/appkit': false
+  '@stellar/stellar-sdk': false
+  blake-hash: false
+  bufferutil: false
   esbuild: true
+  protobufjs: false
+  secp256k1: false
+  tiny-secp256k1: false
+  usb: false
+  utf-8-validate: false

@@ -1,5 +1,12 @@
 import "./styles.css";
 import {
+  Networks,
+  rpc,
+  StrKey,
+  type Transaction,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
+import {
   FIXTURES,
   fixtureById,
   LIVE_FIXTURE_ID,
@@ -14,12 +21,13 @@ import type {
   UploadInfoMsg,
   WorkerToMain,
 } from "./protocol.js";
-
-/** The committed add_i32 golden the CI gate and native runner also produce. */
-const GOLDEN_LEN = 388;
-const GOLDEN_SHA = "3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca";
-const DEFAULT_SIMULATION_SOURCE =
-  "GALD63KYDPYZLJLY2VD722RI6HAW3RIKU5AROSPAXTL5JRDJB5NGOJIX";
+import {
+  ensureTestnetIdentity,
+  fundTestnetIdentity,
+  loadTestnetKeypair,
+  type TestnetIdentity,
+} from "./testnet-identity.js";
+import type { ConnectedWallet } from "./wallet.js";
 
 // ---- element handles -------------------------------------------------------
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -55,6 +63,22 @@ const contractArgs = $("contract-args");
 const contractErr = $("contract-err");
 const transactionXdr = $<HTMLTextAreaElement>("transaction-xdr");
 const xdrErr = $("xdr-err");
+const identityLocal = $<HTMLButtonElement>("identity-local");
+const identityWallet = $<HTMLButtonElement>("identity-wallet");
+const localIdentityView = $("local-identity-view");
+const walletIdentityView = $("wallet-identity-view");
+const localIdentityAddress = $("local-identity-address");
+const localIdentityDot = $("local-identity-dot");
+const localIdentityStatus = $("local-identity-status");
+const fundIdentityBtn = $<HTMLButtonElement>("fund-identity");
+const connectWalletBtn = $<HTMLButtonElement>("connect-wallet");
+const disconnectWalletBtn = $<HTMLButtonElement>("disconnect-wallet");
+const walletDisconnected = $("wallet-disconnected");
+const walletConnected = $("wallet-connected");
+const walletName = $("wallet-name");
+const walletAddress = $("wallet-address");
+const walletErr = $("wallet-err");
+const simulationSource = $("simulation-source");
 
 const timeline = $("timeline");
 const timelineScroll = $("timeline-scroll");
@@ -75,15 +99,11 @@ const resultPanel = $("result-panel");
 const rValue = $("r-value");
 const rLen = $("r-len");
 const rSha = $("r-sha");
-const rBadge = $("r-badge");
 const rErr = $("r-err");
 const resultNote = $("result-note");
 const resultContext = $("result-context");
 const rNetwork = $("r-network");
 const rLedger = $("r-ledger");
-
-const golden = $("golden");
-const goldenText = $("golden-text");
 
 // upload-any-contract
 const uploadFile = $<HTMLInputElement>("upload-file");
@@ -158,10 +178,24 @@ const submitStatus = $("submit-status");
 const submitSource = $("submit-source");
 const submitAuth = $("submit-auth");
 const submitFee = $("submit-fee");
+const submissionBoundary = $("submission-boundary");
+const reviewSubmitBtn = $<HTMLButtonElement>("review-submit");
+const submitDialog = $<HTMLDialogElement>("submit-dialog");
+const reviewCall = $("review-call");
+const reviewSource = $("review-source");
+const reviewAuthorizer = $("review-authorizer");
+const reviewFee = $("review-fee");
+const reviewXdr = $("review-xdr");
+const submitErr = $("submit-err");
+const submitProgress = $("submit-progress");
+const confirmSubmitBtn = $<HTMLButtonElement>("confirm-submit");
 
-/** Per-transaction host budget caps (soroban-env-host, protocol 27). */
+/** Per-transaction host budget caps (soroban-env-host, protocol 28). */
 const CPU_CAP = 100_000_000;
 const MEM_CAP = 40 * 1024 * 1024;
+const TESTNET_RPC_URL = "https://soroban-testnet.stellar.org";
+const NIDO_WALLET_ID = "nido";
+const testnetRpc = new rpc.Server(TESTNET_RPC_URL);
 
 /** Byte-map region colors, keyed by SSIM framing field. Theme-independent. */
 const REGION_COLOR: Record<string, string> = {
@@ -189,10 +223,170 @@ themeBtn.addEventListener("click", () => {
   localStorage.setItem("sim-theme", next);
 });
 
+// ---- Testnet identity + wallet selection ---------------------------------
+function shortAddress(address: string): string {
+  return `${address.slice(0, 8)}…${address.slice(-8)}`;
+}
+
+function selectedAuthorizer(): string {
+  return identityMode === "wallet" && connectedWallet
+    ? connectedWallet.address
+    : localIdentity.publicKey;
+}
+
+function selectedFeePayer(): string | undefined {
+  if (identityMode === "local") return localIdentity.publicKey;
+  if (!connectedWallet) return undefined;
+  return StrKey.isValidEd25519PublicKey(connectedWallet.address)
+    ? connectedWallet.address
+    : localIdentity.publicKey;
+}
+
+function suggestAuthorizer(): void {
+  const input = contractArgs.querySelector<HTMLInputElement>(
+    'input[data-arg="author"]',
+  );
+  if (input) input.value = selectedAuthorizer();
+}
+
+function renderIdentity(): void {
+  identityLocal.setAttribute("aria-pressed", String(identityMode === "local"));
+  identityWallet.setAttribute("aria-pressed", String(identityMode === "wallet"));
+  localIdentityView.hidden = identityMode !== "local";
+  walletIdentityView.hidden = identityMode !== "wallet";
+  localIdentityAddress.textContent = localIdentity.publicKey;
+  localIdentityAddress.title = localIdentity.publicKey;
+  localIdentityDot.className = `identity-dot${localIdentityFunded ? " ready" : ""}`;
+  localIdentityStatus.textContent = localIdentityFunded
+    ? "Funded on Testnet · ready to pay fees"
+    : "Not funded · local simulation can run, but no transaction can be submitted";
+  fundIdentityBtn.disabled = localIdentityFunded;
+  fundIdentityBtn.textContent = localIdentityFunded
+    ? "Funded by Friendbot ✓"
+    : "Fund with Friendbot";
+
+  walletDisconnected.hidden = connectedWallet !== undefined;
+  walletConnected.hidden = connectedWallet === undefined;
+  if (connectedWallet) {
+    walletName.textContent = `${connectedWallet.name} ${connectedWallet.id === NIDO_WALLET_ID ? "smart account" : "wallet"}`;
+    walletAddress.textContent = connectedWallet.address;
+    walletAddress.title = connectedWallet.address;
+  }
+
+  const feePayer = selectedFeePayer();
+  if (identityMode === "wallet" && !connectedWallet) {
+    simulationSource.textContent =
+      "Connect a wallet to suggest its address in contract arguments and prepare a signable envelope.";
+  } else if (!localIdentityFunded && feePayer === localIdentity.publicKey) {
+    simulationSource.textContent =
+      "Simulation can use a public placeholder. Fund the local account to run the exact envelope that can be submitted.";
+  } else if (connectedWallet?.id === NIDO_WALLET_ID) {
+    simulationSource.textContent =
+      "The local G-account pays the fee; Nido's C-account authorizes the contract call.";
+  } else {
+    simulationSource.textContent = `Exact envelope source ${feePayer ? shortAddress(feePayer) : "unavailable"} · signing remains a separate step.`;
+  }
+}
+
+async function accountSequence(address: string): Promise<string | undefined> {
+  try {
+    return (await testnetRpc.getAccount(address)).sequenceNumber();
+  } catch {
+    return undefined;
+  }
+}
+
+async function exactSource(): Promise<
+  { address: string; sequence: string } | undefined
+> {
+  const address = selectedFeePayer();
+  if (!address) return undefined;
+  const sequence = await accountSequence(address);
+  if (!sequence) return undefined;
+  if (address === localIdentity.publicKey && !localIdentityFunded) {
+    localIdentityFunded = true;
+    renderIdentity();
+  }
+  return { address, sequence };
+}
+
+identityLocal.addEventListener("click", () => {
+  identityMode = "local";
+  suggestAuthorizer();
+  renderIdentity();
+  invalidateRunUI();
+});
+identityWallet.addEventListener("click", () => {
+  identityMode = "wallet";
+  suggestAuthorizer();
+  renderIdentity();
+  invalidateRunUI();
+});
+fundIdentityBtn.addEventListener("click", () => {
+  fundIdentityBtn.disabled = true;
+  fundIdentityBtn.textContent = "Requesting Friendbot…";
+  localIdentityStatus.textContent = "Funding disposable Testnet account…";
+  void fundTestnetIdentity(localIdentity.publicKey)
+    .then(async () => {
+      // Friendbot can return just before RPC indexes the account. Poll briefly.
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        if (await accountSequence(localIdentity.publicKey)) {
+          localIdentityFunded = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      if (!localIdentityFunded) {
+        throw new Error("Friendbot funded the account, but RPC has not indexed it yet");
+      }
+      renderIdentity();
+      invalidateRunUI();
+    })
+    .catch((error: unknown) => {
+      localIdentityDot.className = "identity-dot error";
+      localIdentityStatus.textContent =
+        error instanceof Error ? error.message : String(error);
+      fundIdentityBtn.disabled = false;
+      fundIdentityBtn.textContent = "Retry Friendbot";
+    });
+});
+connectWalletBtn.addEventListener("click", () => {
+  walletErr.hidden = true;
+  connectWalletBtn.disabled = true;
+  connectWalletBtn.textContent = "Opening wallet selector…";
+  void import("./wallet.js")
+    .then(({ connectWallet }) => connectWallet())
+    .then((wallet) => {
+      connectedWallet = wallet;
+      suggestAuthorizer();
+      renderIdentity();
+      invalidateRunUI();
+    })
+    .catch((error: unknown) => {
+      walletErr.hidden = false;
+      walletErr.textContent =
+        error instanceof Error ? error.message : String(error);
+    })
+    .finally(() => {
+      connectWalletBtn.disabled = false;
+      connectWalletBtn.textContent = "Choose wallet";
+    });
+});
+disconnectWalletBtn.addEventListener("click", () => {
+  void import("./wallet.js")
+    .then(({ disconnectWallet }) => disconnectWallet())
+    .finally(() => {
+      connectedWallet = undefined;
+      renderIdentity();
+      invalidateRunUI();
+    });
+});
+
 // ---- app state -------------------------------------------------------------
 let mode: DemoMode = "offline";
 let selectedId = FIXTURES[0]!.id;
 let running = false;
+let preparingSource = false;
 let runId = 0;
 let workerStartupMs = 0;
 let workerReady = false;
@@ -206,6 +400,26 @@ type RequestKind = "contract" | "xdr" | "fixture" | "upload";
 let requestKind: RequestKind = "contract";
 let contractInfo: ContractInfoMsg | undefined;
 let contractLoadId = 0;
+
+type IdentityMode = "local" | "wallet";
+let identityMode: IdentityMode = "local";
+let localIdentity: TestnetIdentity;
+let localIdentityFunded = false;
+let connectedWallet: ConnectedWallet | undefined;
+let preparedTransactionXdr: string | undefined;
+let preparedContext:
+  | {
+      contractId: string;
+      fn: string;
+      source: string;
+      authorizer: string;
+      resourceFee: string;
+    }
+  | undefined;
+let activeContractInvocation:
+  | { contractId: string; fn: string; authorizer: string }
+  | undefined;
+let submitting = false;
 
 // upload-any-contract state
 let uploadInfo: UploadInfoMsg | undefined;
@@ -260,7 +474,6 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
         null,
         2,
       );
-      renderGolden(msg.len, msg.sha256);
       return;
     }
     case "round": {
@@ -312,14 +525,6 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
       return;
     }
   }
-}
-
-function renderGolden(len: number, sha: string): void {
-  const match = len === GOLDEN_LEN && sha === GOLDEN_SHA;
-  golden.dataset.status = match ? "done" : "error";
-  goldenText.innerHTML = match
-    ? `<b>${len} B</b> · sha <code>${sha.slice(0, 8)}</code> ✓ byte-identical to CI`
-    : `unexpected output (${len} B, sha ${sha.slice(0, 8)})`;
 }
 
 // ---- fixture picker --------------------------------------------------------
@@ -450,7 +655,6 @@ function resetRunUI(): void {
   resultPanel.hidden = true;
   resultNote.hidden = true;
   resultContext.hidden = true;
-  rBadge.classList.add("hidden");
   rErr.hidden = true;
   resultPanel.classList.remove("error");
   wasmState.hidden = true;
@@ -459,6 +663,11 @@ function resetRunUI(): void {
   submitSource.textContent = "—";
   submitAuth.textContent = "—";
   submitFee.textContent = "—";
+  submissionBoundary.textContent =
+    "Run a local simulation first. No wallet prompt or network submission can happen during simulation.";
+  reviewSubmitBtn.disabled = true;
+  preparedTransactionXdr = undefined;
+  preparedContext = undefined;
   // debugger resets with every new run
   debugRunBtn.hidden = true;
   debugRunBtn.disabled = false;
@@ -470,6 +679,9 @@ function resetRunUI(): void {
   debugSteps = [];
   dbgRaw.checked = false;
   activeRound = undefined;
+  lastTimelineRole = undefined;
+  sawContractInstance = false;
+  renderedWasmHashes = new Set();
 }
 
 /** Remove output that no longer describes the selected request. */
@@ -516,12 +728,23 @@ function beginRun(): void {
   runBtn.dataset.running = "true";
 }
 
-function startRun(): void {
-  if (!workerReady || running || runBtn.disabled) return;
+async function startRun(): Promise<void> {
+  if (!workerReady || running || preparingSource || runBtn.disabled) return;
   if (requestKind === "contract") {
     const invocation = gatherContractInvocation();
     if (!invocation) return;
+    preparingSource = true;
+    runBtn.disabled = true;
+    runBtn.textContent = "Preparing source…";
+    const source = await exactSource();
+    preparingSource = false;
+    if (!workerReady || running) return;
     beginRun();
+    activeContractInvocation = {
+      contractId: invocation.contractId,
+      fn: invocation.fn,
+      authorizer: selectedAuthorizer(),
+    };
     worker.postMessage({
       type: "simulate-contract",
       id: runId,
@@ -529,6 +752,8 @@ function startRun(): void {
       fn: invocation.fn,
       args: invocation.args,
       raw: invocation.raw,
+      sourceAccount: source?.address,
+      sourceAccountSequence: source?.sequence,
     });
     return;
   }
@@ -603,11 +828,169 @@ function endRun(): void {
 
 runBtn.addEventListener("click", () => {
   if (running) cancelRun();
-  else startRun();
+  else void startRun();
 });
 
 // ---- render a resolved round ----------------------------------------------
 let activeRound: HTMLElement | undefined;
+let lastTimelineRole: RoundMsg["keys"][number]["role"] | undefined;
+let sawContractInstance = false;
+let renderedWasmHashes = new Set<string>();
+
+type TimelineKey = RoundMsg["keys"][number];
+
+interface KeyPresentation {
+  title: string;
+  detail: string;
+  hint: string;
+}
+
+function shortHash(hash: string): string {
+  if (hash.includes("…") || hash.length <= 24) return hash;
+  return `${hash.slice(0, 12)}…${hash.slice(-8)}`;
+}
+
+function presentKey(key: TimelineKey): KeyPresentation {
+  switch (key.role) {
+    case "contract-instance":
+      return {
+        title: "Contract instance",
+        detail: key.detail,
+        hint: "Deployment metadata containing the executable Wasm hash",
+      };
+    case "contract-code":
+      return {
+        title: "Wasm binary",
+        detail: `hash ${shortHash(key.key ?? key.detail)}`,
+        hint: "ContractCode ledger entry loaded by that hash",
+      };
+    case "contract-storage":
+      return {
+        title: "Contract storage",
+        detail: key.detail,
+        hint: "State requested by the executing contract",
+      };
+    default:
+      return {
+        title: key.kind,
+        detail: key.detail || "—",
+        hint: "Ledger entry supplied to local execution",
+      };
+  }
+}
+
+function compactReadValue(value: string, max = 120): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+function readValueElement(key: TimelineKey, className: string): HTMLElement | undefined {
+  if (key.role !== "contract-storage" || key.status !== "present" || !key.value) {
+    return undefined;
+  }
+  const row = document.createElement("div");
+  row.className = className;
+  const label = document.createElement("span");
+  label.textContent = "read value";
+  const value = document.createElement("code");
+  const full = `${key.value.type} · ${key.value.display}`;
+  value.textContent = compactReadValue(full);
+  value.title = full;
+  row.append(label, value);
+  return row;
+}
+
+function appendTimelineConnector(label: string): void {
+  const connector = document.createElement("div");
+  connector.className = "dependency-arrow";
+  connector.setAttribute("aria-label", label);
+  const relation = document.createElement("span");
+  relation.textContent = label;
+  const arrow = document.createElement("b");
+  arrow.textContent = "→";
+  connector.append(relation, arrow);
+  timeline.appendChild(connector);
+}
+
+function appendWasmHashReference(key: TimelineKey): void {
+  const fullHash = key.key ?? key.detail;
+  if (renderedWasmHashes.has(fullHash)) return;
+  renderedWasmHashes.add(fullHash);
+
+  if (sawContractInstance) appendTimelineConnector("contains");
+
+  const reference = document.createElement("div");
+  reference.className = "wasm-reference";
+  const meta = document.createElement("span");
+  meta.className = "reference-meta";
+  meta.textContent = "value inside instance";
+  const title = document.createElement("strong");
+  title.textContent = "Wasm hash";
+  const hash = document.createElement("code");
+  hash.textContent = shortHash(fullHash);
+  hash.title = fullHash;
+  const note = document.createElement("span");
+  note.textContent = "Key for the ContractCode ledger entry";
+  reference.append(meta, title, hash, note);
+  timeline.appendChild(reference);
+
+  appendTimelineConnector("loads");
+}
+
+function appendTimelineRound(key: TimelineKey, roundIndex: number): HTMLElement {
+  if (key.role === "contract-code") appendWasmHashReference(key);
+  if (key.role === "contract-storage" && lastTimelineRole === "contract-code") {
+    appendTimelineConnector("then executes");
+  }
+
+  const presentation = presentKey(key);
+  const col = document.createElement("div");
+  col.className = `round active ${key.role ?? "ledger-entry"}`;
+
+  const rnum = document.createElement("div");
+  rnum.className = "rnum";
+  rnum.textContent = `R${roundIndex} · ledger read`;
+  col.appendChild(rnum);
+
+  const cell = document.createElement("div");
+  cell.className = `cell ${key.status}`;
+
+  const status = document.createElement("span");
+  status.className = "cell-status";
+  status.textContent = key.status;
+  cell.appendChild(status);
+
+  if (key.ttl !== undefined) {
+    const ttl = document.createElement("span");
+    ttl.className = "ttl";
+    ttl.textContent = `ttl ${shortTtl(key.ttl)}`;
+    cell.appendChild(ttl);
+  }
+
+  const kind = document.createElement("div");
+  kind.className = "rkind";
+  kind.textContent = presentation.title;
+  cell.appendChild(kind);
+
+  const detail = document.createElement("div");
+  detail.className = "rdetail";
+  detail.textContent = presentation.detail;
+  detail.title = key.label;
+  cell.appendChild(detail);
+
+  const readValue = readValueElement(key, "rvalue");
+  if (readValue) cell.appendChild(readValue);
+
+  const hint = document.createElement("div");
+  hint.className = "rhint";
+  hint.textContent = presentation.hint;
+  cell.appendChild(hint);
+
+  col.appendChild(cell);
+  timeline.appendChild(col);
+  lastTimelineRole = key.role;
+  if (key.role === "contract-instance") sawContractInstance = true;
+  return col;
+}
 
 function renderRound(msg: RoundMsg): void {
   const configKeys = msg.keys.filter((key) => key.kind === "ConfigSetting");
@@ -635,40 +1018,9 @@ function renderRound(msg: RoundMsg): void {
   timelineEmpty.hidden = true;
   if (activeRound) activeRound.classList.remove("active");
 
-  const col = document.createElement("div");
-  col.className = "round active";
-
-  const rnum = document.createElement("div");
-  rnum.className = "rnum";
-  rnum.textContent = `R${msg.roundIndex}`;
-  col.appendChild(rnum);
-
-  // usually one key per round; render the primary key's cell + labels
-  const key = newExecutionKeys[0]!;
-  const cell = document.createElement("div");
-  cell.className = `cell ${key.status}`;
-  if (key.ttl !== undefined) {
-    const ttl = document.createElement("span");
-    ttl.className = "ttl";
-    ttl.textContent = shortTtl(key.ttl);
-    cell.appendChild(ttl);
+  for (const key of newExecutionKeys) {
+    activeRound = appendTimelineRound(key, msg.roundIndex);
   }
-  col.appendChild(cell);
-
-  const kind = document.createElement("div");
-  kind.className = "rkind";
-  kind.textContent = key.kind;
-  kind.title = key.label;
-  col.appendChild(kind);
-
-  const detail = document.createElement("div");
-  detail.className = "rdetail";
-  detail.textContent = key.detail || "—";
-  detail.title = key.label;
-  col.appendChild(detail);
-
-  timeline.appendChild(col);
-  activeRound = col;
 
   // Append only transaction-relevant entries to the state rail.
   for (const k of newExecutionKeys) appendSnapshotRow(k);
@@ -679,18 +1031,27 @@ function renderRound(msg: RoundMsg): void {
 
 function appendSnapshotRow(key: RoundMsg["keys"][number]): void {
   snapEmpty.hidden = true;
+  const presentation = presentKey(key);
   const row = document.createElement("div");
   row.className = `snap-row ${key.status}`;
   const dot = document.createElement("span");
   dot.className = "dot";
-  const label = document.createElement("span");
+  const copy = document.createElement("span");
+  copy.className = "s-copy";
+  const label = document.createElement("strong");
   label.className = "s-label";
-  label.textContent = key.label;
-  label.title = key.label;
+  label.textContent = presentation.title;
+  const detail = document.createElement("span");
+  detail.className = "s-detail";
+  detail.textContent = `${key.kind} · ${presentation.detail}`;
+  detail.title = key.label;
+  copy.append(label, detail);
+  const readValue = readValueElement(key, "s-value");
+  if (readValue) copy.appendChild(readValue);
   const ttl = document.createElement("span");
   ttl.className = "s-ttl";
   ttl.textContent = key.status === "present" && key.ttl ? `ttl ${shortTtl(key.ttl)}` : "—";
-  row.append(dot, label, ttl);
+  row.append(dot, copy, ttl);
   snapList.appendChild(row);
 
   if (key.status === "present") presentCount += 1;
@@ -709,6 +1070,9 @@ function shortTtl(ttl: number): string {
 function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   endRun();
   if (activeRound) activeRound.classList.remove("active");
+  // A completed run should teach from the beginning of the dependency chain,
+  // even if progress rendering followed the newest request while it ran.
+  timelineScroll.scrollLeft = 0;
 
   mRounds.textContent = String(msg.rounds);
   mKeys.textContent = String(executionEntryLabels.size);
@@ -718,6 +1082,7 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   resultNote.hidden = false;
   rErr.hidden = true;
   resultPanel.classList.remove("error");
+  const resultReady = msg.ok && !msg.emptyResult;
   resultContext.hidden = false;
   const liveWorkbench =
     msg.requestKind === "contract" || msg.requestKind === "xdr";
@@ -735,21 +1100,25 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
     : "deterministic snapshot";
 
   if (msg.ok) {
-    rValue.textContent = `${msg.scValType} · ${msg.scValDisplay}`;
+    const declaredOption = msg.declaredResultType?.startsWith("Option<");
+    rValue.textContent = declaredOption
+      ? `${msg.declaredResultType} · ${msg.emptyResult ? "None" : `Some(${msg.scValDisplay})`}`
+      : `${msg.scValType} · ${msg.scValDisplay}`;
     rLen.textContent = `${msg.resultLen} B`;
     rSha.textContent = msg.sha256;
+    if (msg.emptyResult) {
+      resultPanel.classList.add("error");
+      rErr.hidden = false;
+      rErr.textContent = `No value exists for this lookup. The contract declares ${msg.declaredResultType}; the missing storage entry is represented as None (raw ScVal::Void).`;
+    }
   } else {
+    resultPanel.classList.add("error");
     rValue.textContent = "host error";
     rLen.textContent = `${msg.resultLen} B`;
     rSha.textContent = msg.sha256;
     rErr.hidden = false;
     rErr.textContent = msg.errorText ?? "inline failure";
   }
-  // Honest badge: only the dedicated runFixture strip proves the CI golden.
-  // The interactive add_i32 run uses a full tx envelope, so its bytes differ;
-  // we never claim a byte-match here.
-  rBadge.classList.add("hidden");
-
   // The worker stashed a trace-replay context for this run — offer the debugger.
   if (msg.debuggable) {
     debuggableRunId = msg.id;
@@ -757,8 +1126,26 @@ function finishRun(msg: Extract<WorkerToMain, { type: "sim-result" }>): void {
   }
 
   resultNote.textContent = liveWorkbench
-    ? `RPC supplied ledger entries at Testnet ledger ${fmtInt(msg.ledgerSequence ?? 0)}. The transaction executed in this Worker and was not submitted.`
+    ? msg.emptyResult
+      ? `RPC supplied ledger entries at Testnet ledger ${fmtInt(msg.ledgerSequence ?? 0)}. Execution completed in this Worker, but the contract returned None because the requested storage entry does not exist.`
+      : `RPC supplied ledger entries at Testnet ledger ${fmtInt(msg.ledgerSequence ?? 0)}. The transaction executed in this Worker and was not submitted.`
     : "Deterministic SSIM bytes — the same rerun loop yields the same result in this Worker, the native runner, and CI.";
+
+  if (
+    resultReady &&
+    msg.preparedTransactionXdr &&
+    msg.sourceAccount &&
+    activeContractInvocation
+  ) {
+    preparedTransactionXdr = msg.preparedTransactionXdr;
+    preparedContext = {
+      contractId: activeContractInvocation.contractId,
+      fn: activeContractInvocation.fn,
+      source: msg.sourceAccount,
+      authorizer: activeContractInvocation.authorizer,
+      resourceFee: msg.resources?.resourceFee ?? "0",
+    };
+  }
 
   renderWasmState(msg);
 }
@@ -883,26 +1270,150 @@ function renderStateImpact(
 function renderSubmissionRequirements(
   msg: Extract<WorkerToMain, { type: "sim-result" }>,
 ): void {
+  const resultReady = msg.ok && !msg.emptyResult;
   const restoreCount = (msg.stateChanges ?? []).filter(
     (change) => change.category === "maintenance",
   ).length;
-  submitStatus.textContent = msg.ok
-    ? restoreCount > 0
-      ? `preflight complete · restores ${restoreCount} archived ${restoreCount === 1 ? "entry" : "entries"} · not submitted`
-      : "preflight complete · not submitted"
+  submitStatus.textContent = msg.emptyResult
+    ? "no value returned · storage entry does not exist · not submitted"
+    : msg.ok
+    ? preparedTransactionXdr
+      ? restoreCount > 0
+        ? `locally prepared · restores ${restoreCount} archived ${restoreCount === 1 ? "entry" : "entries"} · ready to sign · not submitted`
+        : "locally prepared · ready to sign · not submitted"
+      : "local preflight complete · placeholder source · not submitted"
     : "fix simulation error before submission";
   submitSource.textContent = msg.sourceAccount
     ? `${msg.sourceAccount.slice(0, 6)}…${msg.sourceAccount.slice(-6)}`
     : "source comes from final envelope";
   const auth = msg.auth ?? [];
+  const addressAuth = auth.filter(
+    (entry) => entry.credentials.toLowerCase() === "address",
+  );
+  const authorizerMatches = addressAuth.every(
+    (entry) => entry.address === preparedContext?.authorizer,
+  );
   submitAuth.textContent =
     auth.length === 0
       ? "no contract auth recorded"
-      : `${auth.length} contract auth ${auth.length === 1 ? "entry" : "entries"} to authorize`;
+      : addressAuth.length === 0
+        ? `${auth.length} source-account auth ${auth.length === 1 ? "entry" : "entries"}`
+        : authorizerMatches
+          ? `${addressAuth.length} address auth ${addressAuth.length === 1 ? "entry" : "entries"} match selected wallet`
+          : "recorded auth does not match the selected wallet";
   submitFee.textContent = msg.resources
     ? `${fmtInt(Number(msg.resources.resourceFee))} stroops minimum resource fee`
     : "resource fee unavailable";
+  reviewSubmitBtn.disabled =
+    !preparedTransactionXdr || !resultReady || !authorizerMatches;
+  submissionBoundary.textContent = msg.emptyResult
+    ? "The contract returned None for this lookup, so there is no value to sign or submit. Change the argument or create the missing state first."
+    : preparedTransactionXdr
+    ? authorizerMatches
+      ? "This exact envelope ran locally. Review is the first point where a wallet prompt or Testnet broadcast is allowed."
+      : "The contract recorded authorization for a different address. Select that wallet (or correct the contract argument), then simulate again."
+    : "This run used a public placeholder source. Fund or connect a Testnet G-account, then simulate again to produce a signable envelope.";
 }
+
+function openSubmissionReview(): void {
+  if (!preparedTransactionXdr || !preparedContext) return;
+  reviewCall.textContent = `${shortAddress(preparedContext.contractId)} · ${preparedContext.fn}(…)`;
+  reviewSource.textContent = preparedContext.source;
+  reviewAuthorizer.textContent = preparedContext.authorizer;
+  reviewFee.textContent = `${fmtInt(Number(preparedContext.resourceFee))} stroops minimum resource fee`;
+  reviewXdr.textContent = preparedTransactionXdr;
+  submitErr.hidden = true;
+  submitProgress.hidden = true;
+  confirmSubmitBtn.disabled = false;
+  confirmSubmitBtn.textContent = "Sign & submit to Testnet";
+  submitDialog.showModal();
+}
+
+async function waitForTransaction(hash: string): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const result = await testnetRpc.getTransaction(hash);
+    if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) return;
+    if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
+      throw new Error("Testnet included the transaction, but contract execution failed");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`Submission is still pending: ${hash}`);
+}
+
+async function signAndSubmitPrepared(): Promise<void> {
+  if (submitting || !preparedTransactionXdr || !preparedContext) return;
+  submitting = true;
+  confirmSubmitBtn.disabled = true;
+  submitErr.hidden = true;
+  submitProgress.hidden = false;
+  try {
+    let hash: string | undefined;
+    let transaction: Transaction | undefined;
+    if (identityMode === "wallet" && connectedWallet) {
+      submitProgress.textContent = `Waiting for ${connectedWallet.name} approval…`;
+      const { signWithWallet } = await import("./wallet.js");
+      const signed = await signWithWallet(
+        preparedTransactionXdr,
+        connectedWallet.address,
+      );
+      if (signed.submitted) {
+        // Nido's relayer returns the transaction hash in the SEP-43 result slot.
+        hash = signed.signedTxXdr;
+      } else {
+        transaction = TransactionBuilder.fromXdr(
+          signed.signedTxXdr,
+          Networks.TESTNET,
+        ) as Transaction;
+        if (StrKey.isValidContract(connectedWallet.address)) {
+          // The wallet supplied C-account auth; the disposable G-account still
+          // signs the transaction envelope and pays the fee.
+          transaction.sign(loadTestnetKeypair());
+        }
+      }
+    } else {
+      submitProgress.textContent = "Signing with the disposable local Testnet account…";
+      transaction = TransactionBuilder.fromXdr(
+        preparedTransactionXdr,
+        Networks.TESTNET,
+      ) as Transaction;
+      transaction.sign(loadTestnetKeypair());
+    }
+
+    if (transaction) {
+      submitProgress.textContent = "Broadcasting to Stellar RPC…";
+      const sent = await testnetRpc.sendTransaction(transaction);
+      if (sent.status === "ERROR") {
+        throw new Error("Stellar RPC rejected the prepared transaction");
+      }
+      if (sent.status === "TRY_AGAIN_LATER") {
+        throw new Error("Stellar RPC is busy; simulate again before retrying");
+      }
+      hash = sent.hash;
+    }
+    if (!hash) throw new Error("the signer returned no transaction hash");
+
+    submitProgress.textContent = `Submitted ${shortAddress(hash)} · waiting for ledger inclusion…`;
+    await waitForTransaction(hash);
+    submitProgress.textContent = `Confirmed on Testnet · ${hash}`;
+    submitStatus.textContent = "confirmed on Testnet";
+    submissionBoundary.textContent = `Submitted transaction ${hash}`;
+    confirmSubmitBtn.textContent = "Confirmed ✓";
+  } catch (error) {
+    submitErr.hidden = false;
+    submitErr.textContent = error instanceof Error ? error.message : String(error);
+    confirmSubmitBtn.disabled = false;
+    confirmSubmitBtn.textContent = "Retry sign & submit";
+    submitProgress.hidden = true;
+  } finally {
+    submitting = false;
+  }
+}
+
+reviewSubmitBtn.addEventListener("click", openSubmissionReview);
+confirmSubmitBtn.addEventListener("click", () => {
+  void signAndSubmitPrepared();
+});
 
 function isRuntimeFootprintKey(key: FootprintKey): boolean {
   return key.role === "contract-instance" || key.role === "contract-code";
@@ -1087,6 +1598,13 @@ function renderAuth(
       c.title = a.contract;
       item.appendChild(c);
     }
+    if (a.address) {
+      const authorizer = document.createElement("div");
+      authorizer.className = "ea-data";
+      authorizer.textContent = `authorizer ${a.address.slice(0, 6)}…${a.address.slice(-6)}`;
+      authorizer.title = a.address;
+      item.appendChild(authorizer);
+    }
     authList.appendChild(item);
   }
 }
@@ -1156,13 +1674,22 @@ function failRunText(message: string): void {
   resultPanel.hidden = false;
   resultNote.hidden = true;
   resultPanel.classList.add("error");
+  const protocolMismatch =
+    /browser host supports protocol \d+.*Testnet is on protocol \d+/i.test(message);
   const rpcFailure = /rpc|testnet|fetch|network|ledger advanced/i.test(message);
-  rValue.textContent = rpcFailure ? "testnet state unavailable" : "simulation failed";
+  rValue.textContent = protocolMismatch
+    ? "browser host upgrade required"
+    : rpcFailure
+      ? "testnet state unavailable"
+      : "simulation failed";
   rLen.textContent = "—";
   rSha.textContent = "—";
-  rBadge.classList.add("hidden");
   rErr.hidden = false;
-  rErr.textContent = rpcFailure ? `${message} — retry to pin a fresh ledger.` : message;
+  rErr.textContent = protocolMismatch
+    ? `${message}. This preview must be rebuilt with matching protocol support.`
+    : rpcFailure
+      ? `${message} — retry to pin a fresh ledger.`
+      : message;
 }
 
 // ---- deployed Testnet contract --------------------------------------------
@@ -1203,7 +1730,7 @@ function renderContractArgs(): void {
         text.type = "text";
         text.placeholder = ARG_PLACEHOLDER[arg.input] ?? "";
         if (arg.name === "author" && arg.input === "address") {
-          text.value = DEFAULT_SIMULATION_SOURCE;
+          text.value = selectedAuthorizer();
         } else if (arg.name === "message" && arg.input === "string") {
           text.value = "Simulated locally with soroban-sim";
         }
@@ -1267,7 +1794,8 @@ function onContractInfo(msg: ContractInfoMsg): void {
     for (const fn of msg.fns) {
       const option = document.createElement("option");
       option.value = fn.name;
-      option.textContent = `${fn.name}(${fn.args.map((arg) => arg.name).join(", ")})`;
+      const resultType = fn.outputs?.length ? fn.outputs.join(", ") : "Void";
+      option.textContent = `${fn.name}(${fn.args.map((arg) => arg.name).join(", ")}) → ${resultType}`;
       contractFn.appendChild(option);
     }
     if (msg.fns.some((fn) => fn.name === "get_message")) {
@@ -1843,6 +2371,8 @@ window.addEventListener("keydown", (e) => {
 });
 
 // ---- boot ------------------------------------------------------------------
+localIdentity = ensureTestnetIdentity();
+renderIdentity();
 contractLoadBtn.disabled = true;
 syncModeUi();
 renderFixtures();

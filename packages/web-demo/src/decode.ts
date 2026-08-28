@@ -3,7 +3,13 @@
  * here so the (large) SDK stays off the main thread — the main thread only ever
  * receives already-decoded strings.
  */
-import { Address, StrKey, scValToNative, xdr } from "@stellar/stellar-sdk";
+import {
+  Address,
+  inspectAuthEntry,
+  StrKey,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk";
 
 function hex(bytes: Uint8Array, from = 0, to = bytes.length): string {
   let s = "";
@@ -244,6 +250,20 @@ function ledgerEntryView(bytes: Uint8Array): LedgerEntryView {
       key: "undecodable ledger entry",
       value: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+/** Decode the stored ScVal from a full ContractData LedgerEntry. */
+export function contractDataValueLabel(bytes: Uint8Array): ScValLabel | undefined {
+  try {
+    const entry = xdr.LedgerEntry.fromXdr(bytes as unknown as Buffer);
+    const data = field(entry, "data") as { type?: string; value?: unknown };
+    if (data?.type !== "contractData") return undefined;
+    const val = field(data.value, "val");
+    if (!val || tagName(val) === "scvContractInstance") return undefined;
+    return scValLabel(toXdrBytes(val));
+  } catch {
+    return undefined;
   }
 }
 
@@ -498,6 +518,8 @@ export function buildCallFrames(diagXdrs: Uint8Array[]): CallFrame[] {
 export interface AuthLabel {
   /** Credentials kind: sourceAccount | address (short form). */
   credentials: string;
+  /** G- or C-address that must authorize address credentials. */
+  address?: string;
   /** Invoked contract (C… address), when the root invocation is a contract fn. */
   contract?: string;
   /** Invoked function name, when the root invocation is a contract fn. */
@@ -510,9 +532,10 @@ export interface AuthLabel {
 export function authLabel(bytes: Uint8Array): AuthLabel {
   try {
     const ae = xdr.SorobanAuthorizationEntry.fromXdr(bytes as unknown as Buffer);
-    const cred = field(ae, "credentials");
-    const credArm = tagName(cred);
-    const credentials = credArm.replace(/^sorobanCredentials/, "") || credArm || "unknown";
+    const info = inspectAuthEntry(ae);
+    const credentials =
+      info.credentialType === "sourceAccount" ? "SourceAccount" : "Address";
+    const address = info.address ?? undefined;
 
     const root = field(ae, "rootInvocation");
     const fnUnion = field(root, "function");
@@ -545,6 +568,7 @@ export function authLabel(bytes: Uint8Array): AuthLabel {
 
     return {
       credentials,
+      address,
       contract,
       fn,
       subInvocations: subs.length,

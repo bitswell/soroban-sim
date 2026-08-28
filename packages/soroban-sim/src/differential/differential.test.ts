@@ -19,10 +19,10 @@
  *
  * ── Protocol / env-host version note (real findings, not papered over) ──────
  * The two `native-sac-*` fixtures were captured against Stellar testnet at ledger
- * protocol 27, matching the protocol-27 browser host used for live preflight.
+ * protocol 27 and therefore remain cross-version resource comparisons.
  *
- * `local-add-i32` was captured against a LOCAL protocol-28 quickstart node and
- * therefore remains a cross-version resource comparison. In all cases RESULT /
+ * `local-add-i32` was captured against a LOCAL protocol-28 quickstart node,
+ * matching the protocol-28 browser host used for live preflight. In all cases RESULT /
  * FOOTPRINT / AUTH / EVENT / bytes are byte-equal; resource residuals are
  * reported explicitly rather than force-passed.
  */
@@ -76,7 +76,7 @@ import { decodeSsim } from "./decode-ssim.js";
 /**
  * Ledger protocol version the linked `soroban-env-host` will run.
  */
-const HOST_PROTOCOL_VERSION = 27;
+const HOST_PROTOCOL_VERSION = 28;
 
 interface ParityFixture {
   networkPassphrase: string;
@@ -145,7 +145,7 @@ describe("RPC equivalence (RpcDefault adjustments)", () => {
       const fixture = loadFixture(spec.name);
       const ctx = fixture.ledgerContext;
       const ledgerContext: LedgerContext = {
-        protocolVersion: HOST_PROTOCOL_VERSION, // see file header: 27 -> 28
+        protocolVersion: HOST_PROTOCOL_VERSION,
         sequenceNumber: ctx.sequenceNumber,
         timestamp: BigInt(ctx.timestamp),
         networkId: hexToBytes(ctx.networkId),

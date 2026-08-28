@@ -23,11 +23,23 @@ import type {
   StateProvider,
   TraceStep,
 } from "@theahaco/soroban-sim";
-import { Address, contract, rpc, StrKey, xdr } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Address,
+  BASE_FEE,
+  contract,
+  Operation,
+  rpc,
+  StrKey,
+  type Transaction,
+  TransactionBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
 import {
   authLabel,
   buildCallFrames,
   type CallFrame,
+  contractDataValueLabel,
   contractEventLabel,
   footprintLabels,
   ledgerChangeLabel,
@@ -59,8 +71,8 @@ import type {
 } from "./protocol.js";
 
 const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
-/** The linked soroban-env-host runs protocol 27; the host rejects anything else. */
-const HOST_PROTOCOL_VERSION = 27;
+/** The linked soroban-env-host runs protocol 28; the host rejects anything else. */
+const HOST_PROTOCOL_VERSION = 28;
 const DEFAULT_SIMULATION_SOURCE =
   "GALD63KYDPYZLJLY2VD722RI6HAW3RIKU5AROSPAXTL5JRDJB5NGOJIX";
 const CONFIG_SETTING_IDS = [
@@ -158,7 +170,7 @@ class RecordingProvider implements StateProvider {
     this.cumulativeKeys += keyXdrs.length;
 
     const keys: RoundKey[] = keyXdrs.map((keyXdr, i) => {
-      const { kind, detail, label } = ledgerKeyLabel(keyXdr);
+      const { kind, detail, label, role, key: decodedKey } = ledgerKeyLabel(keyXdr);
       const res = resolutions[i]!;
       if (res.status === "present") {
         this.present += 1;
@@ -176,8 +188,14 @@ class RecordingProvider implements StateProvider {
         detail,
         status: res.status,
       };
+      if (role !== undefined) key.role = role;
+      if (decodedKey !== undefined) key.key = decodedKey;
       if (res.status === "present" && res.entry.liveUntilLedger !== undefined) {
         key.ttl = res.entry.liveUntilLedger;
+      }
+      if (res.status === "present" && role === "contract-storage") {
+        const value = contractDataValueLabel(res.entry.entryXdr);
+        if (value !== undefined) key.value = value;
       }
       return key;
     });
@@ -700,6 +718,41 @@ interface RunMeta {
   ledgerSequence?: number;
   sourceAccount?: string;
   operationCount?: number;
+  /** Initial exact envelope, before local transaction data + auth are applied. */
+  rawTransaction?: Transaction;
+  /** Return type declared by the loaded contract spec, when available. */
+  declaredResultType?: string;
+}
+
+function assemblePreparedTransaction(
+  raw: Transaction,
+  transactionData: Uint8Array,
+  authEntries: Uint8Array[],
+): string {
+  const operation = raw.operations[0];
+  if (!operation || operation.type !== "invokeHostFunction") {
+    throw new Error("only a single contract invocation can be prepared");
+  }
+  const sorobanData = xdr.SorobanTransactionData.fromXdr(
+    transactionData as unknown as Buffer,
+  );
+  const auth = authEntries.map((entry) =>
+    xdr.SorobanAuthorizationEntry.fromXdr(entry as unknown as Buffer),
+  );
+  const builder = TransactionBuilder.cloneFrom(raw, {
+    fee: raw.fee,
+    networkPassphrase: NETWORK_PASSPHRASE,
+    sorobanData,
+  });
+  builder.clearOperations();
+  builder.addOperation(
+    Operation.invokeHostFunction({
+      source: operation.source,
+      func: operation.func,
+      auth,
+    }),
+  );
+  return builder.build().toEnvelope().toXdr("base64");
 }
 
 async function postSimResult(
@@ -717,6 +770,11 @@ async function postSimResult(
       decoded.result.ok && decoded.result.scValXdr.length > 0
         ? scValLabel(decoded.result.scValXdr)
         : { type: "Void", display: "void" };
+    const emptyResult = Boolean(
+      decoded.result.ok &&
+        scv.type === "Void" &&
+        meta.declaredResultType?.startsWith("Option<"),
+    );
 
     // Turn the decoded XDR slices into display-ready state, all worker-side.
     // Each label helper is internally guarded (returns undefined / a "—" marker
@@ -726,6 +784,14 @@ async function postSimResult(
       : undefined;
     const contractEvents = decoded.contractEvents.map((e) => contractEventLabel(e));
     const auth = decoded.auth.map((a) => authLabel(a));
+    const preparedTransactionXdr =
+      meta.rawTransaction && decoded.transactionData && decoded.result.ok
+        ? assemblePreparedTransaction(
+            meta.rawTransaction,
+            decoded.transactionData,
+            decoded.auth,
+          )
+        : undefined;
     let stateChanges: StateChangeLabel[] = decoded.modifiedEntries.map((change) =>
       ledgerChangeLabel(change.before, change.after),
     );
@@ -773,6 +839,10 @@ async function postSimResult(
       scValDisplay: scv.display,
       ok: decoded.result.ok,
       errorText: decoded.result.ok ? undefined : decoded.result.error,
+      ...(meta.declaredResultType
+        ? { declaredResultType: meta.declaredResultType }
+        : {}),
+      emptyResult,
       present: recording.present,
       absent: recording.absent,
       instructions: decoded.simulatedInstructions,
@@ -797,6 +867,7 @@ async function postSimResult(
       ledgerSequence: meta.ledgerSequence,
       sourceAccount: meta.sourceAccount,
       operationCount: meta.operationCount,
+      preparedTransactionXdr,
       regions,
       resultHex,
       debuggable: debuggable && decoded.result.ok,
@@ -844,6 +915,16 @@ function specTypeToInput(typeName: string): UploadArgInput {
   }
 }
 
+/** Turn the useful subset of ScSpecTypeDef into contract-developer notation. */
+function specTypeLabel(typeDef: unknown): string {
+  const typeName = String(xf(typeDef, "type") ?? "Unknown");
+  if (typeName === "scSpecTypeOption") {
+    const option = xf(typeDef, "option");
+    return `Option<${specTypeLabel(xf(option, "valueType"))}>`;
+  }
+  return typeName.replace(/^scSpecType/, "") || "Unknown";
+}
+
 async function handleUploadParse(msg: UploadParseMsg): Promise<void> {
   try {
     const bytes = msg.bytes;
@@ -873,6 +954,7 @@ async function handleUploadParse(msg: UploadParseMsg): Promise<void> {
         spec = parsed;
         fns = funcs.map((f) => ({
           name: String(xf(f, "name")),
+          outputs: ((xf(f, "outputs") as unknown[]) ?? []).map(specTypeLabel),
           args: ((xf(f, "inputs") as unknown[]) ?? []).map((inp) => {
             const t = xf(inp, "type");
             const typeName =
@@ -938,6 +1020,12 @@ interface CallableState {
   spec?: InstanceType<typeof contract.Spec>;
   fns: UploadFnInfo[];
   ladder: "spec" | "names" | "raw";
+}
+
+function functionResultType(state: CallableState, fn: string): string | undefined {
+  const outputs = state.fns.find((candidate) => candidate.name === fn)?.outputs;
+  if (!outputs) return undefined;
+  return outputs.length === 0 ? "Void" : outputs.join(", ");
 }
 
 /** Convert raw arg strings into ScVals via a discovered spec (or b64 XDR). */
@@ -1141,6 +1229,9 @@ async function handleSimulateUpload(msg: SimulateUploadMsg): Promise<void> {
       requestKind: "upload",
       sourceAccount: DEFAULT_SIMULATION_SOURCE,
       operationCount: 1,
+      ...(functionResultType(state, msg.fn)
+        ? { declaredResultType: functionResultType(state, msg.fn) }
+        : {}),
     });
   } catch (error) {
     post({
@@ -1167,6 +1258,7 @@ function specFunctions(
 ): UploadFnInfo[] {
   return spec.funcs().map((fn) => ({
     name: String(xf(fn, "name")),
+    outputs: ((xf(fn, "outputs") as unknown[]) ?? []).map(specTypeLabel),
     args: ((xf(fn, "inputs") as unknown[]) ?? []).map((input) => {
       const typeDef = xf(input, "type");
       const typeName =
@@ -1320,22 +1412,49 @@ async function handleSimulateContract(msg: SimulateContractMsg): Promise<void> {
       }),
     );
     const hostFunctionXdr = new Uint8Array(hostFunction.toXdr());
-    const sourceAccountXdr = defaultSourceAccountXdr();
+    let sourceAccountXdr = defaultSourceAccountXdr();
+    let rawTransaction: Transaction | undefined;
+    if (msg.sourceAccount && msg.sourceAccountSequence !== undefined) {
+      rawTransaction = new TransactionBuilder(
+        new Account(msg.sourceAccount, msg.sourceAccountSequence),
+        {
+          fee: BASE_FEE,
+          networkPassphrase: NETWORK_PASSPHRASE,
+        },
+      )
+        .addOperation(Operation.invokeHostFunction({ func: hostFunction }))
+        .setTimeout(300)
+        .build();
+      sourceAccountXdr = invokeFromEnvelope(
+        new Uint8Array(rawTransaction.toEnvelope().toXdr()),
+      ).sourceAccountXdr;
+    }
     const sim = await SorobanSimulator.create({
       networkPassphrase: NETWORK_PASSPHRASE,
       provider: recording,
     });
-    const result = await sim.simulate(
-      {
-        hostFunctionXdr,
-        sourceAccountXdr,
-        ledgerContext: snapshot.ledgerContext,
-        basePrngSeed: new Uint8Array(32),
-        enableDiagnostics: false,
-        applyRpcAdjustments: true,
-      },
-      { signal: controller.signal },
-    );
+    const result = rawTransaction
+      ? await sim.simulateTransaction(
+          {
+            transactionXdr: new Uint8Array(rawTransaction.toEnvelope().toXdr()),
+            ledgerContext: snapshot.ledgerContext,
+            basePrngSeed: new Uint8Array(32),
+            enableDiagnostics: false,
+            applyRpcAdjustments: true,
+          },
+          { signal: controller.signal },
+        )
+      : await sim.simulate(
+          {
+            hostFunctionXdr,
+            sourceAccountXdr,
+            ledgerContext: snapshot.ledgerContext,
+            basePrngSeed: new Uint8Array(32),
+            enableDiagnostics: false,
+            applyRpcAdjustments: true,
+          },
+          { signal: controller.signal },
+        );
     stashDebugContext(msg.id, {
       networkPassphrase: NETWORK_PASSPHRASE,
       ledgerContext: snapshot.ledgerContext,
@@ -1346,8 +1465,12 @@ async function handleSimulateContract(msg: SimulateContractMsg): Promise<void> {
     await postSimResult(msg.id, result, recording, started, true, {
       requestKind: "contract",
       ledgerSequence: snapshot.ledgerSequence,
-      sourceAccount: DEFAULT_SIMULATION_SOURCE,
+      sourceAccount: msg.sourceAccount ?? DEFAULT_SIMULATION_SOURCE,
       operationCount: 1,
+      rawTransaction,
+      ...(functionResultType(state, msg.fn)
+        ? { declaredResultType: functionResultType(state, msg.fn) }
+        : {}),
     });
   } catch (error) {
     post({

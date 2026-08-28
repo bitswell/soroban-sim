@@ -5,6 +5,7 @@ import {
   BASE_FEE,
   Contract,
   Networks,
+  rpc,
   TransactionBuilder,
 } from "@stellar/stellar-sdk";
 
@@ -20,6 +21,11 @@ test("Nido Status Message write simulates locally against Testnet", async ({ pag
   test.setTimeout(180_000);
 
   await page.goto("/");
+  await page.locator("#fund-identity").click();
+  await expect(page.locator("#local-identity-status")).toContainText(
+    "ready to pay fees",
+    { timeout: 45_000 },
+  );
   const load = page.locator("#load-contract");
   await expect(load).toBeEnabled({ timeout: 60_000 });
   await load.click();
@@ -43,6 +49,48 @@ test("Nido Status Message write simulates locally against Testnet", async ({ pag
   await expect(page.locator("#impact-list .impact-item")).toHaveCount(1);
   await expect(page.locator("#impact-list")).toContainText("Host-managed restoration");
   await expect(page.locator("#submit-status")).toContainText("not submitted");
+  await expect(page.locator("#submit-status")).toContainText("ready to sign");
+  await expect(page.locator("#review-submit")).toBeEnabled();
+  await page.locator("#review-submit").click();
+  await expect(page.locator("#submit-dialog")).toBeVisible();
+  await expect(page.locator("#review-call")).toContainText("update_message");
+  await expect(page.locator("#review-xdr")).not.toHaveText("—");
+  const preparedXdr = await page.locator("#review-xdr").textContent();
+  const prepared = TransactionBuilder.fromXdr(
+    preparedXdr!,
+    Networks.TESTNET,
+  );
+  const rpcCheck = await new rpc.Server(
+    "https://soroban-testnet.stellar.org",
+  ).simulateTransaction(prepared);
+  expect("error" in rpcCheck ? rpcCheck.error : undefined).toBeUndefined();
+});
+
+test("missing Status Message is shown as a typed None failure", async ({ page }) => {
+  test.skip(!process.env.LIVE_TESTNET, "set LIVE_TESTNET=1 for the live RPC smoke test");
+  test.setTimeout(180_000);
+
+  await page.goto("/");
+  const load = page.locator("#load-contract");
+  await expect(load).toBeEnabled({ timeout: 60_000 });
+  await load.click();
+  const fn = page.locator("#contract-fn");
+  await expect(fn).toBeVisible({ timeout: 90_000 });
+  await expect(fn.locator('option[value="get_message"]')).toContainText(
+    "Option<String>",
+  );
+  await fn.selectOption("get_message");
+  await expect(page.locator("#run")).toBeEnabled();
+  await page.locator("#run").click();
+
+  await expect(page.locator("#result-panel")).toBeVisible({ timeout: 120_000 });
+  await expect(page.locator("#result-panel")).toHaveClass(/error/);
+  await expect(page.locator("#r-value")).toContainText("Option<String> · None");
+  await expect(page.locator("#r-err")).toContainText(
+    "missing storage entry is represented as None",
+  );
+  await expect(page.locator("#submit-status")).toContainText("no value returned");
+  await expect(page.locator("#review-submit")).toBeDisabled();
 });
 
 test("valid transaction XDR takes the same local Testnet path", async ({ page }) => {

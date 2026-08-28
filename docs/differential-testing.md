@@ -320,18 +320,17 @@ local-add-i32), which proves the divergence is in raw metering, **not** in the
 adjustment config — if the adjustment differed, raw and adjusted deltas would not
 coincide. It has **two independent components**:
 
-1. **Exact-protocol Testnet fixtures.** The browser host and both
-   `native-sac-*` fixtures use protocol 27. Result, footprint, auth, events, and
-   byte counts match. The recorded RPC build still differs from the exact
-   27.0.1 crate compiled here, leaving an 11,551 raw-instruction / 8-stroop
-   build-calibration residual.
-2. **Historical cross-protocol custom fixture.** `local-add-i32` was captured
-   against protocol 28 and is replayed by the protocol-27 live host. Semantic
-   fields still match; raw metering differs by 10,675 instructions / 27 stroops.
+1. **Historical cross-protocol Testnet fixtures.** Both `native-sac-*` fixtures
+   were captured on protocol 27 and are replayed by the protocol-28 host.
+   Semantic fields and byte counts still match; resource deltas remain reported
+   as build/protocol calibration residuals.
+2. **Exact-protocol custom fixture.** `local-add-i32` was captured against
+   protocol 28 and is replayed by the protocol-28 live host. This is the closest
+   committed comparison to the current Testnet execution environment.
 
 ### Decision: exact network protocol first; report build residuals
 
-The live workbench pins `soroban-env-host =27.0.1` because preflight must use the
+The live workbench pins `soroban-env-host =28.0.0` because preflight must use the
 same ledger protocol as Testnet. Remaining build-level resource differences are
 kept as `divergent-explained` rather than being force-passed. Semantic fields —
 result, footprint (RO+RW), auth, contract events, and read/write bytes — remain
@@ -340,12 +339,12 @@ byte-equal to the recorded RPC outputs.
 **Protocol-version pin (a real finding, root-caused).** The host's
 replay-safety guard `check_ledger_protocol_supported` (invoked from
 `Host::set_ledger_info` during recording *setup*, `host.rs:572`) rejects any
-ledger protocol != 27 with a bare `Error(Context, InternalError)` — thrown
+ledger protocol != 28 with a bare `Error(Context, InternalError)` — thrown
 before diagnostics are enabled, which is why a protocol mismatch carries no debug
-info and no `fn_call` event. Driving a fixture as-captured (pv 27) therefore
+info and no `fn_call` event. Driving a protocol-27 fixture as captured therefore
 yields `Complete`-with-inline-error. Both invocations are protocol-invariant, so
 the harness pins the local ledger context to the host's supported protocol
-(`HOST_PROTOCOL_VERSION = 27`); result, footprint, auth, and event parity are
+(`HOST_PROTOCOL_VERSION = 28`); result, footprint, auth, and event parity are
 unaffected — only the raw metering shifts, which is exactly the residual above.
 
 **Scope — do not overclaim.** This demonstrates RPC parity across three cases: a
