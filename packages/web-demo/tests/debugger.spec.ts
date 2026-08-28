@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 // The first Worker on a fresh macOS CI runner must compile the embedded 3 MB
-// component. Once Chromium caches that compilation, subsequent pages start in
-// milliseconds; allow the cold debugger test to pay that one-time cost.
+// component and finish its startup self-test. Wait for that deterministic gate
+// before posting another simulation into the same Worker queue.
 const COLD_WORKER_TIMEOUT = 120_000;
 
 /**
@@ -18,11 +18,14 @@ async function runFixtureAndOpenDebugger(
   fixtureName?: RegExp,
 ): Promise<void> {
   await page.goto("/");
+  await expect(page.locator("#result")).toHaveAttribute("data-status", "done", {
+    timeout: COLD_WORKER_TIMEOUT,
+  });
   await page.locator("#advanced-inputs summary").click();
   await page
     .getByRole("button", { name: fixtureName ?? /add_i32/ })
     .click();
-  await expect(page.locator("#run")).toBeEnabled({ timeout: COLD_WORKER_TIMEOUT });
+  await expect(page.locator("#run")).toBeEnabled({ timeout: 60_000 });
   await page.locator("#run").click();
   await expect(page.locator("#result-panel")).toBeVisible({ timeout: 60_000 });
 
@@ -36,7 +39,7 @@ test.describe("execution trace (offline)", () => {
   test("add_i32: trace replays with steps, frame push, and budget attribution", async ({
     page,
   }, testInfo) => {
-    testInfo.setTimeout(180_000);
+    testInfo.setTimeout(240_000);
     await runFixtureAndOpenDebugger(page);
 
     // Enforcing replay succeeded — no degraded-mode banner, scrubber visible.
