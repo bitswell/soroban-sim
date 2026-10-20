@@ -9,9 +9,14 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+ed25519-dalek.workspace = true
+p256.workspace = true
 sha2.workspace = true
 soroban-env-host = { workspace = true, features = ["recording_mode"] }
 soroban-simulation.workspace = true
+stellar-strkey.workspace = true
 
 [dev-dependencies]
+base64 = "0.22"
 hex = "0.4.3"
+serde_json = "1"
