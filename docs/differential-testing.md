@@ -330,8 +330,8 @@ coincide. It has **two independent components**:
 
 ### Decision: exact network protocol first; report build residuals
 
-The live workbench pins `soroban-env-host =28.0.0` because preflight must use the
-same ledger protocol as Testnet. Remaining build-level resource differences are
+The live workbench pins `soroban-env-host =29.0.2` because preflight must use the
+same ledger protocol as the network. Remaining build-level resource differences are
 kept as `divergent-explained` rather than being force-passed. Semantic fields —
 result, footprint (RO+RW), auth, contract events, and read/write bytes — remain
 byte-equal to the recorded RPC outputs.

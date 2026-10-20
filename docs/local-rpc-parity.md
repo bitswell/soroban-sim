@@ -1,7 +1,7 @@
 # Local protocol-28 RPC parity runbook
 
-> Historical capture runbook: the live workbench now pins protocol 28 to match
-> Testnet. Use this document only when regenerating the committed protocol-28
+> Historical capture runbook: the live workbench now pins protocol 29 to match
+> the network. Use this document only when regenerating the committed protocol-28
 > `local-add-i32` comparison fixture.
 
 This procedure captured a fixture from a **local Stellar RPC pinned to protocol

@@ -1,8 +1,8 @@
 # Milestone 0 feasibility
 
 > Historical note: the original M0 investigation below used env-host 28.0.2.
-> The live workbench now pins env-host/simulation 28.0.0 to match Testnet; the
-> current 388-byte golden SHA is `1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f`.
+> The live workbench now pins env-host/simulation 29.0.2 to match the network
+> protocol; the current golden lives in `fixtures/golden/add_i32.fixture.json`.
 
 ## Sources reviewed
 
