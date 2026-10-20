@@ -197,7 +197,8 @@ both handled locally without a fork:
     captures was a cross-protocol raw-metering delta, appearing identically in
     both the raw and adjusted numbers — see the `check_ledger_protocol_supported`
     note below. Recaptured at protocol 29 against the 29.0.2 host, the
-    native-SAC fixtures match RPC's instructions and resource fee exactly.
+    native-SAC fixtures and a local protocol-29 `local-add-i32` capture match
+    RPC's instructions and resource fee exactly.
   The raw numbers remain the correct default for a portable simulator that must
   not bake in one network's fee policy; `RpcDefault` is opt-in for callers who
   want RPC-matching output.

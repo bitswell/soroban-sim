@@ -21,10 +21,9 @@
  * The two `native-sac-*` fixtures were captured against Stellar testnet at ledger
  * protocol 29, matching the protocol-29 browser host used for live preflight.
  *
- * `local-add-i32` was captured against a LOCAL protocol-28 quickstart node and
- * is replayed at protocol 29, so it remains a cross-version resource comparison.
- * In all cases RESULT / FOOTPRINT / AUTH / EVENT / bytes are byte-equal; resource
- * residuals are reported explicitly rather than force-passed.
+ * `local-add-i32` was captured against a LOCAL protocol-29 quickstart node.
+ * In all cases RESULT / FOOTPRINT / AUTH / EVENT / bytes are byte-equal; any
+ * resource residual is reported explicitly rather than force-passed.
  */
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -123,8 +122,7 @@ function loadFixture(name: string): ParityFixture {
 const FIXTURES = [
   { name: "native-sac-decimals", expectRw: false, expectAuth: false },
   { name: "native-sac-transfer", expectRw: true, expectAuth: true },
-  // Captured against a LOCAL protocol-28 quickstart node (custom add-i32 wasm);
-  // replayed at the host's protocol 29.
+  // Captured against a LOCAL protocol-29 quickstart node (custom add-i32 wasm).
   { name: "local-add-i32", expectRw: false, expectAuth: false },
 ] as const;
 

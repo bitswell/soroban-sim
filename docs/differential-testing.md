@@ -1,10 +1,9 @@
 # Differential testing plan
 
 Status: **oracles A, B, and C are GREEN; RPC equivalence (M3) demonstrated for
-three captured cases — two Testnet protocol-29 invokes that match RPC exactly
-and one historical protocol-28 custom-wasm invoke — with the adjustment model
-proven identical to stellar-rpc and raw-metering residuals documented
-explicitly.** This document describes
+three captured cases — two Testnet protocol-29 invokes and one local
+protocol-29 custom-wasm invoke, all matching RPC exactly — with the adjustment
+model proven identical to stellar-rpc.** This document describes
 the oracles, comparison fields, fuzz dimensions, and where each check lives.
 
 - **Oracle A** (intra-native, iterative-rerun == complete run) —
@@ -186,7 +185,7 @@ decoded view used to localize a mismatch when the bytes differ.
 Oracles A, B, and C above are green, so the M3 RPC-equivalence oracle is now
 active. It compares `soroban-sim`'s output against a real Stellar testnet RPC
 `simulateTransaction` response, field-by-field, over **three** captured fixtures
-(two from live testnet at protocol 29, one from a local protocol-28 node).
+(two from live testnet at protocol 29, one from a local protocol-29 node).
 
 **Harness.** `scripts/capture-parity-fixture.mjs` (`pnpm run capture:parity <case>`)
 captures a live RPC `simulateTransaction` plus the full ledger state needed to
@@ -219,12 +218,9 @@ instead of funding fresh ones through friendbot.
   (A authorizes, source-account credentials), and one `transfer` contract event
   (topics + data: from A, to B, amount 1, native asset). Returns `void`.
 - `fixtures/parity/local-add-i32.json` — a **custom-wasm** invoke (`add`) captured
-  against a **local protocol-28** quickstart node (`stellar/quickstart:future`),
-  returning `42`. This is the first parity case beyond the built-in SAC. It
-  predates the protocol-29 bump and is replayed by the protocol-29 host, so its
-  resource numbers carry a cross-protocol residual (see root cause below).
-  Recapturing it needs the contract deployed on a protocol-29 network; see
-  `docs/local-rpc-parity.md` for the local-node runbook.
+  against a **local protocol-29** quickstart node (`stellar/quickstart:testing`,
+  core 29.0.0), returning `42`. This is the first parity case beyond the
+  built-in SAC. See `docs/local-rpc-parity.md` for the local-node runbook.
 
 ### Adjustment config — reproducing stellar-rpc's numbers
 
@@ -255,12 +251,9 @@ the adjusted number lives in the encoded `SorobanTransactionData`.
 
 **Headline:** every MUST-match field is byte-identical to a live RPC on all three
 fixtures — including a **custom-wasm** contract and a **write+auth+event** case —
-and the adjustment model is proven identical. The two native-SAC fixtures,
-captured at the host's own protocol (29), also match RPC's instruction count and
-resource fee exactly. The historical protocol-28 `local-add-i32` fixture carries
-a small cross-protocol residual (0.024% of the fee), classified
-`divergent-explained` — a real, documented, non-zero difference, **not** a
-MISMATCH and **not** papered over.
+and the adjustment model is proven identical. All three fixtures are captured
+at the host's own protocol (29) and also match RPC's instruction count and
+resource fee exactly.
 
 `native-sac-decimals` (read-only, RpcDefault):
 
@@ -292,7 +285,7 @@ MISMATCH and **not** papered over.
 | resource fee (stroops) | **match** | local `11717` == RPC `11717` |
 | diagnostic events (count) | divergent-expected | local `3` (fn_call, contract-event-as-diagnostic, fn_return) vs RPC `2` — RPC counts only `type=diagnostic`, folding the contract event into its `type=contract` bucket (informational) |
 
-`local-add-i32` (custom-wasm `add`, **captured at protocol 28**, replayed at 29, RpcDefault):
+`local-add-i32` (custom-wasm `add`, local protocol-29 node, RpcDefault):
 
 | Field | Verdict | Detail |
 | --- | --- | --- |
@@ -303,37 +296,36 @@ MISMATCH and **not** papered over.
 | contract events | **match** | 0 == 0 |
 | read bytes / write bytes | **match** | 0/0 == 0/0 |
 | diagnostic events (count) | **match** | 2 == 2 |
-| instructions (RpcDefault) | **divergent-explained** | local `295293` (=245293+50000) vs RPC `300377`; residual `+5084` |
-| resource fee (stroops) | **divergent-explained** | local `50233` vs RPC `50245`; residual `+12` (**0.024%**) |
+| instructions (RpcDefault) | **match** | local `295293` (=245293+50000) == RPC `295293` |
+| instructions (raw metered) | informational | local `245293` == RPC-implied `245293` |
+| resource fee (stroops) | **match** | local `12605` == RPC `12605` |
 
 The test asserts `match` for result / footprint-RO / footprint-RW / auth /
 contract-events / read-bytes / write-bytes on **all three** fixtures, and that the
 MISMATCH set is empty. The transfer fixture additionally has coverage asserts
 (2 RW keys + 1 auth + 1 contract event) so it cannot silently regress to a
-read-only shape. Resource/fee residuals are `divergent-explained` — documented
-and non-zero, never force-passed.
+read-only shape. Any future resource/fee residual is classified
+`divergent-explained` — documented and non-zero, never force-passed.
 
-### The instruction/fee residual — root cause (not papered over)
+### Instruction/fee residuals — history and root cause
 
-The residual is entirely in **raw CPU instruction metering** (the resource-fee
-residual is just the CPU-fee component tracking it; read/write-byte fee components
-match exactly). It appears **identically in both the raw and the adjusted numbers**
-(`+5084` on local-add-i32), which proves the divergence is in raw metering,
-**not** in the adjustment config — if the adjustment differed, raw and adjusted
-deltas would not coincide.
+A residual shows up only when the capturing network and the replaying host meter
+under different cost calibrations. It lives entirely in **raw CPU instruction
+metering** (the resource-fee residual is just the CPU-fee component tracking it;
+read/write-byte fee components match exactly) and appears **identically in both
+the raw and the adjusted numbers**, which proves the divergence is in raw
+metering, **not** in the adjustment config.
 
-The cause is the protocol gap. `local-add-i32` was captured against a protocol-28
-node and is replayed by the protocol-29 host, whose cost calibration differs.
-The `native-sac-*` fixtures show the converse: captured from Testnet at protocol
-29 and replayed by the 29.0.2 host, they have no residual at all. (Before the
-bump, those fixtures were protocol-27 captures replayed by a protocol-28 host,
-and carried residuals of `+18444` and `+26386` instructions.)
+Before the protocol-29 bump, the `native-sac-*` fixtures were protocol-27
+captures replayed by a protocol-28 host and carried residuals of `+18444` and
+`+26386` instructions; the protocol-28 `local-add-i32` capture replayed at 29
+carried `+5084`. Recapturing every fixture at protocol 29 removed all of them.
 
 ### Decision: exact network protocol first; report build residuals
 
 The live workbench pins `soroban-env-host =29.0.2` because preflight must use the
-same ledger protocol as Testnet (protocol 29; Mainnet runs 29 too). Remaining build-level resource differences are
-kept as `divergent-explained` rather than being force-passed. Semantic fields —
+same ledger protocol as Testnet (protocol 29; Mainnet runs 29 too). Any
+build-level resource differences that reappear are kept as `divergent-explained` rather than being force-passed. Semantic fields —
 result, footprint (RO+RW), auth, contract events, and read/write bytes — remain
 byte-equal to the recorded RPC outputs.
 
@@ -342,20 +334,18 @@ replay-safety guard `check_ledger_protocol_supported` (invoked from
 `Host::set_ledger_info` during recording *setup*, `host.rs:572`) rejects any
 ledger protocol != 29 with a bare `Error(Context, InternalError)` — thrown
 before diagnostics are enabled, which is why a protocol mismatch carries no debug
-info and no `fn_call` event. Driving the protocol-28 `local-add-i32` fixture as
-captured therefore yields `Complete`-with-inline-error. The invocations are
-protocol-invariant, so the harness pins the local ledger context to the host's
-supported protocol (`HOST_PROTOCOL_VERSION = 29`); result, footprint, auth, and event parity are
-unaffected — only the raw metering shifts, which is exactly the residual above.
+info and no `fn_call` event. Driving a fixture captured at another protocol
+therefore yields `Complete`-with-inline-error. The harness pins the local ledger
+context to the host's supported protocol (`HOST_PROTOCOL_VERSION = 29`), which
+every committed fixture was captured at.
 
 **Scope — do not overclaim.** This demonstrates RPC parity across three cases: a
 read-only SAC call, a write+auth+event SAC call, and a **custom-wasm** contract
-(`add-i32`) captured at protocol 28. Invocation result, footprint
+(`add-i32`), all captured at protocol 29. Invocation result, footprint
 (RO and RW), auth entries, contract events, and read/write bytes all match a live
 RPC byte-for-byte, and the resource/fee adjustment model is proven identical
-(RpcDefault instructions = raw + 50000 on all three). Raw instruction/fee numbers
-carry the explicitly reported build/protocol residuals documented above. It
-does **not** yet establish general RPC authority across *arbitrary*
+(RpcDefault instructions = raw + 50000 on all three), with raw instruction and
+resource-fee numbers matching too. It does **not** yet establish general RPC authority across *arbitrary*
 custom-wasm contracts or state-archival/restore paths — those extend the fixture
 set via `pnpm run capture:parity` and remain future work.
 

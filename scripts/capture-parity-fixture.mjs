@@ -107,7 +107,7 @@ const CASES = {
   // capture time via LOCAL_CONTRACT_ID (see docs/local-rpc-parity.md). Intended
   // to run against a local quickstart RPC at soroban-sim's pinned host protocol
   // so the captured raw instruction/fee metering matches the host. The
-  // committed fixture was captured at protocol 28.
+  // committed fixture was captured at protocol 29.
   "local-add-i32": {
     file: "local-add-i32.json",
     // Contract id is a deployed instance, independent of the network passphrase.
@@ -138,7 +138,7 @@ const FRIENDBOT_URL = process.env.FRIENDBOT_URL ?? "https://friendbot.stellar.or
 // SDK's rpc.Server throws on http:// URLs unless `allowHttp: true` is passed.
 const ALLOW_HTTP = process.env.SOROBAN_ALLOW_HTTP === "1";
 // Human-readable label persisted into the fixture's `network` field. For a local
-// protocol-28 quickstart node set SOROBAN_NETWORK=local-p28 so the fixture is
+// protocol-29 quickstart node set SOROBAN_NETWORK=local-p29 so the fixture is
 // unambiguously tagged as captured off the local RPC (vs public testnet).
 const NETWORK = process.env.SOROBAN_NETWORK ?? "testnet";
 // The network passphrase governs signing + networkId + native-SAC contractId

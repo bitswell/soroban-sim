@@ -127,11 +127,10 @@ Measured on macOS arm64, Rust 1.97.1, Wasmtime 48.0.0, Chromium 151.
   (`SimulationAdjustmentConfig::no_adjustments()`). Setting
   `apply-rpc-adjustments` (`AdjustmentSource::RpcDefault`) reproduces
   stellar-rpc's adjustment model exactly; the parity harness confirms adjusted
-  instructions = raw + 50000 on every fixture. The native-SAC fixtures are
-  captured from Testnet at protocol 29, the live-workbench host's protocol, and
-  match RPC's instructions and resource fee exactly. The custom-wasm
-  `local-add-i32` fixture is a historical protocol-28 capture replayed at
-  protocol 29, so its raw metered numbers carry a small residual.
+  instructions = raw + 50000 on every fixture. All fixtures are captured at
+  protocol 29, the live-workbench host's protocol (native-SAC from Testnet,
+  custom-wasm `local-add-i32` from a local quickstart node), and match RPC's
+  instructions and resource fee exactly.
 - No authorization-enforcement API (recording-mode auth is captured but not
   enforced against a supplied auth tree) yet.
 

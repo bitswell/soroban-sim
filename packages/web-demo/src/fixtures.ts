@@ -50,7 +50,7 @@ export const FIXTURES: FixtureMeta[] = [
     id: "add_i32",
     label: "add_i32 — add(7, 35)",
     call: "add(7, 35) → i32",
-    note: "Custom Wasm, captured from a local protocol-28 node.",
+    note: "Custom Wasm, captured from a local protocol-29 node.",
     expect: "I32 · 42",
     liveCapable: false,
     raw: addI32 as unknown as RawFixture,
