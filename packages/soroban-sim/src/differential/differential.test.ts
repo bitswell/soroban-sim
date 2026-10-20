@@ -1,12 +1,13 @@
 /**
  * M3 RPC-equivalence differential test.
  *
- * Drives soroban-sim over committed parity fixtures captured from a live Stellar
- * testnet RPC `simulateTransaction`, then compares the two outputs field-by-field
- * (see `./compare.ts`). Two fixtures are exercised:
+ * Drives soroban-sim over committed parity fixtures captured from a Stellar RPC
+ * `simulateTransaction`, then compares the two outputs field-by-field
+ * (see `./compare.ts`). Three fixtures are exercised:
  *   - `native-sac-decimals`  — read-only SAC `decimals()` (result + footprint RO)
  *   - `native-sac-transfer`  — SAC `transfer()` exercising the WRITE + AUTH +
  *     contract-event surface (footprint RW, auth entry, transfer event)
+ *   - `local-add-i32`        — custom-wasm `add()` from a local quickstart node
  *
  * Each fixture is simulated with `applyRpcAdjustments = true`
  * (`AdjustmentSource::RpcDefault`) so the decoded `SorobanTransactionData`

@@ -54,15 +54,16 @@ Pinned upstream:
   are in place.
 - **M3 (differential testing) — in progress.** Oracles A, B, and C are green (see
   `docs/differential-testing.md`). The RPC-equivalence differential harness has
-  landed and demonstrates parity against a live Stellar testnet
-  `simulateTransaction` over two fixtures: the native SAC `decimals()`
-  (read-only) and a native SAC `transfer()` (write + auth + contract event). On
-  both, the invocation result, footprint (read-only **and** read-write), auth
-  entries, and contract events are byte-identical to RPC. An `AdjustmentSource`
-  knob (`apply-rpc-adjustments`) reproduces stellar-rpc's resource/fee adjustment
-  model exactly (RpcDefault instructions = raw metered + 50000 on both); the only
-  residual is a small raw-CPU-metering delta between the exact env-host build
-  compiled here and the RPC core build, classified `divergent-explained`.
+  landed and demonstrates parity against recorded protocol-29 RPC
+  `simulateTransaction` responses over three fixtures: the native SAC
+  `decimals()` (read-only) and a native SAC `transfer()` (write + auth + contract
+  event) from Testnet, plus a custom-wasm `add()` from a local quickstart node.
+  On all three, the invocation result, footprint (read-only **and** read-write),
+  auth entries, and contract events are byte-identical to RPC. An
+  `AdjustmentSource` knob (`apply-rpc-adjustments`) reproduces stellar-rpc's
+  resource/fee adjustment model exactly (RpcDefault instructions = raw metered +
+  50000 on all three), and instructions and resource fee match RPC exactly at
+  protocol 29; any future residual is classified `divergent-explained`.
   Re-capture with `pnpm run capture:parity <case>`.
 
 ## Requirements
