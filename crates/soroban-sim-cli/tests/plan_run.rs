@@ -168,3 +168,52 @@ fn the_rpc_client_refuses_to_submit() {
     assert!(err.to_string().contains("refusing RPC method sendTransaction"), "{err}");
     assert_eq!(rpc.calls(), 0, "nothing was sent");
 }
+
+#[test]
+fn a_step_auth_signer_for_the_source_signs_its_envelope() {
+    let dir = scratch("precedence");
+    let plan = dir.join("plan.yaml");
+    std::fs::write(
+        &plan,
+        r#"
+keys: { alice: ed25519, mallory: ed25519 }
+signers:
+  "${alice}": { classic: [mallory] }
+setup:
+  - substitute_master_key: { account: "${alice}", key: alice }
+steps:
+  - name: the step's auth wins over the plan signer
+    deploy_sac: native
+    source: "${alice}"
+    auth:
+      "${alice}": { classic: [alice] }
+"#,
+    )
+    .unwrap();
+    let mut cfg = config(snapshot(&dir));
+    cfg.plan_path = plan;
+    let report = Runner::new(cfg).unwrap().run(None).unwrap();
+    assert!(report.passed, "{}: {:#?}", report.steps[0].detail, report.failures);
+}
+
+#[test]
+fn the_report_prefix_keeps_its_name_and_never_overwrites_the_plan() {
+    let dir = scratch("prefix");
+    snapshot(&dir);
+    let plan = r#"{ "steps": [{ "advance": { "ledgers": 1 } }] }"#;
+    std::fs::write(dir.join("plan.json"), plan).unwrap();
+    let run = |extra: &[&str]| {
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_soroban-sim"))
+            .current_dir(&dir)
+            .args(["session", "run", "plan.json", "--snapshot", "base.snapshot.json", "--quiet"])
+            .args(extra)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    run(&[]);
+    assert_eq!(std::fs::read_to_string(dir.join("plan.json")).unwrap(), plan);
+    assert!(dir.join("plan.report.json").is_file() && dir.join("plan.report.md").is_file());
+    run(&["--report", "run.v1"]);
+    assert!(dir.join("run.v1.json").is_file() && dir.join("run.v1.md").is_file());
+}

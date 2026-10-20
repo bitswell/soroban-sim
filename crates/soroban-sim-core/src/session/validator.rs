@@ -14,8 +14,9 @@ use soroban_env_host::xdr::{
     AccountEntry, AccountEntryExt, AccountEntryExtensionV1Ext, AccountEntryExtensionV2Ext,
     AccountId, ConfigSettingEntry, ConfigSettingId, DecoratedSignature, Hash,
     InvokeHostFunctionOp, LedgerEntryData, LedgerKey, LedgerKeyConfigSetting, Limits,
-    MuxedAccount, OperationBody, Preconditions, PublicKey, Signer, SignerKey,
-    SignerKeyEd25519SignedPayload, SorobanTransactionData, SorobanTransactionDataExt, Transaction,
+    MuxedAccount, OperationBody, Preconditions, PublicKey, ScAddress, ScMap, ScVal, Signer, SignerKey,
+    SignerKeyEd25519SignedPayload, SorobanAuthorizationEntry, SorobanCredentials, SorobanDelegateSignature,
+    SorobanTransactionData, SorobanTransactionDataExt, Transaction,
     TransactionEnvelope, TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
     TransactionV1Envelope, Uint256, WriteXdr,
 };
@@ -25,6 +26,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use super::ledger::ForkedLedger;
+use super::signers::auth_payload;
 
 /// Why an envelope was refused before it could apply. Rejected envelopes are
 /// never included in a ledger: they pay no fee and consume no sequence number.
@@ -179,6 +181,8 @@ pub struct MatchedSigner {
 pub struct ValidTx {
     pub hash: [u8; 32],
     pub source: AccountId,
+    /// The transaction's sequence number: the source's sequence after apply.
+    pub seq_num: i64,
     pub op_source: AccountId,
     pub op: InvokeHostFunctionOp,
     pub data: SorobanTransactionData,
@@ -354,10 +358,14 @@ impl TxValidator<'_> {
             );
         }
 
-        let replayable = self.replayable(&checker.matched)?;
+        let mut replayable = self.replayable(&checker.matched)?;
+        for entry in ihf.auth.iter() {
+            replayable.extend(self.auth_replayable(entry)?);
+        }
         Ok(Ok(ValidTx {
             hash,
             source,
+            seq_num: tx.seq_num.0,
             op_source,
             op: ihf.clone(),
             data: data.clone(),
@@ -411,6 +419,58 @@ impl TxValidator<'_> {
         }
         Ok(out)
     }
+
+    /// Auth-entry signatures by G accounts (and their CAP-71 delegates) that
+    /// verify with a key the BASE ledger already lists as a signer of that
+    /// account: such an entry is valid on the real network too.
+    fn auth_replayable(&self, entry: &SorobanAuthorizationEntry) -> Result<Vec<String>> {
+        let (creds, delegates, bound) = match &entry.credentials {
+            SorobanCredentials::SourceAccount => return Ok(vec![]),
+            SorobanCredentials::Address(c) => (c, &[][..], false),
+            SorobanCredentials::AddressV2(c) => (c, &[][..], true),
+            SorobanCredentials::AddressWithDelegates(d) => (&d.address_credentials, d.delegates.as_slice(), true),
+        };
+        let payload = auth_payload(self.info.network_id, creds, entry, bound.then_some(&creds.address))?;
+        let mut signed = vec![(&creds.address, &creds.signature)];
+        let mut stack: Vec<&SorobanDelegateSignature> = delegates.iter().collect();
+        while let Some(d) = stack.pop() {
+            signed.push((&d.address, &d.signature));
+            stack.extend(d.nested_delegates.iter());
+        }
+        let mut out = vec![];
+        for (address, signature) in signed {
+            let ScAddress::Account(id) = address else { continue };
+            let Some(base) = self.ledger.base_account(id)? else { continue };
+            let base_signers = account_signers(&base);
+            for (pk, sig) in classic_auth_signatures(signature) {
+                let key = SignerKey::Ed25519(Uint256(pk));
+                if ed25519_ok(&pk, &payload, &sig) && base_signers.iter().any(|s| s.key == key) {
+                    out.push(format!("{key} signed an auth entry for {id}, and it is a signer of that account on the base network"));
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The `(public_key, signature)` pairs of a G account's auth signature,
+/// `Vec<AccountEd25519Signature>`; anything else yields none.
+fn classic_auth_signatures(signature: &ScVal) -> Vec<([u8; 32], Vec<u8>)> {
+    let ScVal::Vec(Some(items)) = signature else { return vec![] };
+    let field = |m: &ScMap, name: &str| {
+        m.iter().find_map(|e| match (&e.key, &e.val) {
+            (ScVal::Symbol(k), ScVal::Bytes(b)) if k.as_slice() == name.as_bytes() => Some(b.to_vec()),
+            _ => None,
+        })
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let ScVal::Map(Some(m)) = item else { return None };
+            let pk: [u8; 32] = field(m, "public_key")?.try_into().ok()?;
+            Some((pk, field(m, "signature")?))
+        })
+        .collect()
 }
 
 fn threshold_miss(account: &AccountId, level: &str, threshold: u32) -> String {

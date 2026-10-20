@@ -468,6 +468,7 @@ impl ForkedLedger {
 
     /// Remove any entry by hand.
     pub fn remove_entry(&self, key: &LedgerKey, label: &str, at_ledger: u32) -> Result<()> {
+        self.get(key)?;
         self.put(key.clone(), None);
         self.log_override(OverrideKind::Entry, key.clone(), label, "entry removed".into(), at_ledger);
         Ok(())

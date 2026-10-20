@@ -276,6 +276,56 @@ fn signing_with_a_base_signer_is_flagged_replayable() {
 }
 
 #[test]
+fn auth_entry_signed_by_a_base_signer_is_flagged_replayable() {
+    let mut s = session();
+    let carol = Ed25519Key::throwaway("carol");
+    s.fund(&carol.account_id(), 100 * XLM, "carol").unwrap();
+    apply(&mut s, "deploy native SAC", &carol.account_id(), std::slice::from_ref(&carol), native_sac());
+    // carol (a session account) signs the envelope; bob's real, unsubstituted
+    // keys sign the auth entry, which is valid on the base network too.
+    let transfer = invoke(&sac_id(), "transfer", vec![ScVal::Address(ScAddress::Account(bob())), ScVal::Address(ScAddress::Account(carol.account_id())), i128(XLM)]);
+    let auth = BTreeMap::from([(ScAddress::Account(bob()), AuthSigner::classic(vec![real_key("bob"), real_key("bob-cosigner")]))]);
+    let p = prepare(&s, &carol.account_id(), std::slice::from_ref(&carol), transfer, &auth);
+    let r = s.submit("real auth keys", &p.envelope).unwrap();
+    assert!(r.status.is_applied(), "{}", r.status.summary());
+    assert_eq!(r.replayable.len(), 2, "{:?}", r.replayable);
+    assert!(r.replayable.iter().all(|x| x.contains("auth entry")), "{:?}", r.replayable);
+}
+
+#[test]
+fn min_seq_num_leaves_the_account_at_the_transaction_sequence() {
+    let mut s = session();
+    let key = rehearse_alice(&s);
+    let add = add_contract(&mut s, &key);
+    let p = prepare(&s, &alice(), std::slice::from_ref(&key), invoke(&add, "add", vec![ScVal::I32(1), ScVal::I32(1)]), &no_auth());
+    let at = seq(&s, &alice());
+    let jump = resign(&p.envelope, std::slice::from_ref(&key), |tx| {
+        tx.seq_num.0 = at + 5;
+        tx.cond = Preconditions::V2(PreconditionsV2 {
+            time_bounds: None,
+            ledger_bounds: None,
+            min_seq_num: Some(soroban_env_host::xdr::SequenceNumber(at)),
+            min_seq_age: Duration(0),
+            min_seq_ledger_gap: 0,
+            extra_signers: Default::default(),
+        })
+    });
+    assert!(s.submit("jump", &jump).unwrap().status.is_applied());
+    assert_eq!(seq(&s, &alice()), at + 5);
+}
+
+#[test]
+fn removing_an_unfetched_base_entry_is_in_the_diff() {
+    let s = session();
+    let key = account_key(&bob());
+    s.ledger().remove_entry(&key, "drop bob", s.ledger_info().sequence_number).unwrap();
+    let diff = s.ledger().diff();
+    let d = diff.iter().find(|d| d.key == key).expect("bob's removal is in the diff");
+    assert_eq!(d.change(), Change::Deleted);
+    assert!(s.ledger().changed_keys().contains(&key));
+}
+
+#[test]
 fn balance_must_cover_the_fee_bid_above_the_reserve() {
     let mut s = session();
     let poor = Ed25519Key::throwaway("poor");

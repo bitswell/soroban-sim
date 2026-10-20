@@ -599,7 +599,7 @@ impl Runner {
             return names.iter().map(|n| self.ed25519(n)).collect();
         }
         let source_addr = ScAddress::Account(source.clone());
-        for (addr, spec) in self.plan.signers.clone().iter().chain(step.auth.iter()) {
+        for (addr, spec) in step.auth.iter().chain(self.plan.signers.clone().iter()) {
             if let SignerSpec::Classic(c) = spec {
                 if self.address(addr)? == source_addr {
                     let names = match c {
@@ -825,7 +825,7 @@ impl Runner {
         let replayable: Vec<String> = log.iter().flat_map(|t| t.replayable.iter().map(move |r| format!("{}: {r}", t.label))).collect();
         let mut failures = self.failures.clone();
         if !replayable.is_empty() && self.passphrase == MAINNET_PASSPHRASE {
-            failures.push(format!("{} envelope signature(s) are valid on mainnet (see Safety)", replayable.len()));
+            failures.push(format!("{} signature(s) are valid on mainnet (see Safety)", replayable.len()));
         }
         let info = s.ledger_info();
         Report {

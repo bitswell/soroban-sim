@@ -210,8 +210,10 @@ every comparable upload matches exactly and `root.deploy` matches except for a
 
 The session never submits. Rehearsal envelopes keep the real network id, so an
 envelope signed by a real key would be valid on the real network. The
-validator flags every envelope signature that verifies against a signer the
+validator flags every envelope signature, and every G-account auth-entry
+signature (including CAP-71 delegates), that verifies against a signer the
 base ledger already has; on mainnet such a signature fails the run.
+Smart-account `External` and passkey signatures are not checked yet.
 
 ## Fidelity and limits
 

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use soroban_sim_cli::plan::Plan;
 use soroban_sim_cli::run::{base_from_name, Base, RunConfig, Runner};
@@ -113,11 +113,8 @@ fn run() -> Result<bool> {
                 progress: !args.quiet,
             })?;
             let report = runner.run(args.save_snapshot.as_deref())?;
-            let json = prefix.with_extension("json");
-            let md = prefix.with_extension("md");
-            if json == md {
-                bail!("bad report prefix {}", prefix.display());
-            }
+            let json = PathBuf::from(format!("{}.json", prefix.display()));
+            let md = PathBuf::from(format!("{}.md", prefix.display()));
             std::fs::write(&json, report.to_json()?).with_context(|| format!("writing {}", json.display()))?;
             std::fs::write(&md, report.to_markdown()).with_context(|| format!("writing {}", md.display()))?;
             eprintln!(

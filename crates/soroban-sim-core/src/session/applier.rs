@@ -101,8 +101,7 @@ impl Applier {
         let mut account = ledger.account(&tx.source)?.ok_or_else(|| anyhow!("source account vanished"))?;
         let fee = tx.fees.charged_up_front();
         account.balance -= fee;
-        let next = account.seq_num.0 + 1;
-        bump_sequence(&mut account, next, seq, info.timestamp);
+        bump_sequence(&mut account, tx.seq_num, seq, info.timestamp);
         ledger.put_account(account, seq)?;
 
         let r = &tx.data.resources;
