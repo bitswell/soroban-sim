@@ -4,9 +4,9 @@
 
 The live Testnet workbench pins:
 
-- `rs-soroban-env` tag `v28.0.0`
-- `soroban-env-host = 28.0.0`
-- `soroban-simulation = 28.0.0`
+- `rs-soroban-env` tag `v29.0.2`
+- `soroban-env-host = 29.0.2`
+- `soroban-simulation = 29.0.2`
 - `stellar-xdr = 28.0.0` through upstream crates
 - `soroban-wasmi = 0.31.1-soroban.20.0.1`
 

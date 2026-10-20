@@ -12,12 +12,13 @@
 //! persistent entry or code whose live-until ledger has passed, which RPC
 //! returns with `liveUntilLedgerSeq = 0`) stays distinct from an absent one.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use soroban_env_host::storage::{EntryWithLiveUntil, SnapshotSource};
 use soroban_env_host::xdr::{
-    AccountEntry, AccountEntryExt, AccountId, ContractDataDurability, LedgerEntry,
+    AccountEntry, AccountEntryExt, AccountEntryExtensionV1, AccountEntryExtensionV1Ext, AccountId,
+    ContractDataDurability, LedgerEntry,
     LedgerEntryData, LedgerEntryExt, LedgerKey, LedgerKeyAccount, LedgerKeyContractData,
-    PublicKey, ScErrorCode, ScErrorType, ScVal, SequenceNumber, Signer, SignerKey, String32,
+    PublicKey, ScErrorCode, ScErrorType, ScVal, SequenceNumber, Signer, SignerKey, SponsorshipDescriptor, String32,
     Thresholds, Uint256, VecM,
 };
 use soroban_env_host::HostError;
@@ -391,14 +392,15 @@ impl ForkedLedger {
         if weight == 0 {
             bail!("{label}: the master key of {id} already has weight 0; substitute one of its signers instead");
         }
-        let mut signers: Vec<Signer> = a.signers.to_vec();
-        if signers.iter().any(|s| s.key == SignerKey::Ed25519(Uint256(throwaway))) {
-            bail!("{label}: the throwaway key is already a signer of {id}");
-        }
-        signers.push(Signer { key: SignerKey::Ed25519(Uint256(throwaway)), weight: weight as u32 });
-        signers.sort_by(|x, y| x.key.cmp(&y.key));
+        edit_signers(&mut a, |signers| {
+            if signers.iter().any(|(s, _)| s.key == SignerKey::Ed25519(Uint256(throwaway))) {
+                bail!("{label}: the throwaway key is already a signer of {id}");
+            }
+            signers.push((Signer { key: SignerKey::Ed25519(Uint256(throwaway)), weight: weight as u32 }, SponsorshipDescriptor(None)));
+            Ok(())
+        })
+        .with_context(|| format!("{label}: adding the throwaway signer to {id}"))?;
         a.thresholds.0[0] = 0;
-        a.signers = signers.try_into().map_err(|_| anyhow!("{label}: {id} would exceed 20 signers"))?;
         let detail = format!(
             "master key weight {weight} -> 0; throwaway signer {} added with weight {weight}; thresholds low/med/high kept at {}/{}/{}",
             strkey_ed25519(&throwaway),
@@ -415,15 +417,16 @@ impl ForkedLedger {
     /// is replaced by a throwaway key of the same weight.
     pub fn substitute_signer(&self, id: &AccountId, real: [u8; 32], throwaway: [u8; 32], label: &str, at_ledger: u32) -> Result<()> {
         let mut a = self.account(id)?.ok_or_else(|| anyhow!("{label}: account {id} is not on the forked ledger"))?;
-        let mut signers: Vec<Signer> = a.signers.to_vec();
-        let pos = signers
-            .iter()
-            .position(|s| s.key == SignerKey::Ed25519(Uint256(real)))
-            .ok_or_else(|| anyhow!("{label}: {} is not a signer of {id}", strkey_ed25519(&real)))?;
-        let weight = signers[pos].weight;
-        signers[pos].key = SignerKey::Ed25519(Uint256(throwaway));
-        signers.sort_by(|x, y| x.key.cmp(&y.key));
-        a.signers = signers.try_into()?;
+        let mut weight = 0;
+        edit_signers(&mut a, |signers| {
+            let (s, _) = signers
+                .iter_mut()
+                .find(|(s, _)| s.key == SignerKey::Ed25519(Uint256(real)))
+                .ok_or_else(|| anyhow!("{label}: {} is not a signer of {id}", strkey_ed25519(&real)))?;
+            weight = s.weight;
+            s.key = SignerKey::Ed25519(Uint256(throwaway));
+            Ok(())
+        })?;
         let detail = format!(
             "signer {} (weight {weight}) replaced by throwaway {} (weight {weight})",
             strkey_ed25519(&real),
@@ -489,6 +492,12 @@ impl ForkedLedger {
             .collect()
     }
 
+    /// Every base entry fetched so far: enough to replay the session offline
+    /// from a snapshot (keys never fetched read as absent there).
+    pub fn base_entries(&self) -> Vec<StoredEntry> {
+        self.base_cache.borrow().values().flatten().cloned().collect()
+    }
+
     pub fn stats(&self) -> LedgerStats {
         LedgerStats {
             fetch_calls: self.fetch_calls.get(),
@@ -540,6 +549,26 @@ impl SnapshotSource for ForkView {
             }
         }
     }
+}
+
+/// Edit an account's signers, keeping them sorted by key and keeping the v2
+/// extension's `signerSponsoringIDs` aligned with them (core requires one
+/// descriptor per signer, in signer order).
+fn edit_signers(a: &mut AccountEntry, edit: impl FnOnce(&mut Vec<(Signer, SponsorshipDescriptor)>) -> Result<()>) -> Result<()> {
+    let sponsors = match &a.ext {
+        AccountEntryExt::V1(AccountEntryExtensionV1 { ext: AccountEntryExtensionV1Ext::V2(v2), .. }) => Some(v2.signer_sponsoring_i_ds.to_vec()),
+        _ => None,
+    };
+    let none = std::iter::repeat(SponsorshipDescriptor(None));
+    let mut pairs: Vec<(Signer, SponsorshipDescriptor)> =
+        a.signers.iter().cloned().zip(sponsors.clone().unwrap_or_default().into_iter().chain(none)).collect();
+    edit(&mut pairs)?;
+    pairs.sort_by(|x, y| x.0.key.cmp(&y.0.key));
+    a.signers = pairs.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>().try_into().map_err(|_| anyhow!("more than 20 signers"))?;
+    if let AccountEntryExt::V1(AccountEntryExtensionV1 { ext: AccountEntryExtensionV1Ext::V2(v2), .. }) = &mut a.ext {
+        v2.signer_sponsoring_i_ds = pairs.into_iter().map(|(_, d)| d).collect::<Vec<_>>().try_into()?;
+    }
+    Ok(())
 }
 
 pub fn account_key(id: &AccountId) -> LedgerKey {

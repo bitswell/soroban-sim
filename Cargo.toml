@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/soroban-sim-core",
     "crates/soroban-sim-component",
+    "crates/soroban-sim-cli",
 ]
 
 [workspace.package]

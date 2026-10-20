@@ -37,8 +37,8 @@ Implemented spike:
 
 Pinned upstream:
 
-- `soroban-simulation = 28.0.0`
-- `soroban-env-host = 28.0.0` (matches the current Testnet protocol)
+- `soroban-simulation = 29.0.2`
+- `soroban-env-host = 29.0.2` (matches the current Testnet and Mainnet protocol)
 - `stellar-xdr = 28.0.0` through upstream crates
 - `soroban-wasmi = 0.31.1-soroban.20.0.1` through `soroban-env-host`
 - fixture contract uses `soroban-sdk = 27.0.5`
@@ -130,18 +130,36 @@ Measured on macOS arm64, Rust 1.97.1, Wasmtime 48.0.0, Chromium 151.
   instructions = raw + 50000 on both fixtures. A small residual remains in the
   *raw* metered numbers because RPC core and this browser component can use
   different env-host patch builds. The custom local fixture and live-workbench
-  host both use protocol 28.
-- No authorization-enforcement API (recording-mode auth is captured but not
-  enforced against a supplied auth tree) yet.
+  host both use protocol 29.
+- The single-call simulation API records auth rather than enforcing it against
+  a supplied auth tree. The network-session engine (below) enforces and
+  verifies every envelope and auth signature.
 
 Now implemented (previously listed as gaps): full network-config encoding
 (explicit + `FromLedgerEntries`), missing-state / present-absent-unknown state
 with `needs-state` reruns, the RPC state provider, IndexedDB caching,
 transaction-envelope decoding, and cancellation / budget limits.
 
+## Network sessions
+
+`soroban-sim-core::session` rehearses many signed transactions in order over a
+fork of a real network, and the `soroban-sim` CLI (`crates/soroban-sim-cli`)
+runs a plan file through it and writes a JSON and a Markdown report. Nothing is
+ever submitted; throwaway keys stand in for every real signer.
+
+```sh
+cargo run -p soroban-sim-cli -- session run examples/session/perch-nido-bootstrap.yaml \
+  --wasm-dir path/to/release-wasm --differential
+```
+
+See `docs/session.md` for the design, the plan format, the signer adapters
+(classic, OZ `oz_rule_ids`/`addr_oz_v1`, CAP-71 delegates, secp256r1, WebAuthn)
+and what the rehearsal does and does not model.
+
 ## Docs
 
 - `docs/architecture.md` — design and state-loading plan.
+- `docs/session.md` — network sessions: engine, plan format, CLI, report.
 - `docs/feasibility.md` — Milestone 0 proof and blocker inventory.
 - `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.
 - `docs/upstream.md` — upstream pins and contribution notes.

@@ -406,3 +406,40 @@ fn network_limits_load_from_the_ledger() {
     assert!(l.tx_max_write_bytes > 0 && l.tx_max_footprint_entries > 0);
     assert!(s.ledger_info().min_persistent_entry_ttl > 0);
 }
+
+#[test]
+fn substitution_keeps_sponsorship_descriptors_aligned_with_signers() {
+    use soroban_env_host::xdr::{
+        AccountEntryExt, AccountEntryExtensionV1, AccountEntryExtensionV1Ext, AccountEntryExtensionV2,
+        AccountEntryExtensionV2Ext, Liabilities, Signer, SignerKey, SponsorshipDescriptor, Uint256,
+    };
+    let dave_real = real_key("dave");
+    let cosigner = real_key("dave-cosigner");
+    let sponsor = real_key("sponsor").account_id();
+    let mut dave = new_account(dave_real.account_id(), 100 * XLM, FORK_LEDGER - 1);
+    dave.num_sub_entries = 1;
+    dave.signers = vec![Signer { key: SignerKey::Ed25519(Uint256(cosigner.public_key())), weight: 1 }].try_into().unwrap();
+    dave.ext = AccountEntryExt::V1(AccountEntryExtensionV1 {
+        liabilities: Liabilities { buying: 0, selling: 0 },
+        ext: AccountEntryExtensionV1Ext::V2(AccountEntryExtensionV2 {
+            num_sponsored: 1,
+            num_sponsoring: 0,
+            signer_sponsoring_i_ds: vec![SponsorshipDescriptor(Some(sponsor.clone()))].try_into().unwrap(),
+            ext: AccountEntryExtensionV2Ext::V0,
+        }),
+    });
+    let s = session_with(vec![account_entry(dave, FORK_LEDGER - 1)]);
+    let t1 = Ed25519Key::throwaway("dave");
+    let t2 = Ed25519Key::throwaway("dave-cosigner");
+    s.substitute_master_key(&dave_real.account_id(), &t1, "dave").unwrap();
+    s.substitute_signer(&dave_real.account_id(), cosigner.public_key(), &t2, "dave cosigner").unwrap();
+    let a = s.ledger().account(&dave_real.account_id()).unwrap().unwrap();
+    let AccountEntryExt::V1(AccountEntryExtensionV1 { ext: AccountEntryExtensionV1Ext::V2(v2), .. }) = &a.ext else { panic!("v2 extension kept") };
+    assert_eq!(a.signers.len(), 2);
+    assert_eq!(v2.signer_sponsoring_i_ds.len(), 2);
+    for (signer, sponsorship) in a.signers.iter().zip(v2.signer_sponsoring_i_ds.iter()) {
+        let sponsored = signer.key == SignerKey::Ed25519(Uint256(t2.public_key()));
+        assert_eq!(sponsorship.0.is_some(), sponsored, "the cosigner's sponsor follows it to its new key");
+    }
+    assert!(a.signers.windows(2).all(|w| w[0].key < w[1].key), "signers stay sorted");
+}

@@ -180,6 +180,29 @@ pub struct Prepared {
     pub transaction_data: SorobanTransactionData,
     /// The signed authorization entries in the envelope.
     pub auth: Vec<SorobanAuthorizationEntry>,
+    /// The recording pass, before signing: the same inputs RPC
+    /// `simulateTransaction` sees, for differential checks.
+    pub recorded: Recorded,
+}
+
+/// What recording-mode simulation produced.
+#[derive(Clone, Debug)]
+pub struct Recorded {
+    pub value: ScVal,
+    pub transaction_data: SorobanTransactionData,
+    pub auth: Vec<SorobanAuthorizationEntry>,
+}
+
+/// Finds the signer for an address that must authorize a call. `prepare`
+/// asks only for the addresses the recorded authorization names.
+pub trait AuthSignerSource {
+    fn signer_for(&self, session: &Session, address: &ScAddress) -> Result<Option<AuthSigner>>;
+}
+
+impl AuthSignerSource for BTreeMap<ScAddress, AuthSigner> {
+    fn signer_for(&self, _: &Session, address: &ScAddress) -> Result<Option<AuthSigner>> {
+        Ok(self.get(address).cloned())
+    }
 }
 
 /// What `prepare` needs besides the host function.
@@ -187,7 +210,7 @@ pub struct PrepareRequest<'a> {
     pub source: AccountId,
     pub host_function: HostFunction,
     /// Signers for every non-source-account address that must authorize.
-    pub auth_signers: &'a BTreeMap<ScAddress, AuthSigner>,
+    pub auth_signers: &'a dyn AuthSignerSource,
     /// Keys that sign the envelope.
     pub envelope_signers: &'a [Ed25519Key],
     /// Overrides [`SessionOptions::auth_expiration_ledgers`].
@@ -386,9 +409,11 @@ impl Session {
     pub fn prepare(&self, request: &PrepareRequest<'_>) -> Result<Prepared> {
         // Non-root auth disabled, plain `Address` credentials: what RPC records.
         let recorded = self.simulate(&request.source, &request.host_function, RecordingInvocationAuthMode::recording(true, false))?;
-        if let Err(e) = &recorded.invoke_result {
-            bail!("simulation failed: {:?}{}", e.error, diagnostics_tail(&recorded.diagnostic_events));
-        }
+        let recorded_value = match &recorded.invoke_result {
+            Ok(v) => v.clone(),
+            Err(e) => bail!("simulation failed: {:?}{}", e.error, diagnostics_tail(&recorded.diagnostic_events)),
+        };
+        let recorded_data = recorded.transaction_data.clone().ok_or_else(|| anyhow!("simulation returned no transaction data"))?;
         let expiration = self.info.sequence_number + request.auth_expiration_ledgers.unwrap_or(self.options.auth_expiration_ledgers);
         let mut auth = recorded.auth.clone();
         for entry in &mut auth {
@@ -398,9 +423,9 @@ impl Session {
             };
             let signer = request
                 .auth_signers
-                .get(&address)
+                .signer_for(self, &address)?
                 .ok_or_else(|| anyhow!("{address} must authorize this call, but no signer is registered for it"))?;
-            sign_auth_entry(entry, signer, self.info.network_id, expiration).with_context(|| format!("signing for {address}"))?;
+            sign_auth_entry(entry, &signer, self.info.network_id, expiration).with_context(|| format!("signing for {address}"))?;
         }
         let enforced = self.simulate(&request.source, &request.host_function, RecordingInvocationAuthMode::Enforcing(auth.clone()))?;
         let value = enforced
@@ -434,6 +459,7 @@ impl Session {
             hash,
             value,
             transaction_data: data,
+            recorded: Recorded { value: recorded_value, transaction_data: recorded_data, auth: recorded.auth },
             auth,
         })
     }
@@ -597,8 +623,7 @@ pub fn diagnostics_tail(events: &[DiagnosticEvent]) -> String {
         .rev()
         .take(2)
         .map(|e| {
-            let s = format!("{:?}", e.event.body);
-            if s.len() > 240 { format!("{}…", &s[..240]) } else { s }
+            clip(&format!("{:?}", e.event.body), 240)
         })
         .collect();
     if last.is_empty() {
@@ -618,12 +643,19 @@ pub fn show_scval(v: &ScVal) -> String {
         ScVal::I32(n) => n.to_string(),
         ScVal::U64(n) => n.to_string(),
         ScVal::I64(n) => n.to_string(),
+        ScVal::I128(p) => (((p.hi as i128) << 64) | p.lo as i128).to_string(),
+        ScVal::U128(p) => (((p.hi as u128) << 64) | p.lo as u128).to_string(),
         ScVal::Bytes(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
         ScVal::String(s) => format!("{:?}", s.to_utf8_string_lossy()),
         ScVal::Symbol(s) => s.to_utf8_string_lossy(),
-        other => {
-            let s = format!("{other:?}");
-            if s.len() > 200 { format!("{}…", &s[..200]) } else { s }
-        }
+        other => clip(&format!("{other:?}"), 200),
+    }
+}
+
+/// `s` cut to at most `max_chars` characters, with an ellipsis if cut.
+pub fn clip(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((at, _)) => format!("{}…", &s[..at]),
+        None => s.to_string(),
     }
 }

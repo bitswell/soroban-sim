@@ -320,7 +320,7 @@ impl TxValidator<'_> {
         let mut checker = SignatureChecker::new(hash, signatures.as_slice());
         let low = account.thresholds.0[1] as u32;
         if !checker.check(&source, &account_signers(&account), low) {
-            return reject(TxCode::BadAuth, format!("signatures do not reach {source}'s low threshold {low}"));
+            return reject(TxCode::BadAuth, threshold_miss(&source, "low", low));
         }
         if let Some(p) = v2 {
             for extra in p.extra_signers.iter() {
@@ -340,7 +340,7 @@ impl TxValidator<'_> {
         };
         let med = op_account.thresholds.0[2] as u32;
         if !checker.check(&op_source, &account_signers(&op_account), med) {
-            return reject(TxCode::OpBadAuth, format!("signatures do not reach {op_source}'s medium threshold {med}"));
+            return reject(TxCode::OpBadAuth, threshold_miss(&op_source, "medium", med));
         }
         if let Some(unused) = checker.unused() {
             return reject(TxCode::BadAuthExtra, format!("signature {unused} matches no signer that was needed"));
@@ -410,6 +410,14 @@ impl TxValidator<'_> {
             }
         }
         Ok(out)
+    }
+}
+
+fn threshold_miss(account: &AccountId, level: &str, threshold: u32) -> String {
+    if threshold == 0 {
+        format!("no signature is from a signer of {account}")
+    } else {
+        format!("the signatures do not reach {account}'s {level} threshold {threshold}")
     }
 }
 
