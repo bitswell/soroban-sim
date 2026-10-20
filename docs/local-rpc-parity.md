@@ -1,13 +1,13 @@
 # Local protocol-28 RPC parity runbook
 
-> Historical capture runbook: the live workbench now pins protocol 28 to match
-> Testnet. Use this document only when regenerating the committed protocol-28
-> `local-add-i32` comparison fixture.
+> Historical capture runbook: the live workbench now pins protocol 29 to match
+> Testnet and Mainnet. This document records how the committed protocol-28
+> `local-add-i32` comparison fixture was captured.
 
 This procedure captured a fixture from a **local Stellar RPC pinned to protocol
-28** while the repository also pinned `soroban-env-host` 28.0.2. To repeat it
-today, use a protocol-28 local node and keep the workbench on Testnet's current
-protocol.
+28** while the repository also pinned `soroban-env-host` 28.0.2. To recapture it
+at the host's current protocol, run the same steps against a protocol-29 local
+node (`--protocol-version 29`, with a quickstart image that supports it).
 
 ## Why this closes the residual
 
@@ -162,11 +162,11 @@ round trips. On success it logs `protocol=28`.
 pnpm --filter @theahaco/soroban-sim test
 ```
 
-The `native-sac-*` fixtures classify their p27↔p28 metering delta as
-`divergent-explained`. The `local-add-i32` fixture is captured at protocol 28, so
-its cross-protocol component is gone; its remaining sub-0.03% residual is the
-env-host 28.0.0-vs-28.0.2 skew documented under "Actual result" above. It is
-already wired into the `FIXTURES` array in
+The `native-sac-*` fixtures are captured from Testnet at protocol 29 and match
+the protocol-29 host exactly. The `local-add-i32` fixture is a protocol-28
+capture replayed at protocol 29, so it carries a sub-0.03% cross-protocol
+residual, classified `divergent-explained`. It is already wired into the
+`FIXTURES` array in
 `packages/soroban-sim/src/differential/differential.test.ts` and passes.
 
 ## Stop the network

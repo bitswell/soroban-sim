@@ -37,10 +37,10 @@ Implemented spike:
 
 Pinned upstream:
 
-- `soroban-simulation = 28.0.0`
-- `soroban-env-host = 28.0.0` (matches the current Testnet protocol)
+- `soroban-simulation = 29.0.2`
+- `soroban-env-host = 29.0.2` (protocol 29, matching Testnet and Mainnet)
 - `stellar-xdr = 28.0.0` through upstream crates
-- `soroban-wasmi = 0.31.1-soroban.20.0.1` through `soroban-env-host`
+- `soroban-wasmi = 29.0.0` through `soroban-env-host`
 - fixture contract uses `soroban-sdk = 27.0.5`
 
 ## Milestone status
@@ -102,7 +102,7 @@ Golden fixture:
 
 ```text
 len=388
-sha256=3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca
+sha256=3026ccbc8085dc49520836c688a504a93eb93b8206213d6fa8ef6a1a280e514c
 ```
 
 ## Measured M0 numbers
@@ -127,10 +127,11 @@ Measured on macOS arm64, Rust 1.97.1, Wasmtime 48.0.0, Chromium 151.
   (`SimulationAdjustmentConfig::no_adjustments()`). Setting
   `apply-rpc-adjustments` (`AdjustmentSource::RpcDefault`) reproduces
   stellar-rpc's adjustment model exactly; the parity harness confirms adjusted
-  instructions = raw + 50000 on both fixtures. A small residual remains in the
-  *raw* metered numbers because RPC core and this browser component can use
-  different env-host patch builds. The custom local fixture and live-workbench
-  host both use protocol 28.
+  instructions = raw + 50000 on every fixture. The native-SAC fixtures are
+  captured from Testnet at protocol 29, the live-workbench host's protocol, and
+  match RPC's instructions and resource fee exactly. The custom-wasm
+  `local-add-i32` fixture is a historical protocol-28 capture replayed at
+  protocol 29, so its raw metered numbers carry a small residual.
 - No authorization-enforcement API (recording-mode auth is captured but not
   enforced against a supplied auth tree) yet.
 

@@ -1,8 +1,8 @@
 # Milestone 0 feasibility
 
 > Historical note: the original M0 investigation below used env-host 28.0.2.
-> The live workbench now pins env-host/simulation 28.0.0 to match Testnet; the
-> current 388-byte golden SHA is `1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f`.
+> The live workbench now pins env-host/simulation 29.0.2 to match Testnet and
+> Mainnet (protocol 29); the current 388-byte golden SHA is `3026ccbc8085dc49520836c688a504a93eb93b8206213d6fa8ef6a1a280e514c`.
 
 ## Sources reviewed
 
@@ -102,7 +102,7 @@ The clock/random/CLI imports come from Rust `std`, WASI Preview 2 support, `getr
 
 ## Build complications / blockers
 
-1. `soroban-simulation` compiles for `wasm32-wasip2` with the current `soroban-env-host 28.0.0` pin. No upstream source patch is needed.
+1. `soroban-simulation` compiles for `wasm32-wasip2` with the current `soroban-env-host 29.0.2` pin. No upstream source patch is needed.
 2. Rust `wasm32-wasip2` emits WASI imports from `std`; Jco supplies browser shims through `@bytecodealliance/preview2-shim`.
 3. `NetworkConfig` is not Stellar XDR. M0 uses deterministic fixture config. Production API needs a canonical encoding or config-setting snapshot loading.
 4. `SnapshotSource::get` cannot represent unknown directly: `None` means absent. M1 must record missing keys and abort recognizably.

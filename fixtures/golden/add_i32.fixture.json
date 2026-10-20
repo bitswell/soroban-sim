@@ -2,5 +2,5 @@
   "fixture": "add_i32_contract_invocation",
   "result": "ScVal::I32(42)",
   "encoded_output_len": 388,
-  "encoded_output_sha256": "1082a3e46e6b702d61c740fd9151067a65054d63bc63f9bda6535de1c045263f"
+  "encoded_output_sha256": "3026ccbc8085dc49520836c688a504a93eb93b8206213d6fa8ef6a1a280e514c"
 }

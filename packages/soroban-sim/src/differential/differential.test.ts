@@ -19,12 +19,12 @@
  *
  * ── Protocol / env-host version note (real findings, not papered over) ──────
  * The two `native-sac-*` fixtures were captured against Stellar testnet at ledger
- * protocol 27 and therefore remain cross-version resource comparisons.
+ * protocol 29, matching the protocol-29 browser host used for live preflight.
  *
- * `local-add-i32` was captured against a LOCAL protocol-28 quickstart node,
- * matching the protocol-28 browser host used for live preflight. In all cases RESULT /
- * FOOTPRINT / AUTH / EVENT / bytes are byte-equal; resource residuals are
- * reported explicitly rather than force-passed.
+ * `local-add-i32` was captured against a LOCAL protocol-28 quickstart node and
+ * is replayed at protocol 29, so it remains a cross-version resource comparison.
+ * In all cases RESULT / FOOTPRINT / AUTH / EVENT / bytes are byte-equal; resource
+ * residuals are reported explicitly rather than force-passed.
  */
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -76,7 +76,7 @@ import { decodeSsim } from "./decode-ssim.js";
 /**
  * Ledger protocol version the linked `soroban-env-host` will run.
  */
-const HOST_PROTOCOL_VERSION = 28;
+const HOST_PROTOCOL_VERSION = 29;
 
 interface ParityFixture {
   networkPassphrase: string;
@@ -123,8 +123,8 @@ function loadFixture(name: string): ParityFixture {
 const FIXTURES = [
   { name: "native-sac-decimals", expectRw: false, expectAuth: false },
   { name: "native-sac-transfer", expectRw: true, expectAuth: true },
-  // Captured against a LOCAL protocol-28 quickstart node (custom add-i32 wasm),
-  // matching the host's pinned protocol — the residual-closing case.
+  // Captured against a LOCAL protocol-28 quickstart node (custom add-i32 wasm);
+  // replayed at the host's protocol 29.
   { name: "local-add-i32", expectRw: false, expectAuth: false },
 ] as const;
 
