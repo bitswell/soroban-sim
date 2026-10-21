@@ -136,10 +136,6 @@ impl CheckpointSource {
         Ok(Pinned { source, header })
     }
 
-    pub fn pin(&self) -> u32 {
-        self.pin
-    }
-
     /// Feed the rollback every ledger through `ledger`.
     fn catch_up(&self, ledger: u32) -> Result<()> {
         let mut rollback = self.rollback.borrow_mut();

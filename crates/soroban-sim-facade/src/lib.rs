@@ -642,11 +642,15 @@ impl Facade {
             });
         }
         let mut keys = vec![];
+        let mut accounts = 0;
         if let Ok(valid) = &verdict {
-            let source = account_key(&valid.source);
+            keys.push(account_key(&valid.source));
+            if valid.fee_source != valid.source {
+                keys.push(account_key(&valid.fee_source));
+            }
+            accounts = keys.len();
             let fp = &valid.data.resources.footprint;
-            let others: Vec<LedgerKey> = fp.read_only.iter().chain(fp.read_write.iter()).filter(|k| **k != source).cloned().collect();
-            keys.push(source);
+            let others: Vec<LedgerKey> = fp.read_only.iter().chain(fp.read_write.iter()).filter(|k| !keys[..accounts].contains(k)).cloned().collect();
             keys.extend(others);
         }
         let before: Vec<Option<StoredEntry>> = keys.iter().map(|k| self.session.ledger().get(k)).collect::<Result<_>>().map_err(RpcError::internal)?;
@@ -674,8 +678,11 @@ impl Facade {
 
         let after: Vec<Option<StoredEntry>> = keys.iter().map(|k| self.session.ledger().get(k)).collect::<Result<_>>().map_err(RpcError::internal)?;
         let touched: Vec<Touched> = keys.into_iter().zip(before.into_iter().zip(after)).map(|(key, (before, after))| Touched { key, before, after }).collect();
-        let (source, footprint) = touched.split_first().ok_or_else(|| RpcError::internal(anyhow!("a valid transaction has a source account")))?;
-        let meta = tx::meta(&record, source, footprint, record.ledger).map_err(RpcError::internal)?;
+        if accounts == 0 {
+            return Err(RpcError::internal(anyhow!("a valid transaction has a source account")));
+        }
+        let (payers, footprint) = touched.split_at(accounts);
+        let meta = tx::meta(&record, payers, footprint, record.ledger).map_err(RpcError::internal)?;
         let diagnostics_xdr = record.diagnostics.iter().map(|d| d.to_xdr_base64(Limits::none())).collect::<std::result::Result<_, _>>().map_err(|e| RpcError::internal(e.into()))?;
         self.txs.insert(
             hash,

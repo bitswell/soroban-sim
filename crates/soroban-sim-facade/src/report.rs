@@ -479,7 +479,7 @@ pub fn build_report(s: &Session, ctx: ReportContext) -> Report {
     let log = s.log();
     let mut by_payer: BTreeMap<String, PayerFees> = BTreeMap::new();
     for t in log {
-        let Some(src) = &t.source else { continue };
+        let Some(src) = t.fee_source.as_ref().or(t.source.as_ref()) else { continue };
         if matches!(t.status, TxStatus::Rejected { .. }) {
             continue;
         }

@@ -130,17 +130,22 @@ pub struct Touched {
 }
 
 /// A `TransactionMeta` V4 for an applied (or failed) transaction. The source
-/// account's fee, sequence number and refund are `tx_changes_before`; the
+/// account's sequence number and the fee source's fee and refund (the same
+/// account unless fee-bumped) are `tx_changes_before`; the
 /// operation's footprint changes, data and TTL entries alike, are the
 /// operation's changes. This is a reconstruction from before and after
 /// values, not core's exact change list.
-pub fn meta(record: &TxRecord, source: &Touched, footprint: &[Touched], apply_ledger: u32) -> Result<TransactionMeta> {
+pub fn meta(record: &TxRecord, accounts: &[Touched], footprint: &[Touched], apply_ledger: u32) -> Result<TransactionMeta> {
     let applied = record.status.is_applied();
     let mut op_changes = vec![];
     if applied {
-        for t in footprint.iter().filter(|t| t.key != source.key) {
+        for t in footprint.iter().filter(|t| accounts.iter().all(|a| a.key != t.key)) {
             op_changes.extend(changes(t, apply_ledger)?);
         }
+    }
+    let mut before_changes = vec![];
+    for a in accounts {
+        before_changes.extend(changes(a, apply_ledger)?);
     }
     let return_value = match &record.status {
         TxStatus::Applied { value } => Some(value.clone()),
@@ -149,7 +154,7 @@ pub fn meta(record: &TxRecord, source: &Touched, footprint: &[Touched], apply_le
     let refundable_charged = if applied { record.rent_fee + record.events_fee } else { 0 };
     Ok(TransactionMeta::V4(TransactionMetaV4 {
         ext: ExtensionPoint::V0,
-        tx_changes_before: LedgerEntryChanges(changes(source, apply_ledger)?.try_into()?),
+        tx_changes_before: LedgerEntryChanges(before_changes.try_into()?),
         operations: if applied {
             vec![OperationMetaV2 {
                 ext: ExtensionPoint::V0,

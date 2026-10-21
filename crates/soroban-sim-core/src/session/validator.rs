@@ -84,13 +84,6 @@ pub struct Rejection {
     pub fee_bump_inner: bool,
 }
 
-impl Rejection {
-    /// The result code as core reports it.
-    pub fn code_str(&self) -> String {
-        rejection_code(self.code, self.fee_bump_inner)
-    }
-}
-
 pub fn rejection_code(code: TxCode, fee_bump_inner: bool) -> String {
     if fee_bump_inner {
         format!("txFEE_BUMP_INNER_FAILED({})", code.as_str())
