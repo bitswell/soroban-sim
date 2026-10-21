@@ -198,7 +198,22 @@ impl Session {
     /// envelope, in submission order. What one ledger cannot take (a second
     /// transaction from the same source, or more than the per-ledger limits
     /// allow) waits for the next ledger, as it would in core's queue.
+    /// An error leaves the session as it was before the call.
     pub fn submit_ledger(&mut self, txs: &[(&str, &TransactionEnvelope)]) -> Result<Vec<TxRecord>> {
+        let (depth, info, logged) = (self.ledger.depth(), self.info.clone(), self.log.len());
+        self.ledger.begin();
+        let settled = self.settle(txs);
+        if settled.is_ok() {
+            self.ledger.commit();
+        } else {
+            self.ledger.rollback_to(depth);
+            self.info = info;
+            self.log.truncate(logged);
+        }
+        settled
+    }
+
+    fn settle(&mut self, txs: &[(&str, &TransactionEnvelope)]) -> Result<Vec<TxRecord>> {
         let mut records: Vec<Option<TxRecord>> = vec![None; txs.len()];
         let mut pending: Vec<Pending> = txs.iter().enumerate().map(|(index, (label, envelope))| Pending { index, label, envelope, deferred: None }).collect();
         while !pending.is_empty() {
@@ -243,19 +258,7 @@ impl Session {
 
     /// Close one ledger with `selected`: core's apply order, fees first,
     /// apply-time validation, refunds last. Returns (submission index, record).
-    /// An error leaves the session as it was before the ledger.
     fn close_with(&mut self, selected: Vec<Candidate<'_>>) -> Result<Vec<(usize, TxRecord)>> {
-        let depth = self.ledger.depth();
-        self.ledger.begin();
-        let closed = self.apply_set(selected);
-        match closed {
-            Ok(_) => self.ledger.commit(),
-            Err(_) => self.ledger.rollback_to(depth),
-        }
-        closed
-    }
-
-    fn apply_set(&mut self, selected: Vec<Candidate<'_>>) -> Result<Vec<(usize, TxRecord)>> {
         let seq = self.info.sequence_number;
         let set_hash = self.tx_set_hash(&selected)?;
         let (mut order, soroban): (Vec<_>, Vec<_>) = selected.into_iter().partition(|c| !c.valid.is_soroban());

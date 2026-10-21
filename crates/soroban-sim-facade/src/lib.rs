@@ -927,7 +927,16 @@ impl Facade {
             self.note_clock();
             vec![]
         } else {
-            self.close_with(pending)?
+            let logged = self.session.log().len();
+            match self.close_with(pending.clone()) {
+                Ok(lines) => lines,
+                Err(e) => {
+                    if self.session.log().len() == logged {
+                        self.held = Some(pending);
+                    }
+                    return Err(e);
+                }
+            }
         };
         let closed = self.session.ledger_info().sequence_number - ledger;
         let detail = format!("{} transaction(s) in ledger {ledger}{}", lines.len(), if closed > 1 { format!(" (and {} more ledger(s) for what did not fit)", closed - 1) } else { String::new() });

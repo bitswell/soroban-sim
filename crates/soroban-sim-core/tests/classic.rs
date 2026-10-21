@@ -713,3 +713,36 @@ fn an_error_mid_close_leaves_the_session_as_it_was() {
     assert!(matches!(r.status, TxStatus::Applied { .. }), "{}", r.status.summary());
     assert_eq!(balance(&s, &alice()), before.0 + XLM);
 }
+
+#[test]
+fn an_error_in_a_later_ledger_undoes_the_whole_batch() {
+    use soroban_env_host::xdr::{LedgerKey, LedgerKeyContractCode, SequenceNumber, TransactionExt};
+    let poison = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash([9; 32]) });
+    let mut s = Session::new(Box::new(Outage { inner: base(vec![]), poison: poison.clone() }), fork_point(), SessionOptions::new(PASSPHRASE)).unwrap();
+    let alice_key = rehearse_alice(&s);
+    let before = (balance(&s, &alice()), seq(&s, &alice()), balance(&s, &bob()), s.ledger_info().sequence_number);
+
+    let payment = envelope(&s, &alice(), std::slice::from_ref(&alice_key), vec![op(pay(&bob(), Asset::Native, XLM))]);
+    let upload = prepare(&s, &alice(), std::slice::from_ref(&alice_key), upload(&wasm("add_i32")), &no_auth()).envelope;
+    let upload = resign(&upload, &[alice_key], |tx| {
+        tx.seq_num = SequenceNumber(tx.seq_num.0 + 1);
+        tx.fee += 1_000_000;
+        let TransactionExt::V1(data) = &mut tx.ext else { panic!("soroban data") };
+        data.resource_fee += 1_000_000;
+        let mut read_only = data.resources.footprint.read_only.to_vec();
+        read_only.push(poison);
+        data.resources.footprint.read_only = read_only.try_into().unwrap();
+    });
+
+    // One transaction per source per ledger: the payment closes ledger N,
+    // the upload waits for N+1 and hits the outage there.
+    let err = s.submit_ledger(&[("pay", &payment), ("upload", &upload)]).unwrap_err();
+    assert!(format!("{err:#}").contains("unreachable"), "{err:#}");
+    assert_eq!((balance(&s, &alice()), seq(&s, &alice()), balance(&s, &bob()), s.ledger_info().sequence_number), before);
+    assert_eq!(s.ledger().depth(), 0);
+    assert!(s.log().is_empty());
+
+    let r = s.submit("pay again", &payment).unwrap();
+    assert!(matches!(r.status, TxStatus::Applied { .. }), "{}", r.status.summary());
+    assert_eq!(balance(&s, &bob()), before.2 + XLM);
+}
