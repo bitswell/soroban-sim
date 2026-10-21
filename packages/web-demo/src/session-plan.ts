@@ -415,14 +415,17 @@ class Runner {
     return Operation.createStellarAssetContract({ asset: Asset.native() });
   }
 
+  /** An upload's Wasm: the attached file it names, or the one with its hash. */
   private async wasmFor(u: Obj): Promise<Uint8Array> {
+    const want = u.hash === undefined ? undefined : (await this.interp(String(u.hash))).toLowerCase();
     if (typeof u.file === "string") {
-      const base = u.file.split("/").pop()!;
+      const base = (await this.interp(u.file)).split("/").pop()!;
       const code = this.ctx.wasm.get(base);
       if (!code) throw new PlanError(`upload ${u.file}: attach ${base} with the plan`);
+      if (want && hex(sha256(code)) !== want) throw new PlanError(`${base} has hash ${hex(sha256(code))}, the plan wants ${want}`);
       return code;
     }
-    const want = (await this.interp(String(u.hash))).toLowerCase();
+    if (!want) throw new PlanError("upload needs file or hash");
     for (const code of this.ctx.wasm.values()) if (hex(sha256(code)) === want) return code;
     throw new PlanError(`upload: no attached Wasm has hash ${want}`);
   }

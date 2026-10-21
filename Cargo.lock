@@ -1875,9 +1875,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "ed25519-dalek",
  "serde_json",
- "sha2",
  "soroban-env-host",
  "soroban-sim-core",
  "soroban-sim-facade",

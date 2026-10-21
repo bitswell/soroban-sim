@@ -178,3 +178,130 @@ fn needs_state(keys: Vec<LedgerKey>) -> Result<Reply, String> {
     let keys = keys.iter().map(|k| k.to_xdr(Limits::none()).map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
     Ok(Reply::NeedsState(keys))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exports::theahaco::soroban_sim::network_session::{BalanceOverride, BaseEntry};
+    use soroban_env_host::xdr::{LedgerEntryData, ReadXdr};
+    use soroban_sim_core::session::{account_key, host_protocol, Ed25519Key};
+
+    const PASSPHRASE: &str = "soroban-sim component tests ; 2026";
+    const FORK_LEDGER: u32 = 10_000_000;
+
+    fn config() -> ForkConfig {
+        ForkConfig {
+            network_name: "test".into(),
+            network_passphrase: PASSPHRASE.into(),
+            base_description: "component test base".into(),
+            fork_ledger: FORK_LEDGER,
+            fork_close_time: 1_790_000_000,
+            protocol_version: host_protocol(),
+            base_reserve: 5_000_000,
+            base_fee: 100,
+            header_xdr: None,
+            seconds_per_ledger: 0,
+            allow_real_signers: false,
+            served_by: "component tests".into(),
+        }
+    }
+
+    /// Real testnet settings, keyed by LedgerKey XDR.
+    fn settings() -> Vec<(Vec<u8>, Vec<u8>)> {
+        let json: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/parity/native-sac-transfer.json")).unwrap();
+        json["snapshot"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| {
+                let b64 = |k: &str| B64.decode(e[k].as_str().unwrap()).unwrap();
+                let entry = LedgerEntry::from_xdr(b64("entryXdr"), Limits::none()).unwrap();
+                matches!(entry.data, LedgerEntryData::ConfigSetting(_)).then(|| (b64("keyXdr"), b64("entryXdr")))
+            })
+            .collect()
+    }
+
+    /// Answer every needs-state from `settings` (anything else is absent).
+    fn answer(s: &NetworkSession, mut call: impl FnMut() -> Result<Reply, String>) -> (Value, usize) {
+        let base = settings();
+        for rounds in 0.. {
+            match call().unwrap() {
+                Reply::Response(Some(r)) => return (serde_json::from_str(&r).unwrap(), rounds),
+                Reply::Response(None) => panic!("no response"),
+                Reply::NeedsState(keys) => {
+                    let (present, absent): (Vec<_>, Vec<_>) = keys.into_iter().partition(|k| base.iter().any(|(bk, _)| bk == k));
+                    let entries = present
+                        .iter()
+                        .map(|k| BaseEntry { entry_xdr: base.iter().find(|(bk, _)| bk == k).unwrap().1.clone(), live_until_ledger: None })
+                        .collect();
+                    s.provide(BaseBatch { served_at_ledger: FORK_LEDGER, entries, absent_keys: absent }).unwrap();
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    #[test]
+    fn opening_takes_one_round_for_every_network_setting() {
+        let s = NetworkSession::new(config());
+        let first = s.rpc(r#"{"jsonrpc":"2.0","id":1,"method":"getNetwork"}"#.into()).unwrap();
+        let Reply::NeedsState(keys) = first else { panic!("expected needs-state, got {first:?}") };
+        assert_eq!(keys.len(), 10);
+        let (r, rounds) = answer(&s, || s.rpc(r#"{"jsonrpc":"2.0","id":1,"method":"getNetwork"}"#.into()));
+        assert_eq!(rounds, 1);
+        assert_eq!(r["result"]["passphrase"], PASSPHRASE);
+    }
+
+    #[test]
+    fn typed_methods_are_facade_calls() {
+        let s = NetworkSession::new(config());
+        let carol = Ed25519Key::throwaway("carol");
+        let (r, _) = answer(&s, || {
+            s.apply_override(LedgerOverride::SetBalance(BalanceOverride { account: carol.strkey(), stroops: 250 * 10_000_000, label: "carol".into() }))
+        });
+        assert_eq!(r["result"]["balance"], "2500000000", "{r}");
+        let (snap, _) = answer(&s, || s.snapshot("before advancing".into()));
+        let (clock, _) = answer(&s, || s.advance(10, None));
+        assert_eq!(clock["result"]["next"]["ledger"], FORK_LEDGER + 11);
+        let (clock, _) = answer(&s, || s.set_time(1_790_001_000));
+        assert_eq!(clock["result"]["next"]["closeTime"], 1_790_001_000u64);
+        let (reverted, _) = answer(&s, || s.revert(snap["result"]["id"].as_u64().unwrap() as u32));
+        assert_eq!(reverted["result"]["reverted"], 2);
+        assert_eq!(reverted["result"]["next"]["ledger"], FORK_LEDGER + 1);
+
+        let (steps, _) = answer(&s, || s.steps());
+        let kinds: Vec<&str> = steps["result"]["steps"].as_array().unwrap().iter().map(|s| s["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["override", "snapshot", "advance", "advance", "revert"]);
+        let override_change = &steps["result"]["steps"][0]["changes"][0];
+        assert_eq!(override_change["change"], "created");
+        let key = LedgerKey::from_xdr_base64(override_change["key"].as_str().unwrap(), Limits::none()).unwrap();
+        assert_eq!(key, account_key(&carol.account_id()));
+
+        let (bad, _) = answer(&s, || s.submit(vec![1, 2, 3]));
+        assert_eq!(bad["error"]["code"], -32602);
+        let (bad, _) = answer(&s, || s.debug_context(1));
+        assert_eq!(bad["error"]["code"], -32602, "an override is not a traceable transaction");
+        let (report, _) = answer(&s, || s.report());
+        assert!(report["result"]["markdown"].as_str().unwrap().contains("## Overrides (1)"));
+    }
+
+    #[test]
+    fn a_protocol_mismatch_is_an_error_not_a_needs_state() {
+        let mut c = config();
+        c.protocol_version = host_protocol() - 1;
+        let s = NetworkSession::new(c);
+        let err = (0..3)
+            .find_map(|_| match s.rpc(r#"{"jsonrpc":"2.0","id":1,"method":"fork_info"}"#.into()) {
+                Err(e) => Some(e),
+                Ok(Reply::NeedsState(keys)) => {
+                    let base = settings();
+                    let entries = keys.iter().filter_map(|k| base.iter().find(|(bk, _)| bk == k)).map(|(_, e)| BaseEntry { entry_xdr: e.clone(), live_until_ledger: None }).collect();
+                    s.provide(BaseBatch { served_at_ledger: FORK_LEDGER, entries, absent_keys: vec![] }).unwrap();
+                    None
+                }
+                Ok(other) => panic!("expected an error, got {other:?}"),
+            })
+            .unwrap();
+        assert!(err.contains("exact protocol parity"), "{err}");
+    }
+}

@@ -18,7 +18,3 @@ soroban-env-host = { workspace = true, features = ["recording_mode"] }
 soroban-sim-core = { path = "../soroban-sim-core" }
 soroban-sim-facade = { path = "../soroban-sim-facade" }
 wit-bindgen.workspace = true
-
-[dev-dependencies]
-ed25519-dalek.workspace = true
-sha2.workspace = true
