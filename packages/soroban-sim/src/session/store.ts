@@ -10,7 +10,9 @@
  * Replaying the ops over the cached base rebuilds the same session without
  * touching the network: the component is deterministic, and envelopes carry
  * their own signatures. Nothing secret is stored: browser sessions sign with
- * throwaway keys derived from labels, and envelopes are public by design.
+ * throwaway keys derived from labels, envelopes are public by design, and an
+ * envelope a real key signed never reaches the log (see PersistentSession),
+ * since the real network would accept it.
  */
 import type { BaseBatch } from "./base.js";
 import { base64ToBytes, bytesToBase64 } from "./base.js";

@@ -29,6 +29,8 @@ import type {
 
 let store: SessionStore | undefined;
 let current: PersistentSession | undefined;
+/** The Web Lock on the open session's id, held until it closes. */
+let held: { release: () => void; released: Promise<unknown> } | undefined;
 const module = networkSession as unknown as NetworkSessionModule;
 
 function post(msg: FromSessionWorker): void {
@@ -74,6 +76,31 @@ async function summary(session: PersistentSession): Promise<SessionSummary> {
   };
 }
 
+/**
+ * Hold `id` for this tab. Each tab runs its own copy of a session, and two
+ * copies appending to one log would replay as neither tab ran it.
+ */
+async function lockSession(id: string): Promise<void> {
+  let release!: () => void;
+  let granted!: (ok: boolean) => void;
+  const asked = new Promise<boolean>((resolve) => (granted = resolve));
+  const released = navigator.locks.request(`soroban-sim-session:${id}`, { ifAvailable: true }, (lock) => {
+    granted(lock !== null);
+    return lock ? new Promise<void>((resolve) => (release = resolve)) : undefined;
+  });
+  if (!(await asked)) throw new Error("this session is open in another tab; close it there to open it here");
+  held = { release, released };
+}
+
+async function closeCurrent(): Promise<void> {
+  current?.dispose();
+  current = undefined;
+  const lock = held;
+  held = undefined;
+  lock?.release();
+  await lock?.released;
+}
+
 function open(): PersistentSession {
   if (!current) throw new Error("no session is open");
   return current;
@@ -82,8 +109,7 @@ function open(): PersistentSession {
 async function handle(request: SessionRequest): Promise<SessionResult> {
   switch (request.type) {
     case "start": {
-      current?.dispose();
-      current = undefined;
+      await closeCurrent();
       post({ type: "progress", message: `Forking ${request.networkName} at its latest ledger…` });
       const session = await PersistentSession.start({
         store: await openStore(),
@@ -93,6 +119,10 @@ async function handle(request: SessionRequest): Promise<SessionResult> {
         ...(request.expectedPassphrase ? { expectedPassphrase: request.expectedPassphrase } : {}),
         ...(request.secondsPerLedger ? { secondsPerLedger: request.secondsPerLedger } : {}),
         servedBy: "soroban-sim browser session (virtual RPC)",
+      });
+      await lockSession(session.id).catch((e: unknown) => {
+        session.dispose();
+        throw e;
       });
       current = session;
       // The throwaway fee payer is funded by an override, logged like any other.
@@ -104,29 +134,28 @@ async function handle(request: SessionRequest): Promise<SessionResult> {
       return { type: "opened", summary: await summary(session), replayed: 0 };
     }
     case "resume": {
-      current?.dispose();
-      current = undefined;
+      await closeCurrent();
+      await lockSession(request.id);
       const session = await PersistentSession.resume({
         store: await openStore(),
         module,
         id: request.id,
         onReplay: (done, total) => post({ type: "progress", message: `Replaying the session log: ${done}/${total}` }),
+      }).catch(async (e: unknown) => {
+        await closeCurrent();
+        throw e;
       });
       current = session;
       return { type: "opened", summary: await summary(session), replayed: (await (await openStore()).ops(request.id)).length };
     }
     case "close": {
-      current?.dispose();
-      current = undefined;
+      await closeCurrent();
       return { type: "closed" };
     }
     case "list":
       return { type: "sessions", sessions: await (await openStore()).list() };
     case "delete": {
-      if (current?.id === request.id) {
-        current.dispose();
-        current = undefined;
-      }
+      if (current?.id === request.id) await closeCurrent();
       await (await openStore()).delete(request.id);
       return { type: "deleted" };
     }

@@ -796,6 +796,7 @@ impl Facade {
             "overrides": self.session.ledger().overrides().len(),
             "snapshots": snapshots,
             "allowRealSigners": self.allow_real_signers,
+            "replayable": self.replayable.len(),
         })
     }
 

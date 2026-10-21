@@ -342,8 +342,10 @@ async function exactSource(): Promise<
 > {
   const address = selectedFeePayer();
   if (!address) return undefined;
-  // With a session open, the fee payer's sequence is the session's.
-  const sequence = await accountSequence(address, (await sessionRpc()) ?? testnetRpc);
+  // The session's throwaway payer exists only in the session; any other fee
+  // payer's sequence is Testnet's, which a Testnet broadcast needs.
+  const server = address === sessionHost?.summary?.payer ? (await sessionRpc())! : testnetRpc;
+  const sequence = await accountSequence(address, server);
   if (!sequence) return undefined;
   if (address === localIdentity.publicKey && !localIdentityFunded) {
     localIdentityFunded = true;
@@ -1443,41 +1445,42 @@ async function submitIntoSession(): Promise<string> {
   const account = await server.getAccount(feePayer).catch(() => {
     throw new Error(`${shortAddress(feePayer)} has no account in the session; fund it with an override first`);
   });
+  const wallet = identityMode === "wallet" ? connectedWallet : undefined;
+  const realOnMainnet = wallet !== undefined && session.passphrase === MAINNET_PASSPHRASE;
   const unsigned = new TransactionBuilder(account, { fee: "100", networkPassphrase: session.passphrase })
     .addOperation(Operation.invokeHostFunction({ func: call.func, auth: [] }))
-    .setTimeout(0)
+    // A real key's signature makes the envelope valid on Mainnet: five minutes, not forever.
+    .setTimeout(realOnMainnet ? 300 : 0)
     .build();
   let transaction = await server.prepareTransaction(unsigned);
-  if (identityMode === "wallet" && connectedWallet) {
-    if (session.passphrase === MAINNET_PASSPHRASE) {
-      // Acknowledged in the dialog: the session applies it and the report lists it.
-      await sessionHost!.call("fork_allowRealSigners", { allow: true });
+  try {
+    if (wallet) {
+      submitProgress.textContent = `Waiting for ${wallet.name} approval…`;
+      const { signWithWallet } = await import("./wallet.js");
+      const signed = await signWithWallet(transaction.toEnvelope().toXdr("base64"), wallet.address, session.passphrase);
+      if (signed.submitted) {
+        throw new Error(`${wallet.name} relays its own transactions, so it cannot submit into a session`);
+      }
+      transaction = TransactionBuilder.fromXdr(signed.signedTxXdr, session.passphrase) as Transaction;
+      if (StrKey.isValidContract(wallet.address)) transaction.sign(sessionHost!.payerKeypair());
+      // Acknowledged in the dialog, for this envelope only: the report lists it.
+      if (realOnMainnet) await sessionHost!.call("fork_allowRealSigners", { allow: true });
+    } else {
+      submitProgress.textContent = "Signing with the session's throwaway key…";
+      transaction.sign(sessionHost!.payerKeypair());
     }
-    submitProgress.textContent = `Waiting for ${connectedWallet.name} approval…`;
-    const { signWithWallet } = await import("./wallet.js");
-    const signed = await signWithWallet(
-      transaction.toEnvelope().toXdr("base64"),
-      connectedWallet.address,
-      session.passphrase,
-    );
-    if (signed.submitted) {
-      throw new Error(`${connectedWallet.name} relays its own transactions, so it cannot submit into a session`);
+    submitProgress.textContent = "Submitting into the session…";
+    const sent = await server.sendTransaction(transaction);
+    if (sent.status !== "PENDING") throw new Error(`the session answered ${sent.status} for ${shortAddress(sent.hash)}`);
+    const got = await server.getTransaction(sent.hash);
+    if (got.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+      throw new Error(`the transaction failed in the session (${shortAddress(sent.hash)}); see the step timeline`);
     }
-    transaction = TransactionBuilder.fromXdr(signed.signedTxXdr, session.passphrase) as Transaction;
-    if (StrKey.isValidContract(connectedWallet.address)) transaction.sign(sessionHost!.payerKeypair());
-  } else {
-    submitProgress.textContent = "Signing with the session's throwaway key…";
-    transaction.sign(sessionHost!.payerKeypair());
+    return sent.hash;
+  } finally {
+    if (realOnMainnet) await sessionHost!.call("fork_allowRealSigners", { allow: false });
+    await sessionHost!.refresh();
   }
-  submitProgress.textContent = "Submitting into the session…";
-  const sent = await server.sendTransaction(transaction);
-  if (sent.status !== "PENDING") throw new Error(`the session answered ${sent.status} for ${shortAddress(sent.hash)}`);
-  const got = await server.getTransaction(sent.hash);
-  await sessionHost!.refresh();
-  if (got.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
-    throw new Error(`the transaction failed in the session (${shortAddress(sent.hash)}); see the step timeline`);
-  }
-  return sent.hash;
 }
 
 async function waitForTransaction(hash: string): Promise<void> {

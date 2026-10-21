@@ -297,10 +297,12 @@ fn a_real_mainnet_signature_is_refused_until_allowed() {
     let e = c.error("sendTransaction", json!({ "transaction": up.to_xdr_base64(Limits::none()).unwrap() }));
     assert_eq!(e["code"], -32001, "{e}");
     assert!(e["message"].as_str().unwrap().contains("valid on mainnet"));
+    assert_eq!(c.call("fork_info", json!({}))["replayable"], 1, "the refused signature counts");
 
     c.call("fork_allowRealSigners", json!({ "allow": true }));
     let (_, got) = c.send(&up);
     assert_eq!(got["status"], "SUCCESS");
+    assert_eq!(c.call("fork_info", json!({}))["replayable"], 2);
     let report = c.call("fork_report", json!({}));
     assert_eq!(report["passed"], false, "a replayable mainnet signature fails the report");
     assert_eq!(report["report"]["safety"]["replayable"].as_array().unwrap().len(), 2, "refused, then applied");

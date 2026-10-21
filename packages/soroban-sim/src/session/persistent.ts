@@ -7,12 +7,19 @@
  * it. Resuming forks the same ledger again, hands the component the whole
  * cache, and replays the log: the same envelopes over the same base give the
  * same session, without touching the network.
+ *
+ * Two things stay live only. An envelope a real key signed (a signature the
+ * real network would accept, refused or applied) is never logged: it could
+ * be submitted there. Nor is `fork_allowRealSigners`: the allowance covers
+ * the submissions made while it is on, so a resumed session refuses real
+ * signers again.
  */
 import { RpcBaseLedger, type BaseBatch, type BaseLedger } from "./base.js";
 import { forkConfigFromRpc, type ForkFromRpcOptions } from "./fork.js";
 import { ReadOnlyRpc, type ReadOnlyRpcOptions } from "./rpc.js";
 import {
   bodyChangesSession,
+  bodyMethods,
   type NetworkSessionModule,
   SessionRpcError,
   SorobanSession,
@@ -45,7 +52,12 @@ export interface ResumeSessionOptions {
 /** JSON-RPC errors that never change a session; such bodies are not logged. */
 const NO_OP_ERRORS = new Set([-32700, -32600, -32601, -32602]);
 
+/** Methods whose bodies are never logged (see above). */
+const LIVE_ONLY_METHODS = ["fork_allowRealSigners"];
+
 export class PersistentSession {
+  private queue: Promise<unknown> = Promise.resolve();
+
   private constructor(
     readonly store: SessionStore,
     readonly record: SessionRecord,
@@ -114,13 +126,33 @@ export class PersistentSession {
     return new PersistentSession(store, record, session, rpc);
   }
 
-  /** Answer a JSON-RPC body, logging it if it changed the session. */
-  async rpc(body: string): Promise<string | undefined> {
+  /**
+   * Answer a JSON-RPC body, logging it if it changed the session and holds no
+   * real-signed envelope. One body at a time, so the log keeps the session's
+   * order.
+   */
+  rpc(body: string): Promise<string | undefined> {
+    const run = () => this.answer(body);
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async answer(body: string): Promise<string | undefined> {
+    const methods = bodyMethods(body);
+    const sends = methods.includes("sendTransaction");
+    const before = sends ? await this.realSignatures() : 0;
     const response = await this.session.rpc(body);
-    if (bodyChangesSession(body) && !isNoOpError(response)) {
-      await this.store.appendOp(this.record.id, body);
-    }
+    if (!bodyChangesSession(body) || isNoOpError(response)) return response;
+    if (methods.some((m) => LIVE_ONLY_METHODS.includes(m))) return response;
+    if (sends && (await this.realSignatures()) > before) return response;
+    await this.store.appendOp(this.record.id, body);
     return response;
+  }
+
+  /** Signatures valid on the real network the session has seen so far. */
+  private async realSignatures(): Promise<number> {
+    return (await this.session.call<{ replayable: number }>("fork_info")).replayable;
   }
 
   /** Call one method through {@link rpc}, so it is logged the same way. */

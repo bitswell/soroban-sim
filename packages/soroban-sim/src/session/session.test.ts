@@ -30,12 +30,16 @@ const dec = (b: Uint8Array) => new TextDecoder().decode(b);
  * A component that answers only once it has been given every key a method
  * needs: `needs[method]` lists them (as text), the way a fork needs the
  * entries a transaction reads. Mutating calls are recorded in `applied`.
+ * A `sendTransaction` with `real` (or `refuse`) params stands for an envelope
+ * a real key signed: it counts in `fork_info`'s `replayable`, and `refuse`
+ * answers -32001 the way a mainnet fork does.
  */
 class FakeComponent implements ComponentSession {
   known = new Map<string, Uint8Array | null>();
   provided: ComponentBaseBatch[] = [];
   calls: string[] = [];
   applied: string[] = [];
+  replayable = 0;
 
   constructor(private readonly needs: Record<string, string[]> = {}) {}
 
@@ -54,8 +58,21 @@ class FakeComponent implements ComponentSession {
     if (call.method === "bad") {
       return response({ jsonrpc: "2.0", id: call.id, error: { code: -32602, message: "bad params" } });
     }
+    const real = (call.params ?? {}) as { real?: boolean; refuse?: boolean };
+    if (call.method === "sendTransaction" && (real.real || real.refuse)) this.replayable += 1;
+    if (call.method === "sendTransaction" && real.refuse) {
+      return response({ jsonrpc: "2.0", id: call.id, error: { code: -32001, message: "valid on mainnet" } });
+    }
     if (!["fork_info", "getNetwork", "fork_steps"].includes(call.method)) this.applied.push(call.method);
-    return response({ jsonrpc: "2.0", id: call.id, result: { method: call.method, applied: this.applied.length } });
+    return response({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        method: call.method,
+        applied: this.applied.length,
+        ...(call.method === "fork_info" ? { replayable: this.replayable } : {}),
+      },
+    });
   }
 
   submit(envelopeXdr: Uint8Array): Reply {
@@ -370,6 +387,42 @@ describe("SessionStore and PersistentSession", () => {
     expect(built!.applied).toEqual(["sendTransaction", "fork_advanceLedgers"]);
     expect(seen).toEqual([]);
     expect(second.session.rounds).toBe(0);
+    store.close();
+  });
+
+  it("never logs a real-signed envelope or the real-signer allowance", async () => {
+    const store = await SessionStore.open({ dbName: "real-signer-test" });
+    const module: NetworkSessionModule = {
+      Session: class {
+        constructor() {
+          return new FakeComponent();
+        }
+      } as unknown as NetworkSessionModule["Session"],
+    };
+    const session = await PersistentSession.start({
+      store,
+      module,
+      rpcUrl: "https://rpc.invalid",
+      networkName: "testnet",
+      id: "r1",
+      rpcOptions: { fetch: fakeFetch([]) },
+    });
+    await session.call("fork_allowRealSigners", { allow: true });
+    // Made together: each body is judged by the signatures it brought in.
+    await Promise.all([
+      session.call("sendTransaction", { real: true }),
+      session.call("sendTransaction", { throwaway: 1 }),
+    ]);
+    await session.call("fork_allowRealSigners", { allow: false });
+    const refused = await session.call("sendTransaction", { refuse: true }).catch((e: unknown) => e);
+    expect((refused as SessionRpcError).code).toBe(-32001);
+    await session.call("sendTransaction", { throwaway: 2 });
+    const ops = (await store.ops("r1")).map((b) => JSON.parse(b) as { method: string; params: unknown });
+    expect(ops).toEqual([
+      expect.objectContaining({ method: "sendTransaction", params: { throwaway: 1 } }),
+      expect.objectContaining({ method: "sendTransaction", params: { throwaway: 2 } }),
+    ]);
+    session.dispose();
     store.close();
   });
 });

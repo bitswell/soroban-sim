@@ -107,19 +107,24 @@ export const READ_ONLY_SESSION_METHODS: readonly string[] = [
   "fork_report",
 ];
 
-/** Whether a JSON-RPC body (a call or a batch) can change the session. */
-export function bodyChangesSession(body: string): boolean {
+/** The methods a JSON-RPC body (a call or a batch) calls. */
+export function bodyMethods(body: string): string[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
   } catch {
-    return false;
+    return [];
   }
   const calls = Array.isArray(parsed) ? parsed : [parsed];
-  return calls.some((c) => {
+  return calls.flatMap((c) => {
     const method = (c as { method?: unknown } | null)?.method;
-    return typeof method === "string" && !READ_ONLY_SESSION_METHODS.includes(method);
+    return typeof method === "string" ? [method] : [];
   });
+}
+
+/** Whether a JSON-RPC body (a call or a batch) can change the session. */
+export function bodyChangesSession(body: string): boolean {
+  return bodyMethods(body).some((method) => !READ_ONLY_SESSION_METHODS.includes(method));
 }
 
 export class SorobanSession {

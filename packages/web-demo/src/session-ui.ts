@@ -71,6 +71,15 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/**
+ * A transaction a real key signed (refused, or applied with a signature the
+ * real network accepts). The session never logs it, and the panel does not
+ * offer its envelope.
+ */
+function realSigned(s: SessionStepView): boolean {
+  return s.kind === "transaction" && (s.outcome === "refused" || (s.tx?.replayable.length ?? 0) > 0);
+}
+
 function download(name: string, type: string, text: string): void {
   const url = URL.createObjectURL(new Blob([text], { type }));
   const a = el("a");
@@ -496,7 +505,10 @@ export class SessionHost {
       el("span", { className: "kind", text: s.kind }),
       el("span", { className: "name", text: s.name, title: s.name }),
       el("span", { className: "ledger", text: `L${s.ledger}` }),
-      el("span", { className: `session-outcome ${s.outcome}`, text: s.reverted ? `${s.outcome} · reverted` : s.outcome }),
+      el("span", {
+        className: `session-outcome ${s.outcome}`,
+        text: [s.outcome, ...(s.reverted ? ["reverted"] : []), ...(realSigned(s) ? ["real-signed, not stored"] : [])].join(" · "),
+      }),
     );
     head.type = "button";
     head.setAttribute("aria-expanded", String(this.expanded.has(s.index)));
@@ -601,7 +613,7 @@ export class SessionHost {
       );
       actions.append(dbg);
     }
-    if (s.envelope_xdr) {
+    if (s.envelope_xdr && !realSigned(s)) {
       const copy = el("button", { text: "copy envelope XDR" });
       copy.type = "button";
       copy.addEventListener("click", () => void navigator.clipboard?.writeText(s.envelope_xdr!));

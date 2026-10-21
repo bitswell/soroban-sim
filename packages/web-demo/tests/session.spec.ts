@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, type BrowserContext, type Page, test } from "@playwright/test";
-import { Account, Keypair, Networks, Operation, TransactionBuilder, xdr } from "@stellar/stellar-sdk";
+import { Account, Keypair, Networks, Operation, type Transaction, TransactionBuilder, xdr } from "@stellar/stellar-sdk";
 
 /**
  * Network sessions in the browser, offline: the fork's RPC reads are answered
@@ -185,9 +185,8 @@ test("the wallet pre-submit flow submits into the session through the virtual RP
   expect(asked).not.toContain("sendTransaction");
 });
 
-/** A Mainnet recording whose base holds an account the test has the real key of. */
-function mainnetWithRealAccount(real: Keypair): { recording: Recording; seq: bigint } {
-  const recording = testnetFork();
+/** The testnet recording, its base also holding an account the test has the real key of. */
+function withRealAccount(real: Keypair, recording = testnetFork()): { recording: Recording; seq: bigint } {
   const seq = BigInt(recording.getLatestLedger.sequence - 10) << 32n;
   const account = xdr.LedgerEntryData.account(
     new xdr.AccountEntry({
@@ -208,10 +207,56 @@ function mainnetWithRealAccount(real: Keypair): { recording: Recording; seq: big
     seq,
     recording: {
       ...recording,
-      getNetwork: { ...recording.getNetwork, passphrase: Networks.PUBLIC },
       entries: [...recording.entries, { key: key.toXdr("base64"), xdr: account.toXdr("base64"), lastModifiedLedgerSeq: recording.getLatestLedger.sequence - 10 }],
     },
   };
+}
+
+/** The same, as a Mainnet recording. */
+function mainnetWithRealAccount(real: Keypair): { recording: Recording; seq: bigint } {
+  const recording = testnetFork();
+  return withRealAccount(real, { ...recording, getNetwork: { ...recording.getNetwork, passphrase: Networks.PUBLIC } });
+}
+
+/**
+ * A stand-in for the wallet module the page loads on demand: it connects
+ * `real`'s account and hands each envelope to `sign`, here in the test.
+ */
+async function realWallet(page: Page, real: Keypair, sign: (envelope: string, passphrase: string) => string): Promise<void> {
+  await page.exposeFunction("__testWalletSign", sign);
+  await page.route("**/src/wallet.ts*", (route) =>
+    route.fulfill({
+      contentType: "text/javascript",
+      body: `
+        export const NIDO_ID = "nido";
+        export async function connectWallet() { return { address: ${JSON.stringify(real.publicKey())}, id: "test", name: "Test wallet" }; }
+        export async function disconnectWallet() {}
+        export async function signWithWallet(xdr, address, passphrase) {
+          return { signedTxXdr: await window.__testWalletSign(xdr, passphrase), signerAddress: address };
+        }`,
+    }),
+  );
+}
+
+/** Connect the wallet, run the workbench's guided call, and open the review. */
+async function reviewWalletCall(page: Page, real: Keypair): Promise<void> {
+  await page.locator("#identity-wallet").click();
+  if (!(await page.locator("#wallet-address").isVisible())) await page.locator("#connect-wallet").click();
+  await expect(page.locator("#wallet-address")).toHaveText(real.publicKey());
+  if (!(await page.locator("#contract-fn").isVisible())) {
+    await page.locator("#load-contract").click();
+    await expect(page.locator("#contract-fn")).toBeVisible({ timeout: 60_000 });
+  }
+  await page.locator("#contract-fn").selectOption("update_message");
+  await expect(page.locator('#contract-args input[data-arg="author"]')).toHaveValue(real.publicKey());
+  await page.locator("#run").click();
+  await expect(page.locator("#review-submit")).toBeEnabled({ timeout: 120_000 });
+  await page.locator("#review-submit").click();
+}
+
+/** The session's own view of itself. */
+async function forkInfo(page: Page): Promise<Record<string, unknown>> {
+  return (await virtualRpc(page, "fork_info")).result!;
 }
 
 test("a real mainnet signer's envelope is refused with a replay warning", async ({ page, context }) => {
@@ -247,44 +292,33 @@ test("a real mainnet signer's envelope is refused with a replay warning", async 
   await expect(page.locator("#session-replayable")).toBeVisible();
   await expect(page.locator("#session-replayable")).toContainText("valid on the real network");
   await expect(page.locator("#session-verdict")).toContainText("FAILED");
+
+  // The real-signed envelope is never stored, so it is not offered either.
+  await expect(step(page, 2).locator(".session-outcome")).toHaveText("refused · real-signed, not stored");
+  await step(page, 2).locator(".session-step-head").click();
+  await expect(step(page, 2).locator(".session-step-body")).toBeVisible();
+  await expect(step(page, 2).getByRole("button", { name: "copy envelope XDR" })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator("#session-progress")).toContainText("Resumed: replayed 1 logged call", { timeout: 60_000 });
+  await expect(page.locator("#session-saved")).toContainText("1 logged");
+  await expect(page.locator("#session-steps li")).toHaveCount(1);
 });
 
 test("a real wallet signing into a mainnet session must acknowledge the replay warning", async ({ page, context }) => {
   test.setTimeout(180_000);
   const real = Keypair.random();
-  await recordedRpc(context, TESTNET_RPC, testnetFork());
+  // The workbench preflights on Testnet, so the wallet's account is there too.
+  await recordedRpc(context, TESTNET_RPC, withRealAccount(real).recording);
   await recordedRpc(context, MAINNET_RPC, mainnetWithRealAccount(real).recording);
-  // A stand-in for the wallet module the page loads on demand: it connects
-  // the account above and signs with its real key, here in the test.
-  await page.exposeFunction("__testWalletSign", (envelope: string, passphrase: string) => {
-    const tx = TransactionBuilder.fromXdr(envelope, passphrase);
+  const signed: Array<{ maxTime: number; at: number }> = [];
+  await realWallet(page, real, (envelope, passphrase) => {
+    const tx = TransactionBuilder.fromXdr(envelope, passphrase) as Transaction;
+    signed.push({ maxTime: Number(tx.timeBounds?.maxTime ?? 0), at: Math.floor(Date.now() / 1000) });
     tx.sign(real);
     return tx.toEnvelope().toXdr("base64");
   });
-  await page.route("**/src/wallet.ts*", (route) =>
-    route.fulfill({
-      contentType: "text/javascript",
-      body: `
-        export const NIDO_ID = "nido";
-        export async function connectWallet() { return { address: ${JSON.stringify(real.publicKey())}, id: "test", name: "Test wallet" }; }
-        export async function disconnectWallet() {}
-        export async function signWithWallet(xdr, address, passphrase) {
-          return { signedTxXdr: await window.__testWalletSign(xdr, passphrase), signerAddress: address };
-        }`,
-    }),
-  );
   await fork(page, "mainnet");
-  await page.locator("#identity-wallet").click();
-  await page.locator("#connect-wallet").click();
-  await expect(page.locator("#wallet-address")).toHaveText(real.publicKey());
-
-  await page.locator("#load-contract").click();
-  await expect(page.locator("#contract-fn")).toBeVisible({ timeout: 60_000 });
-  await page.locator("#contract-fn").selectOption("update_message");
-  await expect(page.locator('#contract-args input[data-arg="author"]')).toHaveValue(real.publicKey());
-  await page.locator("#run").click();
-  await expect(page.locator("#review-submit")).toBeEnabled({ timeout: 120_000 });
-  await page.locator("#review-submit").click();
+  await reviewWalletCall(page, real);
 
   // The warning names Mainnet and the real account; signing waits for it.
   await expect(page.locator("#replay-warning")).toBeVisible();
@@ -297,11 +331,93 @@ test("a real wallet signing into a mainnet session must acknowledge the replay w
   await expect(page.locator("#submit-progress")).toContainText("Applied in the session", { timeout: 60_000 });
   await page.locator("#submit-dialog .dialog-close").click();
 
-  // The session allowed it only after the acknowledgement, and the report
-  // keeps the signature under Safety and fails.
+  // The envelope the wallet signed expires five minutes after it was built.
+  expect(signed).toHaveLength(1);
+  expect(signed[0]!.maxTime).toBeGreaterThan(signed[0]!.at);
+  expect(signed[0]!.maxTime).toBeLessThanOrEqual(signed[0]!.at + 300);
+
+  // Real signers were allowed for that one envelope, then refused again. The
+  // report keeps the signature under Safety and fails.
   await expect(step(page, 2)).toContainText("fork_allowRealSigners");
   await expect(step(page, 3)).toHaveAttribute("data-outcome", "applied");
+  await expect(step(page, 3).locator(".session-outcome")).toHaveText("applied · real-signed, not stored");
+  await expect(step(page, 4)).toContainText("fork_allowRealSigners");
+  await step(page, 4).locator(".session-step-head").click();
+  await expect(step(page, 4).locator(".session-step-body")).toContainText("refused on mainnet");
+  expect((await forkInfo(page)).allowRealSigners).toBe(false);
   await expect(page.locator("#session-replayable")).toBeVisible();
   await expect(page.locator("#session-replayable")).toContainText(real.publicKey());
   await expect(page.locator("#session-verdict")).toContainText("FAILED");
+
+  // Neither the envelope nor the allowance is stored: a reload has only the payer.
+  await page.reload();
+  await expect(page.locator("#session-progress")).toContainText("Resumed: replayed 1 logged call", { timeout: 60_000 });
+  await expect(page.locator("#session-steps li")).toHaveCount(1);
+  expect((await forkInfo(page)).allowRealSigners).toBe(false);
+});
+
+test("declining in the wallet leaves real signers refused", async ({ page, context }) => {
+  test.setTimeout(180_000);
+  const real = Keypair.random();
+  await recordedRpc(context, TESTNET_RPC, withRealAccount(real).recording);
+  await recordedRpc(context, MAINNET_RPC, mainnetWithRealAccount(real).recording);
+  await realWallet(page, real, () => {
+    throw new Error("the user declined the request");
+  });
+  await fork(page, "mainnet");
+  await reviewWalletCall(page, real);
+  await page.locator("#replay-ack").check();
+  await page.locator("#confirm-submit").click();
+  await expect(page.locator("#submit-err")).toContainText("declined", { timeout: 60_000 });
+  await page.locator("#submit-dialog .dialog-close").click();
+
+  // Nothing was allowed: the only safety step refuses real signers again.
+  expect((await forkInfo(page)).allowRealSigners).toBe(false);
+  await expect(page.locator("#session-steps li")).toHaveCount(2);
+  await step(page, 2).locator(".session-step-head").click();
+  await expect(step(page, 2).locator(".session-step-body")).toContainText("refused on mainnet");
+});
+
+test("a wallet's Testnet envelope keeps its Testnet sequence after a session submit", async ({ page, context }) => {
+  test.setTimeout(240_000);
+  const real = Keypair.random();
+  const { recording, seq } = withRealAccount(real);
+  await recordedRpc(context, TESTNET_RPC, recording);
+  await realWallet(page, real, (envelope, passphrase) => {
+    const tx = TransactionBuilder.fromXdr(envelope, passphrase);
+    tx.sign(real);
+    return tx.toEnvelope().toXdr("base64");
+  });
+  await fork(page, "testnet");
+  await reviewWalletCall(page, real);
+  await page.locator("#replay-ack").check();
+  await page.locator("#confirm-submit").click();
+  await expect(page.locator("#submit-progress")).toContainText("Applied in the session", { timeout: 60_000 });
+  await page.locator("#submit-dialog .dialog-close").click();
+  // The session moved the account's sequence on; Testnet did not.
+  await expect(step(page, 2)).toHaveAttribute("data-outcome", "applied");
+
+  await reviewWalletCall(page, real);
+  const envelope = (await page.locator("#review-xdr").textContent())!;
+  const tx = TransactionBuilder.fromXdr(envelope, Networks.TESTNET) as Transaction;
+  expect(tx.sequence).toBe((seq + 1n).toString());
+});
+
+test("a session open in one tab does not open in another", async ({ page, context }) => {
+  test.setTimeout(120_000);
+  await recordedRpc(context, TESTNET_RPC, testnetFork());
+  await fork(page, "testnet");
+  const title = (await page.locator("#session-state").textContent())!;
+
+  // The second tab would reopen it on load; the first tab holds it.
+  const other = await context.newPage();
+  await other.goto("/");
+  await expect(other.locator("#session-err")).toContainText("open in another tab", { timeout: 60_000 });
+  await expect(other.locator("#session-state")).toHaveText("no session open");
+
+  // Closed in the first tab, it opens in the second.
+  await page.locator("#session-close").click();
+  await expect(page.locator("#session-state")).toHaveText("no session open");
+  await other.locator("#session-saved").getByRole("button", { name: "resume" }).click();
+  await expect(other.locator("#session-state")).toHaveText(title, { timeout: 60_000 });
 });

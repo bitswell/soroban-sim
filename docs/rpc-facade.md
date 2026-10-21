@@ -101,7 +101,7 @@ and each call that changes state is a step:
 | `fork_snapshot` | `label` | Returns an `id`. |
 | `fork_revert` | `id` | Undoes every transaction, override and clock move since. Later snapshots are dropped; this one stays, to revert to again. |
 | `fork_report` | | `passed`, `failures`, the JSON report and the Markdown, and the files written. |
-| `fork_info` | | Fork point, clock, counts, snapshots, the safety setting. |
+| `fork_info` | | Fork point, clock, counts, snapshots, the safety setting, and `replayable`: how many signatures valid on the real network the session has seen (refused or applied). |
 | `fork_allowRealSigners` | `allow` | Apply (or again refuse) envelopes a signer of the real network signed, from now on. A step records the change; the report still fails on any such signature on mainnet. |
 | `fork_steps` | | Every step in order: its report row, what it changed (each entry before and after), its envelope's authorization entries, and whether the debugger can trace it. |
 | `fork_debugContext` | `step` | What a debugger needs to trace a transaction step again: its host function and source, the ledger it applied in, and its footprint's entries just before it. |

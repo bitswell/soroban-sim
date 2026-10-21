@@ -86,7 +86,11 @@ session worker (session-worker.ts)
   the whole cache, and replays the log. The component is deterministic and
   envelopes carry their signatures, so the same log gives the same session
   without a network read. Nothing secret is stored: throwaway keys derive from
-  labels, and envelopes are public by design.
+  labels, and envelopes are public by design. An envelope a real key signed is
+  never logged, refused or applied, because the real network would accept
+  it. The timeline marks its step "real-signed, not stored" and offers no
+  copy of it, and a resumed session does not have it. `fork_allowRealSigners`
+  is not logged either, so a resumed session refuses real signers again.
 - **The service worker is a relay.** It holds no state, so the browser can
   stop it whenever it likes. It asks the tab that sent the request first,
   then any other tab of the app. The virtual RPC answers only while a tab
@@ -115,8 +119,11 @@ valid on that network as it stands.
   submit into a session, the review dialog says that the wallet's signature is
   valid on the real network. The button stays disabled until you acknowledge
   it. On a Mainnet fork the warning is about Mainnet and spending from your
-  real account, and acknowledging it allows real signers for the session
-  (`fork_allowRealSigners`). The report records that.
+  real account. The acknowledgement covers that one envelope: the session
+  allows real signers (`fork_allowRealSigners`) only once the wallet has
+  signed, and refuses them again after the send, even if the wallet declined.
+  That envelope expires five minutes after it is built. The report records
+  both safety steps.
 - **Mainnet refuses real signers otherwise.** Like `soroban-sim serve`, a
   Mainnet session refuses an envelope that a signer of the base ledger signed,
   with JSON-RPC error `-32001`. The timeline shows the step as refused. The
@@ -175,7 +182,8 @@ limits](rpc-facade.md#fidelity-and-limits)):
 - A step whose authorization uses address credentials replays in the debugger
   as a call tree only. The trace pass records auth, and recorded address
   signatures are blank (see `crates/soroban-sim-core/src/trace.rs`).
-- One session is open per tab. The virtual RPC answers only while that tab is
-  open.
+- One session is open per tab, and one tab per session: a Web Lock keeps a
+  session another tab holds from opening (or reopening on reload) here. The
+  virtual RPC answers only while that tab is open.
 - Wallets that relay their own transactions (Nido's C-account flow) cannot
   submit into a session.
