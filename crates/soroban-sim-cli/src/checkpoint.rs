@@ -23,6 +23,7 @@ use soroban_sim_core::session::{FetchedBatch, LedgerSource, StoredEntry};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::meta::{v2, Rollback};
 use crate::rpc::RpcClient;
@@ -30,6 +31,32 @@ use crate::rpc::RpcClient;
 /// How far behind RPC's latest ledger a pin may be: catching up reads the
 /// close meta of every ledger since (a few MB each on mainnet).
 pub const MAX_CATCH_UP_LEDGERS: u32 = 720;
+
+/// Waits before re-reading from an RPC node that answered from before the pin
+/// (load-balanced RPCs lag each other by a ledger or so; ledgers close every
+/// ~5 seconds).
+const LAG_RETRIES: [Duration; 4] = [Duration::from_secs(1), Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
+
+/// Run `read` until it answers at or after `pin`, waiting `retries` between
+/// attempts; an answer from before the pin cannot be rolled back to it.
+fn served_from_pin(pin: u32, retries: &[Duration], mut read: impl FnMut() -> Result<FetchedBatch>) -> Result<FetchedBatch> {
+    let mut batch = read()?;
+    for wait in retries {
+        if batch.served_at_ledger >= pin {
+            break;
+        }
+        std::thread::sleep(*wait);
+        batch = read()?;
+    }
+    if batch.served_at_ledger < pin {
+        bail!(
+            "RPC answered getLedgerEntries at ledger {} after {} retries, still before the pinned ledger {pin}; its value at the pin is unknown",
+            batch.served_at_ledger,
+            retries.len()
+        );
+    }
+    Ok(batch)
+}
 
 pub struct CheckpointSource {
     rpc: Rc<RpcClient>,
@@ -69,7 +96,7 @@ impl CheckpointSource {
         let source = Rc::new(Self { rpc, pin, rollback: RefCell::new(Rollback::new(pin)), cache: Default::default() });
         // The rent-rate window, read now while it is still the pin's.
         let window = LedgerKey::ConfigSetting(LedgerKeyConfigSetting { config_setting_id: ConfigSettingId::LiveSorobanStateSizeWindow });
-        let head = source.rpc.ledger_entries(std::slice::from_ref(&window))?;
+        let head = served_from_pin(pin, &LAG_RETRIES, || source.rpc.ledger_entries(std::slice::from_ref(&window)))?;
         let entry = head.entries.into_iter().next().ok_or_else(|| anyhow!("the network has no state-size window"))?;
         if entry.entry.last_modified_ledger_seq > pin {
             bail!(
@@ -111,7 +138,7 @@ impl LedgerSource for CheckpointLedger {
         let s = &self.0;
         let missing: Vec<LedgerKey> = keys.iter().filter(|k| !s.cache.borrow().contains_key(*k)).cloned().collect();
         if !missing.is_empty() {
-            let head = s.rpc.ledger_entries(&missing)?;
+            let head = served_from_pin(s.pin, &LAG_RETRIES, || s.rpc.ledger_entries(&missing))?;
             s.catch_up(head.served_at_ledger)?;
             let mut found: HashMap<LedgerKey, StoredEntry> = HashMap::new();
             for e in head.entries {
@@ -148,5 +175,51 @@ impl LedgerSource for CheckpointLedger {
 
     fn describe(&self) -> String {
         format!("RPC {} pinned at ledger {} (checkpoint: every read rolled back to it through later ledgers' close meta)", self.0.rpc.url, self.0.pin)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn batch(served_at_ledger: u32) -> FetchedBatch {
+        FetchedBatch { served_at_ledger, entries: vec![] }
+    }
+
+    #[test]
+    fn a_lagging_node_is_re_read_until_it_reaches_the_pin() {
+        let mut answers = vec![99, 99, 100].into_iter();
+        let mut reads = 0;
+        let got = served_from_pin(100, &[Duration::ZERO; 4], || {
+            reads += 1;
+            Ok(batch(answers.next().unwrap()))
+        })
+        .unwrap();
+        assert_eq!((got.served_at_ledger, reads), (100, 3));
+    }
+
+    #[test]
+    fn a_node_that_stays_behind_the_pin_fails_the_read() {
+        let mut reads = 0;
+        let err = match served_from_pin(100, &[Duration::ZERO; 2], || {
+            reads += 1;
+            Ok(batch(98))
+        }) {
+            Ok(_) => panic!("served a read from before the pin"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(reads, 3);
+        assert!(err.contains("ledger 98") && err.contains("pinned ledger 100"), "{err}");
+    }
+
+    #[test]
+    fn an_answer_at_or_after_the_pin_is_read_once() {
+        let mut reads = 0;
+        let got = served_from_pin(100, &[Duration::ZERO; 4], || {
+            reads += 1;
+            Ok(batch(103))
+        })
+        .unwrap();
+        assert_eq!((got.served_at_ledger, reads), (103, 1));
     }
 }
