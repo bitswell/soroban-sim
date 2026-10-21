@@ -5,15 +5,15 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use soroban_env_host::xdr::{
-    AccountEntry, AccountId, Asset, ChangeTrustAsset, ChangeTrustOp, ContractExecutable, ContractId, ContractIdPreimage,
-    ContractIdPreimageFromAddress, CreateAccountOp, CreateContractArgs, CreateContractArgsV2, Hash, HashIdPreimage,
-    HashIdPreimageContractId, HostFunction, InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerHeader, LedgerKey,
-    LedgerKeyContractCode, Limits, Memo, MuxedAccount, Operation, OperationBody, PaymentOp, Preconditions, PublicKey,
-    ReadXdr, ScAddress, ScString, ScSymbol, ScVal, SetOptionsOp, Signer, SignerKey, String32, Thresholds,
-    TransactionEnvelope, TransactionV1Envelope, Uint256, WriteXdr,
+    AccountId, Asset, ChangeTrustAsset, ChangeTrustOp, ContractExecutable, ContractIdPreimage,
+    ContractIdPreimageFromAddress, CreateAccountOp, CreateContractArgs, CreateContractArgsV2, Hash, HostFunction,
+    InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerHeader, LedgerKey, LedgerKeyContractCode, Limits, Memo,
+    MuxedAccount, Operation, OperationBody, PaymentOp, Preconditions, PublicKey, ReadXdr, ScAddress, ScString,
+    ScSymbol, ScVal, SetOptionsOp, Signer, SignerKey, String32, TransactionEnvelope, TransactionV1Envelope, Uint256,
+    WriteXdr,
 };
 use soroban_sim_core::session::{
-    account_key, host_protocol, muxed_account_id, new_account, op_result_name, show_scval, transaction_hash, AuthSigner,
+    account_key, host_protocol, muxed_account_id, op_result_name, show_scval, transaction_hash, AuthSigner,
     AuthSignerSource, ClassicRequest, Ed25519Key, EntryState, ExternalKey, ForkPoint, LedgerSource, OzDigest, OzSigner,
     PrepareRequest, Secp256r1Key, Session, SessionOptions, StoredEntry, TxRecord, TxStatus, ADDR_OZ_V1_DOMAIN,
 };
@@ -28,12 +28,13 @@ use crate::plan::{
 use crate::report::*;
 use crate::rpc::{RpcClient, RpcSource};
 use crate::snapshot::SnapshotFile;
-use crate::{differential, ENV_HOST_VERSION};
+use crate::differential;
 
 pub const MAINNET_RPC: &str = "https://mainnet.sorobanrpc.com";
 pub const TESTNET_RPC: &str = "https://soroban-testnet.stellar.org";
-pub const MAINNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
-pub const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
+pub use soroban_sim_facade::report::{build_report, session_fidelity, ReportContext, SAFETY_NOTE};
+pub use soroban_sim_facade::tx::contract_id;
+pub use soroban_sim_facade::{MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
 
 /// Where the fork comes from.
 pub enum Base {
@@ -1016,159 +1017,10 @@ impl Runner {
                 replayable,
                 safety_note: SAFETY_NOTE.into(),
                 differential: self.differentials.clone(),
-                rpc: self.rpc.as_deref(),
+                rpc_calls: self.rpc.as_ref().map_or(0, |r| r.calls()),
+                throttled_retries: self.rpc.as_ref().map_or(0, |r| r.throttled()),
             },
         )
-    }
-}
-
-/// What the rehearsal does and does not model, for every session report.
-pub fn session_fidelity() -> Vec<String> {
-    vec![
-        "Host-exact: contracts run in the same soroban-env-host as the network's protocol, in enforcing mode, with a module cache, and every auth signature is verified.".into(),
-        "Envelope-approximate: the transaction layer (sequence numbers, preconditions, signature weights and thresholds, fee bid, resource fee and limits, balance above reserve, fee charged before apply, rent and refund) is a port of stellar-core's checks, not core itself.".into(),
-        "Classic operations: CreateAccount, Payment (XLM and issued assets), SetOptions and ChangeTrust, ported from stellar-core v29 with its result codes and reserves. Several transactions share a ledger in core's order (one per source account, within the per-ledger limits, classic phase first, each phase shuffled by the transaction-set hash, every fee charged before any applies, the checks core repeats at apply, refunds last), and each gets core's PRNG seed for the session's own transaction set.".into(),
-        "Not modelled: fee-bump and muxed fee sources, surge pricing (the inclusion fee charged is the base fee per operation), core's parallel Soroban clusters (a ledger's Soroban phase is one cluster), and the other classic operations (path payments, offers, liquidity pools, claimable balances, clawback, creating sponsorships).".into(),
-        "The fork reads RPC's latest ledger lazily; drift below lists any entry that changed after the fork ledger.".into(),
-    ]
-}
-
-pub const SAFETY_NOTE: &str = "The session never submits anything, and rehearsal envelopes keep the real network id. Throwaway keys stand in for every real signer, so these envelopes are not valid on the real network unless a signer the network already has signed them.";
-
-/// Everything a session report says besides the session's own state.
-pub struct ReportContext<'a> {
-    pub plan: PlanInfo,
-    pub network: NetworkInfo,
-    pub fidelity: Vec<String>,
-    pub steps: Vec<StepReport>,
-    pub failures: Vec<String>,
-    /// Signatures valid on the real network, each prefixed with its step.
-    pub replayable: Vec<String>,
-    pub safety_note: String,
-    pub differential: Vec<DifferentialReport>,
-    /// The base RPC, for its call counters.
-    pub rpc: Option<&'a RpcClient>,
-}
-
-/// The report on `s`: its fork, fees, overrides, final diff, drift and safety.
-/// A replayable signature on mainnet is a failure.
-pub fn build_report(s: &Session, ctx: ReportContext<'_>) -> Report {
-    let fork = s.fork_point();
-    let log = s.log();
-    let mut by_payer: BTreeMap<String, PayerFees> = BTreeMap::new();
-    for t in log {
-        let Some(src) = &t.source else { continue };
-        if matches!(t.status, TxStatus::Rejected { .. }) {
-            continue;
-        }
-        let p = by_payer.entry(src.to_string()).or_insert_with(|| PayerFees { account: src.to_string(), transactions: 0, charged: 0, refunded: 0, max_fee_bid: 0 });
-        p.transactions += 1;
-        p.charged += t.fee_charged;
-        p.refunded += t.refund;
-        p.max_fee_bid = p.max_fee_bid.max(t.fees.bid);
-    }
-    let diff = s.ledger().diff();
-    let mut by_type = BTreeMap::new();
-    let mut entries = vec![];
-    let mut accounts = vec![];
-    let mut trustlines = vec![];
-    for d in &diff {
-        *by_type.entry(d.key.name().to_string()).or_insert(0) += 1;
-        entries.push(DiffReport {
-            key_type: d.key.name().into(),
-            key: describe_key(&d.key),
-            change: d.change().as_str().into(),
-            overridden: d.overridden,
-            live_until_before: d.before.as_ref().and_then(|e| e.live_until),
-            live_until_after: d.after.as_ref().and_then(|e| e.live_until),
-        });
-        if let LedgerKey::Account(a) = &d.key {
-            let acct = |e: &Option<StoredEntry>| match e {
-                Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::Account(a), .. }, .. }) => Some(a.clone()),
-                _ => None,
-            };
-            let (b, a2) = (acct(&d.before), acct(&d.after));
-            accounts.push(AccountChange {
-                account: a.account_id.to_string(),
-                balance_before: b.as_ref().map(|x| x.balance),
-                balance_after: a2.as_ref().map(|x| x.balance),
-                seq_before: b.as_ref().map(|x| x.seq_num.0),
-                seq_after: a2.as_ref().map(|x| x.seq_num.0),
-                changes: account_changes(b.as_ref(), a2.as_ref()),
-                overridden: d.overridden,
-            });
-        }
-        if let LedgerKey::Trustline(t) = &d.key {
-            let line = |e: &Option<StoredEntry>| match e {
-                Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::Trustline(l), .. }, .. }) => Some(l.clone()),
-                _ => None,
-            };
-            let (b, a2) = (line(&d.before), line(&d.after));
-            trustlines.push(TrustlineChange {
-                account: t.account_id.to_string(),
-                asset: crate::classic::trustline_asset_text(&t.asset),
-                balance_before: b.as_ref().map(|l| l.balance),
-                balance_after: a2.as_ref().map(|l| l.balance),
-                limit_before: b.as_ref().map(|l| l.limit),
-                limit_after: a2.as_ref().map(|l| l.limit),
-                authorized: a2.as_ref().map(|l| l.flags & 1 != 0),
-                overridden: d.overridden,
-            });
-        }
-    }
-    let fetches = s.ledger().fetches();
-    let stats = s.ledger().stats();
-    let drift = s.ledger().drift();
-    let mut failures = ctx.failures;
-    if !ctx.replayable.is_empty() && ctx.network.passphrase == MAINNET_PASSPHRASE {
-        failures.push(format!("{} signature(s) are valid on mainnet (see Safety)", ctx.replayable.len()));
-    }
-    let info = s.ledger_info();
-    Report {
-        format: REPORT_FORMAT,
-        plan: ctx.plan,
-        network: ctx.network,
-        fork: ForkInfo { ledger: fork.ledger_seq, close_time: fork.close_time, protocol_version: fork.protocol_version, base_fee: fork.base_fee, base_reserve: fork.base_reserve },
-        host: HostInfo { protocol_version: host_protocol(), soroban_env_host: ENV_HOST_VERSION },
-        fidelity: ctx.fidelity,
-        end: LedgerPoint { ledger: info.sequence_number, close_time: info.timestamp },
-        passed: failures.is_empty(),
-        failures,
-        steps: ctx.steps,
-        overrides: s
-            .ledger()
-            .overrides()
-            .iter()
-            .map(|o| OverrideReport { kind: o.kind.as_str().into(), entry: describe_key(&o.key), label: o.label.clone(), detail: o.detail.clone(), at_ledger: o.at_ledger })
-            .collect(),
-        fees: FeeSummary {
-            transactions: log.len(),
-            applied: log.iter().filter(|t| matches!(t.status, TxStatus::Applied { .. })).count(),
-            failed: log.iter().filter(|t| matches!(t.status, TxStatus::Failed { .. })).count(),
-            rejected: log.iter().filter(|t| matches!(t.status, TxStatus::Rejected { .. })).count(),
-            total_charged: log.iter().map(|t| t.fee_charged).sum(),
-            total_refunded: log.iter().map(|t| t.refund).sum(),
-            by_payer: by_payer.into_values().collect(),
-        },
-        accounts,
-        trustlines,
-        diff: DiffSummary { total: diff.len(), by_type, entries },
-        drift: DriftReport {
-            fork_ledger: fork.ledger_seq,
-            served_at_min: fetches.iter().map(|f| f.served_at_ledger).min(),
-            served_at_max: fetches.iter().map(|f| f.served_at_ledger).max(),
-            modified_after_fork: drift.iter().map(|f| DriftEntry { key: describe_key(&f.key), last_modified: f.last_modified, served_at: f.served_at_ledger }).collect(),
-        },
-        fetch: FetchStats {
-            rpc_calls: ctx.rpc.map_or(0, |r| r.calls()),
-            throttled_retries: ctx.rpc.map_or(0, |r| r.throttled()),
-            base_fetch_calls: stats.fetch_calls,
-            keys_fetched: stats.keys_fetched,
-            keys_present: fetches.iter().filter(|f| f.found).count() as u32,
-            local_answers: stats.local_answers,
-        },
-        safety: Safety { replayable: ctx.replayable, note: ctx.safety_note },
-        differential: ctx.differential,
     }
 }
 
@@ -1292,14 +1144,6 @@ fn key_material(name: &str, spec: &KeySpec) -> Result<KeyMaterial> {
     })
 }
 
-pub fn contract_id(network_id: [u8; 32], deployer: ScAddress, salt: [u8; 32]) -> Result<ScAddress> {
-    let pre = HashIdPreimage::ContractId(HashIdPreimageContractId {
-        network_id: Hash(network_id),
-        contract_id_preimage: ContractIdPreimage::Address(ContractIdPreimageFromAddress { address: deployer, salt: Uint256(salt) }),
-    });
-    Ok(ScAddress::Contract(ContractId(Hash(Sha256::digest(pre.to_xdr(Limits::none())?).into()))))
-}
-
 /// The text a saved value or `expect.equals` compares: an address's strkey, a
 /// string's or symbol's text, a number, hex bytes, or ScVal JSON.
 pub fn render(v: &ScVal) -> String {
@@ -1318,80 +1162,6 @@ pub fn render(v: &ScVal) -> String {
         ScVal::Void => String::new(),
         other => serde_json::to_string(other).unwrap_or_else(|_| show_scval(other)),
     }
-}
-
-pub(crate) fn tx_report(t: &TxRecord) -> TxReport {
-    TxReport {
-        hash: hex(&t.hash),
-        source: t.source.as_ref().map(|s| s.to_string()).unwrap_or_default(),
-        fee_bid: t.fees.bid,
-        resource_fee: t.fees.resource_fee,
-        non_refundable_fee: t.fees.non_refundable,
-        refundable_fee: t.fees.refundable,
-        inclusion_fee: t.fees.inclusion,
-        fee_charged: t.fee_charged,
-        refunded: t.refund,
-        rent_fee: t.rent_fee,
-        events_fee: t.events_fee,
-        cpu_insns: t.cpu_insns,
-        declared_cpu_insns: t.declared_insns,
-        mem_bytes: t.mem_bytes,
-        write_bytes: t.write_bytes,
-        declared_write_bytes: t.declared_write_bytes,
-        entries_written: t.entries_written,
-        restored: t.restored,
-        events: t.events.len(),
-        contract_errors: t.contract_errors(),
-        signers: t.signers.iter().map(|m| format!("{} for {} (weight {})", m.key, m.account, m.weight)).collect(),
-        replayable: t.replayable.clone(),
-        operations: t.op_results.iter().map(op_result_name).collect(),
-        application_order: t.application_order,
-        deferred: t.deferred.clone(),
-        failed_at_apply: t.failed_code.map(|c| c.as_str().to_string()),
-    }
-}
-
-/// What changed on an account besides its balance and sequence number. A
-/// new account is compared with the one core's CreateAccount makes.
-fn account_changes(before: Option<&AccountEntry>, after: Option<&AccountEntry>) -> Vec<String> {
-    let Some(after) = after else { return vec![] };
-    let fresh;
-    let before = match before {
-        Some(b) => b,
-        None => {
-            fresh = new_account(after.account_id.clone(), 0, 0);
-            &fresh
-        }
-    };
-    let mut out = vec![];
-    let t = |x: &Thresholds| x.0.iter().map(u8::to_string).collect::<Vec<_>>().join("/");
-    if before.thresholds != after.thresholds {
-        out.push(format!("thresholds (master/low/medium/high) {} → {}", t(&before.thresholds), t(&after.thresholds)));
-    }
-    let weight = |a: &AccountEntry, k: &SignerKey| a.signers.iter().find(|s| s.key == *k).map(|s| s.weight);
-    for s in after.signers.iter() {
-        match weight(before, &s.key) {
-            None => out.push(format!("signer {} added (weight {})", s.key, s.weight)),
-            Some(w) if w != s.weight => out.push(format!("signer {} weight {w} → {}", s.key, s.weight)),
-            Some(_) => {}
-        }
-    }
-    for s in before.signers.iter().filter(|s| weight(after, &s.key).is_none()) {
-        out.push(format!("signer {} removed", s.key));
-    }
-    if before.home_domain != after.home_domain {
-        out.push(format!("home domain {:?} → {:?}", before.home_domain.to_string(), after.home_domain.to_string()));
-    }
-    if before.flags != after.flags {
-        out.push(format!("flags {:#x} → {:#x}", before.flags, after.flags));
-    }
-    if before.inflation_dest != after.inflation_dest {
-        out.push(format!("inflation destination {} → {}", before.inflation_dest.as_ref().map_or("none".into(), |d| d.to_string()), after.inflation_dest.as_ref().map_or("none".into(), |d| d.to_string())));
-    }
-    if before.num_sub_entries != after.num_sub_entries {
-        out.push(format!("sub-entries {} → {}", before.num_sub_entries, after.num_sub_entries));
-    }
-    out
 }
 
 fn not_run(index: usize, label: &str, step: &Step) -> StepReport {

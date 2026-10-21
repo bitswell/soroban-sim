@@ -340,3 +340,63 @@ steps:
     assert_eq!(SnapshotFile::load(&saved).unwrap().fork.max_tx_set_size, Some(1));
     assert_eq!(ledgers(saved, None), 1);
 }
+
+/// The browser session tests' recorded testnet fork
+/// (packages/web-demo/tests/fixtures/testnet-fork.json) as a snapshot file.
+fn recorded_testnet_fork(dir: &Path) -> PathBuf {
+    use soroban_env_host::xdr::LedgerHeader;
+    let b64 = |s: &serde_json::Value| base64::engine::general_purpose::STANDARD.decode(s.as_str().unwrap()).unwrap();
+    let raw = std::fs::read_to_string(repo().join("packages/web-demo/tests/fixtures/testnet-fork.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let entries = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| StoredEntry {
+            entry: LedgerEntry {
+                last_modified_ledger_seq: e["lastModifiedLedgerSeq"].as_u64().unwrap() as u32,
+                data: LedgerEntryData::from_xdr(b64(&e["xdr"]), Limits::none()).unwrap(),
+                ext: LedgerEntryExt::V0,
+            },
+            live_until: e["liveUntilLedgerSeq"].as_u64().map(|l| l as u32),
+        })
+        .collect::<Vec<_>>();
+    let latest = &json["getLatestLedger"];
+    let header = LedgerHeader::from_xdr(b64(&latest["headerXdr"]), Limits::none()).unwrap();
+    let fork = ForkPoint {
+        ledger_seq: latest["sequence"].as_u64().unwrap() as u32,
+        close_time: header.scp_value.close_time.0,
+        protocol_version: latest["protocolVersion"].as_u64().unwrap() as u32,
+        base_reserve: header.base_reserve,
+        base_fee: header.base_fee,
+    };
+    let path = dir.join("testnet-fork.snapshot.json");
+    SnapshotFile::new(json["getNetwork"]["passphrase"].as_str().unwrap(), &fork, Some(header.max_tx_set_size), &entries).unwrap().save(&path).unwrap();
+    path
+}
+
+/// examples/session/two-step-add.yaml is the plan the browser session test
+/// imports. Over the same recorded fork the CLI gets the same contract and
+/// return value the browser timeline shows.
+#[test]
+fn the_two_step_example_runs_over_the_recorded_testnet_fork() {
+    let dir = scratch("two-step");
+    let report = Runner::new(RunConfig {
+        plan_path: repo().join("examples/session/two-step-add.yaml"),
+        base: Some(Base::Snapshot(recorded_testnet_fork(&dir))),
+        wasm_dirs: vec![],
+        differential: false,
+        keep_going: false,
+        vars: BTreeMap::new(),
+        progress: false,
+    })
+    .unwrap()
+    .run(None)
+    .unwrap();
+    assert!(report.passed, "{:#?}", report.failures);
+    let outcomes: Vec<&str> = report.steps.iter().map(|s| s.outcome.as_str()).collect();
+    assert_eq!(outcomes, ["refused", "applied", "applied", "applied"]);
+    // The web demo's session test expects this address and value.
+    assert_eq!(report.steps[2].value.as_deref(), Some("CDGPQAE2PZSEDRAYUAZMKIB7NXM3IOP3BQACPGPANKLK3BP6OBPADKRW"), "{:?}", report.steps[2]);
+    assert_eq!(report.steps[3].value.as_deref(), Some("42"));
+}

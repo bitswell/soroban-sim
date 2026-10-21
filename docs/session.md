@@ -328,6 +328,8 @@ ledgers; the drift report shows whether it did.
 
 The same session also runs behind an RPC facade, `soroban-sim serve --fork …`,
 so existing scripts and stock tools rehearse themselves unchanged
-([`docs/rpc-facade.md`](rpc-facade.md)). Later phases (see #23): a browser
-session resource, replaying real mainnet transactions from their meta, and an
-exact history-archive checkpoint fork.
+([`docs/rpc-facade.md`](rpc-facade.md)), and in the browser, where the web
+demo serves it to stellar-sdk at a virtual RPC URL
+([`docs/browser-session.md`](browser-session.md)). Later phases (see #23):
+replaying real mainnet transactions from their meta, and an exact
+history-archive checkpoint fork.

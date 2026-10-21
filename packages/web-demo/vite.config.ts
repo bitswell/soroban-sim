@@ -16,4 +16,15 @@ export default defineConfig({
   worker: {
     format: "es",
   },
+  // Workers load the component glue after the page, so Vite would discover
+  // its WASI shims (and the plan importer's YAML parser) late, re-optimize,
+  // and reload every open page. Bundle them up front.
+  optimizeDeps: {
+    include: [
+      "@theahaco/soroban-sim > @bytecodealliance/preview2-shim/cli",
+      "@theahaco/soroban-sim > @bytecodealliance/preview2-shim/clocks",
+      "@theahaco/soroban-sim > @bytecodealliance/preview2-shim/io",
+      "yaml",
+    ],
+  },
 });

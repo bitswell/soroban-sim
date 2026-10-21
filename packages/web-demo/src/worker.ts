@@ -53,6 +53,7 @@ import {
   TESTNET_RPC_URL,
 } from "./fixtures.js";
 import type {
+  DebugContextMsg,
   DebugFrame,
   DebugMsg,
   DebugStep,
@@ -553,12 +554,41 @@ function correlateTrace(
 }
 
 async function handleDebug(msg: DebugMsg): Promise<void> {
+  const ctx = debugContexts.get(msg.id);
+  if (!ctx) {
+    post({ type: "debug-error", id: msg.id, message: "this run is no longer debuggable — run it again first" });
+    return;
+  }
+  await traceDebugContext(msg.id, ctx);
+}
+
+/** A network-session step, traced from the entries the session supplied. */
+async function handleDebugContext(msg: DebugContextMsg): Promise<void> {
+  await traceDebugContext(msg.id, {
+    networkPassphrase: msg.networkPassphrase,
+    ledgerContext: {
+      protocolVersion: msg.ledgerContext.protocolVersion,
+      sequenceNumber: msg.ledgerContext.sequenceNumber,
+      timestamp: BigInt(msg.ledgerContext.timestamp),
+      networkId: hexToBytes(msg.ledgerContext.networkId),
+      baseReserve: msg.ledgerContext.baseReserve,
+      minTempEntryTtl: msg.ledgerContext.minTempEntryTtl,
+      minPersistentEntryTtl: msg.ledgerContext.minPersistentEntryTtl,
+      maxEntryTtl: msg.ledgerContext.maxEntryTtl,
+    },
+    hostFunctionXdr: b64ToBytes(msg.hostFunctionXdr),
+    sourceAccountXdr: b64ToBytes(msg.sourceAccountXdr),
+    entries: msg.entries.map((e) => ({
+      keyXdr: b64ToBytes(e.keyXdr),
+      entryXdr: b64ToBytes(e.entryXdr),
+      ...(e.liveUntilLedger !== null ? { liveUntilLedger: e.liveUntilLedger } : {}),
+    })),
+  });
+}
+
+async function traceDebugContext(id: number, ctx: DebugContext): Promise<void> {
   const started = performance.now();
   try {
-    const ctx = debugContexts.get(msg.id);
-    if (!ctx) {
-      throw new Error("this run is no longer debuggable — run it again first");
-    }
     // Everything the run needed is accumulated; seed it all so the trace pass
     // replays without touching the network. Any residual absent keys resolve
     // instantly from the in-memory provider's absent policy.
@@ -600,7 +630,7 @@ async function handleDebug(msg: DebugMsg): Promise<void> {
     const last = steps.length > 0 ? steps[steps.length - 1]! : undefined;
     post({
       type: "debug-result",
-      id: msg.id,
+      id,
       ...(traced.traceUnavailableReason !== undefined
         ? { reason: traced.traceUnavailableReason }
         : {}),
@@ -613,7 +643,7 @@ async function handleDebug(msg: DebugMsg): Promise<void> {
   } catch (error) {
     post({
       type: "debug-error",
-      id: msg.id,
+      id,
       message: error instanceof Error ? error.message : String(error),
     });
   }
@@ -1557,6 +1587,9 @@ self.onmessage = (event: MessageEvent<MainToWorker>) => {
       return;
     case "debug":
       void handleDebug(msg);
+      return;
+    case "debug-context":
+      void handleDebugContext(msg);
       return;
     case "upload-parse":
       void handleUploadParse(msg);

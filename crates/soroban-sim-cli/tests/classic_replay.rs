@@ -36,7 +36,7 @@ use soroban_env_host::xdr::{
 };
 use soroban_sim_cli::rpc::RpcClient;
 use soroban_sim_cli::run::{MAINNET_PASSPHRASE, MAINNET_RPC};
-use soroban_sim_cli::serve::tx;
+use soroban_sim_facade::tx;
 use soroban_sim_core::ledger_entry_to_ledger_key;
 use soroban_sim_core::session::{
     account_key, classic_op_supported, host_protocol, issuer, muxed_account_id, network_id, trustline_key, ForkPoint,

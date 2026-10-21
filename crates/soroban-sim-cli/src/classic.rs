@@ -1,8 +1,8 @@
-//! Plan-file and report text for classic operations: amounts with seven
-//! decimal places, `CODE:ISSUER` assets, account flag names.
+//! Plan-file text for classic operations: amounts with seven decimal places,
+//! `CODE:ISSUER` assets, account flag names.
 
 use anyhow::{anyhow, bail, Result};
-use soroban_env_host::xdr::{AccountId, AlphaNum12, AlphaNum4, Asset, AssetCode12, AssetCode4, TrustLineAsset};
+use soroban_env_host::xdr::{AccountId, AlphaNum12, AlphaNum4, Asset, AssetCode12, AssetCode4};
 
 use crate::plan::FlagsSpec;
 
@@ -49,17 +49,6 @@ pub fn asset(text: &str) -> Result<Asset> {
         }
         _ => bail!("asset code {code:?} must have 1 to 12 characters"),
     })
-}
-
-/// `CODE:ISSUER`, `native`, or a pool share's id.
-pub fn trustline_asset_text(a: &TrustLineAsset) -> String {
-    let code = |c: &[u8]| String::from_utf8_lossy(c).trim_end_matches('\0').to_string();
-    match a {
-        TrustLineAsset::Native => "native".into(),
-        TrustLineAsset::CreditAlphanum4(x) => format!("{}:{}", code(&x.asset_code.0), x.issuer),
-        TrustLineAsset::CreditAlphanum12(x) => format!("{}:{}", code(&x.asset_code.0), x.issuer),
-        TrustLineAsset::PoolShare(id) => format!("pool share {}", crate::report::hex(&id.0 .0)),
-    }
 }
 
 /// Account flags by name or as bits.

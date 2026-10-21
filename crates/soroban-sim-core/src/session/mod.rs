@@ -30,7 +30,10 @@ mod signers;
 mod validator;
 
 pub use applier::{Applied, Applier};
-pub use classic::{asset_valid, initial_result, is_supported as classic_op_supported, issuer, result_name as op_result_name, trustline_key};
+pub use classic::{
+    asset_valid, initial_result, is_supported as classic_op_supported, issuer, op_keys as classic_op_keys, result_name as op_result_name,
+    trustline_key,
+};
 pub use close::{core_prng_seed, LedgerLimits, SorobanResources};
 pub use ledger::{
     account_key, ed25519_account_id, new_account, strkey_ed25519, Change, DiffEntry, EntryChange, EntryState,

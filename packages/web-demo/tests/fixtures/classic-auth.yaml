@@ -1,0 +1,31 @@
+# Classic authorization in the browser plan runner: alice authorizes a native
+# token transfer that carol sends and pays for, so alice's authorization entry
+# carries her (throwaway) signature and carol signs the envelope.
+name: classic auth
+options:
+  source: "${key.carol}"
+keys:
+  alice: ed25519
+  carol: ed25519
+signers:
+  "${key.alice}": { classic: [alice] }
+vars:
+  xlm_sac: CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+setup:
+  - fund: { account: "${key.alice}", xlm: 100 }
+  - fund: { account: "${key.carol}", xlm: 100 }
+steps:
+  - name: deploy the native asset contract
+    deploy_sac: native
+  - name: alice pays carol 1 XLM
+    invoke:
+      contract: "${xlm_sac}"
+      fn: transfer
+      args: [{ address: "${key.alice}" }, { address: "${key.carol}" }, { i128: "10000000" }]
+  - name: carol cannot spend alice's XLM without her signature
+    invoke:
+      contract: "${xlm_sac}"
+      fn: transfer
+      args: [{ address: "${key.alice}" }, { address: "${key.carol}" }, { i128: "10000000" }]
+    auth: { "${key.alice}": { classic: [carol] } }
+    expect: { fails: true }

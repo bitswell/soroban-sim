@@ -11,6 +11,11 @@ network ([#23], phase 3).
 
 [#23]: https://github.com/theahaco/soroban-sim/issues/23
 
+The request handling lives in `crates/soroban-sim-facade`, without a
+transport. `serve` adds HTTP, progress lines and the report files. The
+browser session answers its virtual RPC URL with the same crate
+([`docs/browser-session.md`](browser-session.md)).
+
 ## Quick start
 
 ```sh
@@ -98,7 +103,10 @@ and each call that changes state is a step:
 | `fork_snapshot` | `label` | Returns an `id`. |
 | `fork_revert` | `id` | Undoes every transaction, override and clock move since. Later snapshots are dropped; this one stays, to revert to again. |
 | `fork_report` | | `passed`, `failures`, the JSON report and the Markdown, and the files written. |
-| `fork_info` | | Fork point, clock, counts, snapshots, the held ledger's transactions, the safety setting. |
+| `fork_info` | | Fork point, clock, counts, snapshots, the held ledger's transactions, the safety setting, and `replayable`: how many signatures valid on the real network the session has seen (refused, rejected or applied). A Mainnet session refuses such an envelope even when it would be rejected anyway. |
+| `fork_allowRealSigners` | `allow` | Apply (or again refuse) envelopes a signer of the real network signed, from now on. A step records the change; the report still fails on any such signature on mainnet. |
+| `fork_steps` | | Every step in order: its report row, what it changed (each entry before and after), its envelope's authorization entries, and whether the debugger can trace it. |
+| `fork_debugContext` | `step` | What a debugger needs to trace a transaction step again: its host function and source, the ledger it applied in, and its footprint's entries just before it (for a transaction of a held ledger, as the ledger started). |
 
 The clock cannot move back, and it does not move while a held ledger has
 transactions waiting (`fork_advanceLedgers`, `fork_setTime` and `fork_snapshot`
@@ -118,7 +126,9 @@ the report. `--allow-real-signers` applies it anyway, and the report still
 fails. On other networks the envelope is applied and listed. The check covers
 envelope signatures and G-account authorization-entry signatures, including
 CAP-71 delegates, against the signers on the base ledger (the
-[session's safety check](session.md#safety)).
+[session's safety check](session.md#safety)). It runs whatever the verdict,
+so it also covers envelopes the session rejects, v0 and fee-bump envelopes
+included.
 
 ## Fidelity and limits
 

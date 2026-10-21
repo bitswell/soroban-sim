@@ -1,11 +1,14 @@
 import "./styles.css";
 import {
   Networks,
+  Operation,
   rpc,
   StrKey,
   type Transaction,
   TransactionBuilder,
 } from "@stellar/stellar-sdk";
+import type { StepDebugContext } from "@theahaco/soroban-sim";
+import { MAINNET_PASSPHRASE } from "@theahaco/soroban-sim/browser";
 import {
   FIXTURES,
   fixtureById,
@@ -28,6 +31,7 @@ import {
   type TestnetIdentity,
 } from "./testnet-identity.js";
 import type { ConnectedWallet } from "./wallet.js";
+import { SessionHost } from "./session-ui.js";
 
 // ---- element handles -------------------------------------------------------
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -189,6 +193,12 @@ const reviewXdr = $("review-xdr");
 const submitErr = $("submit-err");
 const submitProgress = $("submit-progress");
 const confirmSubmitBtn = $<HTMLButtonElement>("confirm-submit");
+const submitWarning = $("submit-warning");
+const submitTarget = $("submit-target");
+const replayWarning = $("replay-warning");
+const replayWarningText = $("replay-warning-text");
+const replayAck = $<HTMLInputElement>("replay-ack");
+const identityPill = document.querySelector<HTMLElement>(".identity-card .network-pill");
 
 /** Per-transaction host budget caps (soroban-env-host, protocol 29). */
 const CPU_CAP = 100_000_000;
@@ -228,18 +238,34 @@ function shortAddress(address: string): string {
   return `${address.slice(0, 8)}…${address.slice(-8)}`;
 }
 
+/**
+ * With a network session open, the local identity is the session's throwaway
+ * fee payer: a key no real network knows, funded in the session by an
+ * override. Signing defaults to it.
+ */
+function localAccount(): string {
+  return sessionHost?.summary?.payer ?? localIdentity.publicKey;
+}
+
 function selectedAuthorizer(): string {
   return identityMode === "wallet" && connectedWallet
     ? connectedWallet.address
-    : localIdentity.publicKey;
+    : localAccount();
 }
 
 function selectedFeePayer(): string | undefined {
-  if (identityMode === "local") return localIdentity.publicKey;
+  if (identityMode === "local") return localAccount();
   if (!connectedWallet) return undefined;
   return StrKey.isValidEd25519PublicKey(connectedWallet.address)
     ? connectedWallet.address
-    : localIdentity.publicKey;
+    : localAccount();
+}
+
+/** stellar-sdk pointed at the open session's virtual RPC URL. */
+async function sessionRpc(): Promise<rpc.Server | undefined> {
+  if (!sessionHost?.summary) return undefined;
+  const url = await sessionHost.virtualRpc();
+  return new rpc.Server(url, { allowHttp: url.startsWith("http:") });
 }
 
 function suggestAuthorizer(): void {
@@ -254,16 +280,26 @@ function renderIdentity(): void {
   identityWallet.setAttribute("aria-pressed", String(identityMode === "wallet"));
   localIdentityView.hidden = identityMode !== "local";
   walletIdentityView.hidden = identityMode !== "wallet";
-  localIdentityAddress.textContent = localIdentity.publicKey;
-  localIdentityAddress.title = localIdentity.publicKey;
-  localIdentityDot.className = `identity-dot${localIdentityFunded ? " ready" : ""}`;
-  localIdentityStatus.textContent = localIdentityFunded
-    ? "Funded on Testnet · ready to pay fees"
-    : "Not funded · local simulation can run, but no transaction can be submitted";
-  fundIdentityBtn.disabled = localIdentityFunded;
-  fundIdentityBtn.textContent = localIdentityFunded
-    ? "Funded by Friendbot ✓"
-    : "Fund with Friendbot";
+  const session = sessionHost?.summary;
+  localIdentityAddress.textContent = localAccount();
+  localIdentityAddress.title = localAccount();
+  if (identityPill) identityPill.textContent = session ? `${session.networkName} session` : "Testnet only";
+  if (session) {
+    localIdentityDot.className = "identity-dot ready";
+    localIdentityStatus.textContent =
+      "Throwaway account of the open session · funded there by an override · unknown to any real network";
+    fundIdentityBtn.hidden = true;
+  } else {
+    fundIdentityBtn.hidden = false;
+    localIdentityDot.className = `identity-dot${localIdentityFunded ? " ready" : ""}`;
+    localIdentityStatus.textContent = localIdentityFunded
+      ? "Funded on Testnet · ready to pay fees"
+      : "Not funded · local simulation can run, but no transaction can be submitted";
+    fundIdentityBtn.disabled = localIdentityFunded;
+    fundIdentityBtn.textContent = localIdentityFunded
+      ? "Funded by Friendbot ✓"
+      : "Fund with Friendbot";
+  }
 
   walletDisconnected.hidden = connectedWallet !== undefined;
   walletConnected.hidden = connectedWallet === undefined;
@@ -277,6 +313,8 @@ function renderIdentity(): void {
   if (identityMode === "wallet" && !connectedWallet) {
     simulationSource.textContent =
       "Connect a wallet to suggest its address in contract arguments and prepare a signable envelope.";
+  } else if (session && identityMode === "local") {
+    simulationSource.textContent = `Session fee payer ${shortAddress(localAccount())} · preflight runs against Testnet state; submission prepares the call again against the session.`;
   } else if (!localIdentityFunded && feePayer === localIdentity.publicKey) {
     simulationSource.textContent =
       "Simulation can use a public placeholder. Fund the local account to run the exact envelope that can be submitted.";
@@ -288,9 +326,12 @@ function renderIdentity(): void {
   }
 }
 
-async function accountSequence(address: string): Promise<string | undefined> {
+async function accountSequence(
+  address: string,
+  server: rpc.Server = testnetRpc,
+): Promise<string | undefined> {
   try {
-    return (await testnetRpc.getAccount(address)).sequenceNumber();
+    return (await server.getAccount(address)).sequenceNumber();
   } catch {
     return undefined;
   }
@@ -301,7 +342,10 @@ async function exactSource(): Promise<
 > {
   const address = selectedFeePayer();
   if (!address) return undefined;
-  const sequence = await accountSequence(address);
+  // The session's throwaway payer exists only in the session; any other fee
+  // payer's sequence is Testnet's, which a Testnet broadcast needs.
+  const server = address === sessionHost?.summary?.payer ? (await sessionRpc())! : testnetRpc;
+  const sequence = await accountSequence(address, server);
   if (!sequence) return undefined;
   if (address === localIdentity.publicKey && !localIdentityFunded) {
     localIdentityFunded = true;
@@ -420,6 +464,10 @@ let activeContractInvocation:
   | { contractId: string; fn: string; authorizer: string }
   | undefined;
 let submitting = false;
+let sessionHost: SessionHost | undefined;
+let sessionDebugId: number | undefined;
+let nextSessionDebugId = -1;
+let openSessionId: string | undefined;
 
 // upload-any-contract state
 let uploadInfo: UploadInfoMsg | undefined;
@@ -502,6 +550,10 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
       return;
     }
     case "debug-result": {
+      if (msg.id === sessionDebugId) {
+        openDebugger(msg);
+        return;
+      }
       if (msg.id !== debuggableRunId) return;
       debugPending = false;
       debugRunBtn.disabled = false;
@@ -510,7 +562,7 @@ function onWorkerMessage(msg: WorkerToMain, mayRunGolden: boolean): void {
       return;
     }
     case "debug-error": {
-      if (msg.id !== debuggableRunId) return;
+      if (msg.id !== debuggableRunId && msg.id !== sessionDebugId) return;
       debugPending = false;
       debugRunBtn.disabled = false;
       debugRunBtn.textContent = "Open execution trace";
@@ -1315,6 +1367,52 @@ function renderSubmissionRequirements(
     : "This run used a public placeholder source. Fund or connect a Testnet G-account, then simulate again to produce a signable envelope.";
 }
 
+/** How long an envelope a real wallet signs for a Mainnet session stays valid. */
+const REAL_SIGNING_WINDOW_SECONDS = 300;
+
+function submitTargetIsSession(): boolean {
+  if (!sessionHost?.summary) return false;
+  const checked = submitTarget.querySelector<HTMLInputElement>('input[name="submit-target"]:checked');
+  return checked?.value !== "testnet";
+}
+
+/**
+ * The review dialog's target: Testnet (a real broadcast) or the open network
+ * session. A real wallet signing into a session gets a replay warning it must
+ * acknowledge: the session keeps the real passphrase, so that signature is
+ * valid on the real network.
+ */
+function renderSubmitTarget(): void {
+  const session = sessionHost?.summary;
+  submitTarget.hidden = !session;
+  // The session's throwaway payer exists only in the session.
+  const testnetChoice = submitTarget.querySelector<HTMLInputElement>('input[value="testnet"]')!;
+  testnetChoice.disabled = Boolean(session) && identityMode === "local";
+  if (testnetChoice.disabled && testnetChoice.checked) {
+    submitTarget.querySelector<HTMLInputElement>('input[value="session"]')!.checked = true;
+  }
+  const intoSession = submitTargetIsSession();
+  submitWarning.textContent = intoSession
+    ? `Local simulation is finished. The call is prepared again against the ${session!.networkName} session's state, signed, and submitted into the session through its virtual RPC. Nothing is broadcast.`
+    : "Local simulation is finished. The next action can open a wallet and broadcast a real Testnet transaction.";
+  const realWallet = intoSession && identityMode === "wallet" && connectedWallet !== undefined;
+  replayWarning.hidden = !realWallet;
+  if (realWallet) {
+    const mainnet = session!.passphrase === MAINNET_PASSPHRASE;
+    replayWarningText.textContent = mainnet
+      ? `This session keeps the Mainnet passphrase. ${connectedWallet!.name} signs with your real key, so the envelope is valid on Mainnet: anyone who sees it can submit it there, spending from your real account. Use the session's throwaway account (Local test account) to rehearse without that risk.`
+      : `${connectedWallet!.name} signs with your real key, and the session keeps the ${session!.networkName} passphrase, so the envelope is valid on ${session!.networkName} as it stands. The session's throwaway account avoids that.`;
+  } else {
+    replayAck.checked = false;
+  }
+  confirmSubmitBtn.disabled = submitting || (realWallet && !replayAck.checked);
+  confirmSubmitBtn.textContent = intoSession
+    ? realWallet
+      ? "Sign with the real wallet & submit into the session"
+      : "Sign with the throwaway key & submit into the session"
+    : "Sign & submit to Testnet";
+}
+
 function openSubmissionReview(): void {
   if (!preparedTransactionXdr || !preparedContext) return;
   reviewCall.textContent = `${shortAddress(preparedContext.contractId)} · ${preparedContext.fn}(…)`;
@@ -1324,9 +1422,75 @@ function openSubmissionReview(): void {
   reviewXdr.textContent = preparedTransactionXdr;
   submitErr.hidden = true;
   submitProgress.hidden = true;
-  confirmSubmitBtn.disabled = false;
-  confirmSubmitBtn.textContent = "Sign & submit to Testnet";
+  replayAck.checked = false;
+  renderSubmitTarget();
   submitDialog.showModal();
+}
+
+submitTarget.addEventListener("change", renderSubmitTarget);
+replayAck.addEventListener("change", renderSubmitTarget);
+
+/**
+ * Submit the reviewed call into the open session with stock stellar-sdk code
+ * pointed at the session's virtual RPC URL: prepareTransaction simulates it
+ * against the session's state, the throwaway key (or the wallet) signs, and
+ * sendTransaction applies it there.
+ */
+async function submitIntoSession(): Promise<string> {
+  const session = sessionHost!.summary!;
+  const server = (await sessionRpc())!;
+  const prepared = TransactionBuilder.fromXdr(preparedTransactionXdr!, Networks.TESTNET) as Transaction;
+  const call = prepared.operations[0];
+  if (call?.type !== "invokeHostFunction") throw new Error("the prepared envelope holds no contract call");
+  const feePayer = selectedFeePayer();
+  if (!feePayer) throw new Error("connect a wallet or use the session's throwaway account");
+  const wallet = identityMode === "wallet" ? connectedWallet : undefined;
+  const realOnMainnet = wallet !== undefined && session.passphrase === MAINNET_PASSPHRASE;
+  // The envelope stays valid on Mainnet for five minutes of real time, so the
+  // session must not be judging it at a later time than that.
+  if (realOnMainnet && session.next.closeTime > Math.floor(Date.now() / 1000) + REAL_SIGNING_WINDOW_SECONDS) {
+    throw new Error(
+      "this session's clock is ahead of real time; real-wallet signing is only allowed while the session clock is within 5 minutes of now - use a throwaway key",
+    );
+  }
+  submitProgress.textContent = "Preparing the call against the session's state…";
+  const account = await server.getAccount(feePayer).catch(() => {
+    throw new Error(`${shortAddress(feePayer)} has no account in the session; fund it with an override first`);
+  });
+  const unsigned = new TransactionBuilder(account, { fee: "100", networkPassphrase: session.passphrase })
+    .addOperation(Operation.invokeHostFunction({ func: call.func, auth: [] }))
+    // A real key's signature makes the envelope valid on Mainnet: five minutes, not forever.
+    .setTimeout(realOnMainnet ? REAL_SIGNING_WINDOW_SECONDS : 0)
+    .build();
+  let transaction = await server.prepareTransaction(unsigned);
+  try {
+    if (wallet) {
+      submitProgress.textContent = `Waiting for ${wallet.name} approval…`;
+      const { signWithWallet } = await import("./wallet.js");
+      const signed = await signWithWallet(transaction.toEnvelope().toXdr("base64"), wallet.address, session.passphrase);
+      if (signed.submitted) {
+        throw new Error(`${wallet.name} relays its own transactions, so it cannot submit into a session`);
+      }
+      transaction = TransactionBuilder.fromXdr(signed.signedTxXdr, session.passphrase) as Transaction;
+      if (StrKey.isValidContract(wallet.address)) transaction.sign(sessionHost!.payerKeypair());
+      // Acknowledged in the dialog, for this envelope only: the report lists it.
+      if (realOnMainnet) await sessionHost!.call("fork_allowRealSigners", { allow: true });
+    } else {
+      submitProgress.textContent = "Signing with the session's throwaway key…";
+      transaction.sign(sessionHost!.payerKeypair());
+    }
+    submitProgress.textContent = "Submitting into the session…";
+    const sent = await server.sendTransaction(transaction);
+    if (sent.status !== "PENDING") throw new Error(`the session answered ${sent.status} for ${shortAddress(sent.hash)}`);
+    const got = await server.getTransaction(sent.hash);
+    if (got.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+      throw new Error(`the transaction failed in the session (${shortAddress(sent.hash)}); see the step timeline`);
+    }
+    return sent.hash;
+  } finally {
+    if (realOnMainnet) await sessionHost!.call("fork_allowRealSigners", { allow: false });
+    await sessionHost!.refresh();
+  }
 }
 
 async function waitForTransaction(hash: string): Promise<void> {
@@ -1347,6 +1511,23 @@ async function signAndSubmitPrepared(): Promise<void> {
   confirmSubmitBtn.disabled = true;
   submitErr.hidden = true;
   submitProgress.hidden = false;
+  if (submitTargetIsSession()) {
+    try {
+      const hash = await submitIntoSession();
+      submitProgress.textContent = `Applied in the session · ${hash}`;
+      submitStatus.textContent = "applied in the network session";
+      submissionBoundary.textContent = `Applied in the session as ${hash}; nothing was broadcast.`;
+      confirmSubmitBtn.textContent = "Applied ✓";
+    } catch (error) {
+      submitErr.hidden = false;
+      submitErr.textContent = error instanceof Error ? error.message : String(error);
+      submitProgress.hidden = true;
+      confirmSubmitBtn.disabled = false;
+    } finally {
+      submitting = false;
+    }
+    return;
+  }
   try {
     let hash: string | undefined;
     let transaction: Transaction | undefined;
@@ -2379,3 +2560,21 @@ renderFixtures();
 renderReqNote();
 syncRunAvailability();
 spawnWorker(true);
+
+// ---- network session --------------------------------------------------------
+sessionHost = new SessionHost({
+  debugStep(context: StepDebugContext): void {
+    sessionDebugId = nextSessionDebugId--;
+    worker.postMessage({ type: "debug-context", id: sessionDebugId, ...context });
+  },
+  onChange(summary): void {
+    // Opening or closing a session changes the fee payer: the prepared
+    // envelope no longer matches it.
+    if (summary?.id !== openSessionId) {
+      openSessionId = summary?.id;
+      suggestAuthorizer();
+      invalidateRunUI();
+    }
+    renderIdentity();
+  },
+});
