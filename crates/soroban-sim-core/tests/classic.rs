@@ -746,3 +746,85 @@ fn an_error_in_a_later_ledger_undoes_the_whole_batch() {
     assert!(matches!(r.status, TxStatus::Applied { .. }), "{}", r.status.summary());
     assert_eq!(balance(&s, &bob()), before.2 + XLM);
 }
+
+// --- fee bumps ---
+
+/// `inner` fee-bumped by `payer` (signed by `key`) with an outer fee of `fee`.
+fn fee_bump(inner: &soroban_env_host::xdr::TransactionEnvelope, payer: &AccountId, key: &Ed25519Key, fee: i64) -> soroban_env_host::xdr::TransactionEnvelope {
+    use soroban_env_host::xdr::{FeeBumpTransaction, FeeBumpTransactionEnvelope, FeeBumpTransactionExt, FeeBumpTransactionInnerTx, TransactionEnvelope};
+    let TransactionEnvelope::Tx(e) = inner else { panic!("v1 envelope") };
+    let PublicKey::PublicKeyTypeEd25519(k) = &payer.0;
+    let tx = FeeBumpTransaction { fee_source: MuxedAccount::Ed25519(k.clone()), fee, inner_tx: FeeBumpTransactionInnerTx::Tx(e.clone()), ext: FeeBumpTransactionExt::V0 };
+    let hash = fee_bump_hash(&tx, network_id(PASSPHRASE)).unwrap();
+    TransactionEnvelope::TxFeeBump(FeeBumpTransactionEnvelope { tx, signatures: vec![key.sign_decorated(&hash)].try_into().unwrap() })
+}
+
+#[test]
+fn a_fee_bumped_classic_transaction_is_paid_by_its_fee_source() {
+    use soroban_env_host::xdr::{InnerTransactionResultResult, TransactionResultResult};
+    let mut s = session();
+    let key = rehearse_alice(&s);
+    let carol = funded(&mut s, &key, "carol", 10);
+    let dave = Ed25519Key::throwaway("dave").account_id();
+    let c = carol.account_id();
+    let (alice_before, carol_before, carol_seq) = (balance(&s, &alice()), balance(&s, &c), seq(&s, &c));
+
+    // carol creates dave; alice pays the fee: 100 per operation, plus one for the bump.
+    let inner = envelope(&s, &c, std::slice::from_ref(&carol), vec![op(create_account(&dave, 2 * XLM))]);
+    let r = s.submit("bumped create", &fee_bump(&inner, &alice(), &key, 200)).unwrap();
+    applied(&r);
+    assert_eq!((r.fee_charged, r.fee_source.as_ref(), r.source.as_ref()), (200, Some(&alice()), Some(&c)));
+    assert_eq!(balance(&s, &alice()), alice_before - 200);
+    assert_eq!(balance(&s, &c), carol_before - 2 * XLM, "carol pays no fee");
+    assert_eq!(seq(&s, &c), carol_seq + 1, "the inner sequence is consumed");
+    assert!(s.ledger().account(&dave).unwrap().is_some());
+    let TransactionResultResult::TxFeeBumpInnerSuccess(pair) = r.transaction_result().result else { panic!("{:?}", r.transaction_result()) };
+    assert_eq!(pair.transaction_hash.0, r.inner_hash.unwrap());
+    let InnerTransactionResultResult::TxSuccess(ops) = pair.result.result else { panic!() };
+    assert_eq!(ops.to_vec(), vec![ca(CreateAccountResult::Success)]);
+
+    // An inner operation that fails at apply: txFEE_BUMP_INNER_FAILED with
+    // the operation's code, and the fee source still pays.
+    let inner = envelope(&s, &c, std::slice::from_ref(&carol), vec![op(pay(&alice(), Asset::Native, 100 * XLM))]);
+    let r = s.submit("bumped overdraft", &fee_bump(&inner, &alice(), &key, 200)).unwrap();
+    failed_with(&r, &[pr(PaymentResult::Underfunded)]);
+    let TransactionResultResult::TxFeeBumpInnerFailed(pair) = r.transaction_result().result else { panic!("{:?}", r.transaction_result()) };
+    let InnerTransactionResultResult::TxFailed(ops) = pair.result.result else { panic!() };
+    assert_eq!(ops.to_vec(), vec![pr(PaymentResult::Underfunded)]);
+    assert_eq!(r.fee_charged, 200);
+
+    // An inner transaction carol did not sign is refused, fee-free.
+    let unsigned = envelope(&s, &c, &[Ed25519Key::throwaway("not carol")], vec![op(pay(&alice(), Asset::Native, 1))]);
+    let r = s.submit("bumped forgery", &fee_bump(&unsigned, &alice(), &key, 200)).unwrap();
+    assert!(matches!(r.status, TxStatus::Rejected { code: TxCode::BadAuth, fee_bump_inner: true, .. }), "{}", r.status.summary());
+    assert!(r.status.summary().starts_with("txFEE_BUMP_INNER_FAILED(txBAD_AUTH)"), "{}", r.status.summary());
+    // The outer fee must cover one more operation than the inner transaction.
+    let inner = envelope(&s, &c, std::slice::from_ref(&carol), vec![op(pay(&alice(), Asset::Native, 1))]);
+    expect_rejected(&s.submit("bumped too cheaply", &fee_bump(&inner, &alice(), &key, 199)).unwrap(), TxCode::InsufficientFee);
+}
+
+#[test]
+fn fee_bumps_share_a_ledger_and_count_one_more_operation() {
+    let mut options = SessionOptions::new(PASSPHRASE);
+    let mut limits = LedgerLimits::unlimited();
+    limits.max_classic_ops = 2;
+    options.ledger_limits = Some(limits);
+    let mut s = Session::new(Box::new(base(vec![])), fork_point(), options).unwrap();
+    let key = rehearse_alice(&s);
+    let carol = funded(&mut s, &key, "carol", 10);
+    let dave = funded(&mut s, &key, "dave", 10);
+    let (c, d) = (carol.account_id(), dave.account_id());
+    let ledger = s.ledger_info().sequence_number;
+    let alice_before = balance(&s, &alice());
+    // alice pays for carol's and dave's payments: two transactions from two
+    // sources, one fee source. Each fee bump counts two operations, so the
+    // classic phase (2 operations) takes one and the other waits.
+    let a = fee_bump(&envelope(&s, &c, std::slice::from_ref(&carol), vec![op(pay(&alice(), Asset::Native, XLM))]), &alice(), &key, 200);
+    let b = fee_bump(&envelope(&s, &d, std::slice::from_ref(&dave), vec![op(pay(&alice(), Asset::Native, XLM))]), &alice(), &key, 200);
+    let records = s.submit_ledger(&[("carol, paid by alice", &a), ("dave, paid by alice", &b)]).unwrap();
+    applied(&records[0]);
+    applied(&records[1]);
+    assert_eq!((records[0].ledger, records[1].ledger), (ledger, ledger + 1));
+    assert!(records[1].deferred.as_deref().unwrap().contains("classic phase was full (4 operations > 2)"), "{:?}", records[1].deferred);
+    assert_eq!(balance(&s, &alice()), alice_before - 400 + 2 * XLM);
+}

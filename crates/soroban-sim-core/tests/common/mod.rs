@@ -203,7 +203,7 @@ pub fn expect_rejected(r: &TxRecord, code: TxCode) {
 
 pub fn expect_failed(r: &TxRecord, needle: &str) -> String {
     match &r.status {
-        TxStatus::Failed { reason } if reason.contains(needle) => reason.clone(),
+        TxStatus::Failed { reason, .. } if reason.contains(needle) => reason.clone(),
         other => panic!("{}: expected a failure mentioning {needle:?}, got {}", r.label, other.summary()),
     }
 }

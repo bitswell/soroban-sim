@@ -10,7 +10,8 @@
 //!                      limits) -> fees first -> each validated again and applied
 //!                      in core's apply order -> refunds -> close ledger
 //!   TxValidator:       seq, preconditions, signatures + thresholds, frozen
-//!                      keys, fee, balance, resource limits, classic operations
+//!                      keys, fee and fee bump, balance, resource limits,
+//!                      classic operations
 //!   Applier:           enforcing host + module cache, rent, refund
 //!   ForkedLedger:      overlay + logged overrides over a lazily fetched base
 //! ```
@@ -19,17 +20,19 @@
 //! does. `prepare` is only a convenience for building envelopes the session's
 //! throwaway signers sign. Fidelity: the host is exact (same env-host as the
 //! network's protocol); the transaction layer ports stellar-core's checks and
-//! is approximate where noted (no surge pricing, no fee-bump, classic
-//! operations limited to CreateAccount, Payment, SetOptions and ChangeTrust).
+//! is approximate where noted (surge pricing only as a given lane base fee,
+//! classic operations limited to CreateAccount, Payment, SetOptions and
+//! ChangeTrust).
 
 mod applier;
 mod classic;
 mod close;
+pub mod replay;
 mod ledger;
 mod signers;
 mod validator;
 
-pub use applier::{Applied, Applier};
+pub use applier::{Applied, Applier, Failure, Metrics, OpFailure, EXACT_APPLY};
 pub use classic::{
     asset_valid, initial_result, is_supported as classic_op_supported, issuer, op_keys as classic_op_keys, result_name as op_result_name,
     trustline_key,
@@ -46,17 +49,22 @@ pub use signers::{
     ADDR_OZ_V1_DOMAIN, WEBAUTHN_RP_ID,
 };
 pub use validator::{
-    account_signers, available_balance, declared_resources, min_balance, muxed_account_id, transaction_hash,
-    xlm, ClassicOp, Fees, FrozenKeys, MatchedSigner, Rejection, TxCode, TxLimits, TxValidator, Valid,
-    ValidClassicTx, ValidTx,
+    account_signers, available_balance, declared_resources, envelope_fee_source, envelope_hash, envelope_source,
+    fee_bump_hash, min_balance, muxed_account_id, rejection_code, transaction_hash, v0_as_v1, xlm, ClassicOp, Fees,
+    FrozenKeys, MatchedSigner, Rejection, TxCode, TxLimits, TxValidator, Valid, ValidClassicTx, ValidTx,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 use soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use soroban_env_host::xdr::{
+    Hash, InnerTransactionResult, InnerTransactionResultExt, InnerTransactionResultPair, InnerTransactionResultResult,
+    InvokeHostFunctionResult, OperationResult, OperationResultTr, TransactionResult, TransactionResultExt,
+    TransactionResultResult,
+};
+use soroban_env_host::xdr::{
     AccountId, ContractEvent, DiagnosticEvent, HostFunction, InvokeHostFunctionOp, Memo,
-    MuxedAccount, Operation, OperationBody, OperationResult, Preconditions, PublicKey, ScAddress, ScVal,
+    MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ScAddress, ScVal,
     SequenceNumber, SorobanAuthorizationEntry, SorobanCredentials, SorobanTransactionData,
     Transaction, TransactionEnvelope, TransactionExt, TransactionV1Envelope,
 };
@@ -130,15 +138,18 @@ impl SessionOptions {
 /// How a submitted transaction ended.
 #[derive(Clone, Debug)]
 pub enum TxStatus {
-    /// Applied: fee charged, state committed. A classic transaction's value
-    /// is `Void`; its operation results are in [`TxRecord::op_results`].
+    /// Applied: fee charged, state committed.
+    /// A classic transaction's value is `Void`; its operation results are in
+    /// [`TxRecord::op_results`].
     Applied { value: ScVal },
-    /// Included but an operation failed, or the transaction failed its
-    /// checks at apply ([`TxRecord::failed_code`]): fee charged, no state
-    /// change besides the fee and (usually) the sequence number.
-    Failed { reason: String },
+    /// Included but an operation failed, or the transaction failed the checks
+    /// core repeats at apply ([`TxRecord::failed_code`]): fee charged, no
+    /// state change besides the fee and (usually) the sequence number.
+    /// `code` is a Soroban operation's result; a classic transaction's are in
+    /// [`TxRecord::op_results`].
+    Failed { code: Option<OpFailure>, reason: String },
     /// Refused before inclusion: no fee, no sequence number consumed.
-    Rejected { code: TxCode, detail: String },
+    Rejected { code: TxCode, detail: String, fee_bump_inner: bool },
 }
 
 impl TxStatus {
@@ -150,8 +161,9 @@ impl TxStatus {
     pub fn summary(&self) -> String {
         match self {
             Self::Applied { value } => show_scval(value),
-            Self::Failed { reason } => format!("txFAILED: {reason}"),
-            Self::Rejected { code, detail } => format!("{}: {detail}", code.as_str()),
+            Self::Failed { code: Some(code), reason } => format!("txFAILED({}): {reason}", code.as_str()),
+            Self::Failed { code: None, reason } => format!("txFAILED: {reason}"),
+            Self::Rejected { code, detail, fee_bump_inner } => format!("{}: {detail}", rejection_code(*code, *fee_bump_inner)),
         }
     }
 }
@@ -163,8 +175,13 @@ pub struct TxRecord {
     /// The ledger it applied in (or would have, if rejected).
     pub ledger: u32,
     pub close_time: u64,
+    /// The envelope's hash (the outer hash of a fee bump).
     pub hash: [u8; 32],
+    /// A fee bump's inner transaction hash.
+    pub inner_hash: Option<[u8; 32]>,
     pub source: Option<AccountId>,
+    /// Who paid the fee: the fee-bump source, else the source.
+    pub fee_source: Option<AccountId>,
     pub status: TxStatus,
     /// Declared fees (zero for rejected envelopes).
     pub fees: Fees,
@@ -181,6 +198,10 @@ pub struct TxRecord {
     pub restored: u32,
     pub events: Vec<ContractEvent>,
     pub diagnostics: Vec<DiagnosticEvent>,
+    /// What core would report in its `core_metrics` diagnostic events.
+    pub metrics: Metrics,
+    /// The operation's success result: `sha256(return value, events)`.
+    pub success_hash: Option<[u8; 32]>,
     pub signers: Vec<MatchedSigner>,
     pub replayable: Vec<String>,
     /// A classic transaction's operation results, in core's codes (also for
@@ -193,6 +214,8 @@ pub struct TxRecord {
     /// transaction of the same ledger changed what they depend on): the code
     /// core reports. The fee is charged.
     pub failed_code: Option<TxCode>,
+    /// The apply-time refusal was of a fee bump's inner transaction.
+    pub failed_fee_bump_inner: bool,
     /// The transaction's position (from 1) in its ledger's apply order.
     pub application_order: Option<u32>,
     /// Why it waited for a later ledger than the one it was submitted for.
@@ -204,6 +227,75 @@ impl TxRecord {
     /// 3002), which the host's own escalation errors can hide.
     pub fn contract_errors(&self) -> Vec<u32> {
         contract_errors(&self.diagnostics)
+    }
+
+    /// The `TransactionResult` core would record for this submission. A
+    /// rejected envelope gets its result code with nothing charged.
+    pub fn transaction_result(&self) -> TransactionResult {
+        let op = |r: InvokeHostFunctionResult| OperationResult::OpInner(OperationResultTr::InvokeHostFunction(r));
+        let classic = !self.op_results.is_empty();
+        // A rejection's (or an apply-time refusal's) code, as the result or a
+        // fee bump's inner result; a classic txFAILED carries every operation.
+        macro_rules! refused {
+            ($result:ident, $code:expr) => {
+                match $code {
+                    TxCode::OpBadAuth | TxCode::OpFailed if classic => $result::TxFailed(self.op_results.clone().try_into().unwrap_or_default()),
+                    code => rejected!($result, code),
+                }
+            };
+        }
+        let refusal = |code: TxCode, fee_bump_inner: bool, fee_charged: i64| {
+            let result = match self.inner_hash {
+                Some(inner) if fee_bump_inner => TransactionResultResult::TxFeeBumpInnerFailed(InnerTransactionResultPair {
+                    transaction_hash: Hash(inner),
+                    result: InnerTransactionResult { fee_charged: 0, result: refused!(InnerTransactionResultResult, code), ext: InnerTransactionResultExt::V0 },
+                }),
+                _ => refused!(TransactionResultResult, code),
+            };
+            TransactionResult { fee_charged, result, ext: TransactionResultExt::V0 }
+        };
+        let (success, ops) = match &self.status {
+            TxStatus::Applied { .. } if classic => (true, self.op_results.clone()),
+            TxStatus::Applied { .. } => (true, vec![op(InvokeHostFunctionResult::Success(Hash(self.success_hash.unwrap_or_default())))]),
+            // Included, then refused by the checks core repeats at apply.
+            TxStatus::Failed { .. } if self.failed_code.is_some() => {
+                return refusal(self.failed_code.unwrap_or(TxCode::Malformed), self.failed_fee_bump_inner, self.fee_charged);
+            }
+            TxStatus::Failed { .. } if classic => (false, self.op_results.clone()),
+            TxStatus::Failed { code, .. } => (
+                false,
+                vec![op(match code.unwrap_or(OpFailure::Trapped) {
+                    OpFailure::Malformed => InvokeHostFunctionResult::Malformed,
+                    OpFailure::Trapped => InvokeHostFunctionResult::Trapped,
+                    OpFailure::ResourceLimitExceeded => InvokeHostFunctionResult::ResourceLimitExceeded,
+                    OpFailure::EntryArchived => InvokeHostFunctionResult::EntryArchived,
+                    OpFailure::InsufficientRefundableFee => InvokeHostFunctionResult::InsufficientRefundableFee,
+                })],
+            ),
+            TxStatus::Rejected { code, fee_bump_inner, .. } => return refusal(*code, *fee_bump_inner, 0),
+        };
+        let ops = ops.try_into().unwrap_or_default();
+        let result = match self.inner_hash {
+            None if success => TransactionResultResult::TxSuccess(ops),
+            None => TransactionResultResult::TxFailed(ops),
+            Some(inner) => {
+                let pair = InnerTransactionResultPair {
+                    transaction_hash: Hash(inner),
+                    result: InnerTransactionResult {
+                        // Since protocol 25 the inner result charges nothing.
+                        fee_charged: 0,
+                        result: if success { InnerTransactionResultResult::TxSuccess(ops) } else { InnerTransactionResultResult::TxFailed(ops) },
+                        ext: InnerTransactionResultExt::V0,
+                    },
+                };
+                if success {
+                    TransactionResultResult::TxFeeBumpInnerSuccess(pair)
+                } else {
+                    TransactionResultResult::TxFeeBumpInnerFailed(pair)
+                }
+            }
+        };
+        TransactionResult { fee_charged: self.fee_charged, result, ext: TransactionResultExt::V0 }
     }
 }
 
@@ -266,6 +358,24 @@ pub struct ClassicRequest<'a> {
     pub preconditions: Preconditions,
     /// `None`: the source's next sequence number.
     pub sequence: Option<i64>,
+}
+
+/// What a real ledger close decides for a transaction, rather than its
+/// envelope. The defaults are a ledger without surge pricing and core's PRNG
+/// seed over the session's own transaction set.
+#[derive(Clone, Debug, Default)]
+pub struct SubmitOptions {
+    /// The base fee of the transaction set's lanes, which caps the inclusion
+    /// fee charged per operation (a fee bump counts one more).
+    /// `None`: the ledger's base fee. `Some(i64::MAX)`: the full bid, as for a
+    /// transaction-set component without a base fee.
+    pub lane_base_fee: Option<i64>,
+    /// The host's PRNG seed for the first transaction applied. stellar-core
+    /// seeds each transaction with `sha256(txSetContentsHash || applyIndex as
+    /// u64)`; `None` uses that formula over the session's own transaction
+    /// set, which is not the network's, so contracts that use the PRNG see
+    /// other values than on chain.
+    pub prng_seed: Option<[u8; 32]>,
 }
 
 /// Everything [`Session::restore`] needs to undo what happened since.
@@ -378,13 +488,20 @@ impl Session {
     /// A validator over the session's current state. `applying`: the checks
     /// core repeats when a transaction applies, its fee already charged.
     pub fn validator(&self, applying: bool) -> TxValidator<'_> {
+        self.validator_with(applying, None)
+    }
+
+    /// [`Session::validator`] for a ledger whose lanes charge `lane_base_fee`
+    /// (see [`SubmitOptions::lane_base_fee`]).
+    pub fn validator_with(&self, applying: bool, lane_base_fee: Option<i64>) -> TxValidator<'_> {
         TxValidator {
             ledger: &self.ledger,
             info: &self.info,
             config: &self.network_config,
             limits: &self.limits,
-            frozen: &self.frozen,
             base_fee: self.fork.base_fee,
+            lane_base_fee,
+            frozen: &self.frozen,
             applying,
         }
     }
@@ -439,6 +556,12 @@ impl Session {
         let ledgers = (time - self.info.timestamp).div_ceil(step);
         self.advance(ledgers.try_into()?, None);
         Ok(())
+    }
+
+    /// Set the close time of the ledger the next transaction applies in (for
+    /// replaying a real ledger at its real time).
+    pub fn set_close_time(&mut self, time: u64) {
+        self.info.timestamp = time;
     }
 
     // --- checkpoints ---
@@ -622,10 +745,44 @@ impl Session {
     /// envelope closes the ledger it applied in, success or failure; a
     /// rejected one never reaches a ledger.
     pub fn submit(&mut self, label: &str, envelope: &TransactionEnvelope) -> Result<TxRecord> {
-        let mut records = self.submit_ledger(&[(label, envelope)])?;
+        self.submit_with(label, envelope, &SubmitOptions::default())
+    }
+
+    /// [`Session::submit`] with what the ledger close decides set explicitly.
+    pub fn submit_with(&mut self, label: &str, envelope: &TransactionEnvelope, options: &SubmitOptions) -> Result<TxRecord> {
+        let mut records = self.submit_ledger_with(&[(label, envelope)], options)?;
         records.pop().ok_or_else(|| anyhow!("no record for {label}"))
     }
 }
+
+/// A rejection code as a `TransactionResultResult`, or as the
+/// `InnerTransactionResultResult` of a fee bump's inner transaction.
+macro_rules! rejected {
+    ($result:ident, $code:expr) => {
+        match $code {
+            TxCode::Malformed => $result::TxMalformed,
+            TxCode::MissingOperation => $result::TxMissingOperation,
+            TxCode::NotSupported => $result::TxNotSupported,
+            TxCode::TooEarly => $result::TxTooEarly,
+            TxCode::TooLate => $result::TxTooLate,
+            TxCode::BadMinSeqAgeOrGap => $result::TxBadMinSeqAgeOrGap,
+            TxCode::NoAccount => $result::TxNoAccount,
+            TxCode::BadSeq => $result::TxBadSeq,
+            TxCode::BadAuth => $result::TxBadAuth,
+            TxCode::OpBadAuth => $result::TxFailed(vec![OperationResult::OpBadAuth].try_into().unwrap_or_default()),
+            TxCode::OpMalformed => $result::TxFailed(
+                vec![OperationResult::OpInner(OperationResultTr::InvokeHostFunction(InvokeHostFunctionResult::Malformed))].try_into().unwrap_or_default(),
+            ),
+            TxCode::OpFailed => $result::TxFailed(Default::default()),
+            TxCode::FrozenKeyAccessed => $result::TxFrozenKeyAccessed,
+            TxCode::BadAuthExtra => $result::TxBadAuthExtra,
+            TxCode::InsufficientFee => $result::TxInsufficientFee,
+            TxCode::InsufficientBalance => $result::TxInsufficientBalance,
+            TxCode::SorobanInvalid => $result::TxSorobanInvalid,
+        }
+    };
+}
+use rejected;
 
 /// `NetworkConfig` is not `Clone` upstream.
 pub fn clone_network_config(c: &NetworkConfig) -> NetworkConfig {

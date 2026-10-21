@@ -77,7 +77,7 @@ session worker (session-worker.ts)
   The call returns `needs-state` with the keys. `SorobanSession` fetches them
   with `getLedgerEntries` (`ReadOnlyRpc` can call only read methods, and backs
   off on 429), `provide`s them, and repeats the same call. Opening a session
-  asks for all thirteen network settings at once, and a `sendTransaction`
+  asks for all sixteen network settings at once, and a `sendTransaction`
   asks for every key its envelope names (source, auth accounts, footprint,
   what its classic operations touch) in one round. Simulations discover keys as they run, like `simulate` does.
 - **A session is a log.** Every JSON-RPC body that changed the session is
@@ -181,6 +181,10 @@ These come on top of the session's own limits ([fidelity and
 limits](session.md#fidelity-and-limits)) and the facade's ([fidelity and
 limits](rpc-facade.md#fidelity-and-limits)):
 
+- Transactions apply with the recording-mode host the component already links,
+  not the second, exact-metering build the CLI uses, so CPU on a transaction
+  that writes comes out slightly above stellar-core's (about 0.1 to 0.3%; see
+  [`docs/replay.md`](replay.md)). The report's fidelity notes say so.
 - The workbench's preflight still runs against live Testnet state. A call to a
   contract that exists only in the session cannot be preflighted there. Send
   it from a plan, an envelope or your own stellar-sdk code instead.

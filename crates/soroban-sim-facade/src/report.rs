@@ -97,6 +97,8 @@ pub struct StepReport {
 pub struct TxReport {
     pub hash: String,
     pub source: String,
+    /// Who paid the fee: the fee-bump source, else the source.
+    pub fee_source: String,
     pub fee_bid: i64,
     pub resource_fee: i64,
     pub non_refundable_fee: i64,
@@ -511,12 +513,17 @@ pub fn shorten_addresses(s: &str) -> String {
 
 /// What the rehearsal does and does not model, for every session report.
 pub fn session_fidelity() -> Vec<String> {
+    let metering = if soroban_sim_core::session::EXACT_APPLY {
+        "metered exactly as stellar-core's host"
+    } else {
+        "metered by the recording-mode build simulation uses, which charges slightly more CPU than stellar-core's host on writes"
+    };
     vec![
-        "Host-exact: contracts run in the same soroban-env-host as the network's protocol, in enforcing mode, with a module cache, and every auth signature is verified.".into(),
-        "Envelope-approximate: the transaction layer (sequence numbers, preconditions, signature weights and thresholds, fee bid, resource fee and limits, balance above reserve, fee charged before apply, rent and refund) is a port of stellar-core's checks, not core itself.".into(),
-        "Classic operations: CreateAccount, Payment (XLM and issued assets), SetOptions and ChangeTrust, ported from stellar-core v29 with its result codes and reserves. Several transactions share a ledger in core's order (one per source account, within the per-ledger limits, classic phase first, each phase shuffled by the transaction-set hash, every fee charged before any applies, the checks core repeats at apply, refunds last), and each gets core's PRNG seed for the session's own transaction set.".into(),
-        "Not modelled: fee-bump and muxed fee sources, surge pricing (the inclusion fee charged is the base fee per operation), core's parallel Soroban clusters (a ledger's Soroban phase is one cluster), and the other classic operations (path payments, offers, liquidity pools, claimable balances, clawback, creating sponsorships).".into(),
-        "The fork reads RPC's latest ledger lazily; drift below lists any entry that changed after the fork ledger.".into(),
+        format!("Host-exact: contracts run in the same soroban-env-host release as the network's protocol, in enforcing mode, with a module cache, {metering}, and every auth signature is verified."),
+        "Transaction layer: a port of stellar-core's checks (preconditions, sequence numbers, frozen keys, signature weights and thresholds, v1 and fee-bump envelopes, fee bid, resource fee and limits, balance above reserve, fee charged before apply, disk-read metering, rent and refund), checked against real mainnet and testnet transactions by `soroban-sim replay` (docs/replay.md).".into(),
+        "Classic operations: CreateAccount, Payment (XLM and issued assets), SetOptions and ChangeTrust, ported from stellar-core v29 with its result codes and reserves, in v1 or fee-bump envelopes. Several transactions share a ledger in core's order (one per source account, within the per-ledger limits, classic phase first, each phase shuffled by the transaction-set hash, every fee charged to its fee source before any applies, the checks core repeats at apply, refunds last), and each gets core's PRNG seed for the session's own transaction set.".into(),
+        "Not modelled: ExtendFootprintTtl and RestoreFootprint operations, surge pricing (the inclusion fee charged is the base fee per operation unless a replay gives the lane's), core's parallel Soroban clusters (a ledger's Soroban phase is one cluster), and the other classic operations (path payments, offers, liquidity pools, claimable balances, clawback, creating sponsorships).".into(),
+        "A head fork reads RPC's latest ledger lazily (drift below lists any entry that changed after the fork ledger); a checkpoint fork rolls every read back to the fork ledger.".into(),
     ]
 }
 
@@ -545,7 +552,7 @@ pub fn build_report(s: &Session, ctx: ReportContext) -> Report {
     let log = s.log();
     let mut by_payer: BTreeMap<String, PayerFees> = BTreeMap::new();
     for t in log {
-        let Some(src) = &t.source else { continue };
+        let Some(src) = t.fee_source.as_ref().or(t.source.as_ref()) else { continue };
         if matches!(t.status, TxStatus::Rejected { .. }) {
             continue;
         }
@@ -665,6 +672,7 @@ pub fn tx_report(t: &TxRecord) -> TxReport {
     TxReport {
         hash: hex(&t.hash),
         source: t.source.as_ref().map(|s| s.to_string()).unwrap_or_default(),
+        fee_source: t.fee_source.as_ref().or(t.source.as_ref()).map(|s| s.to_string()).unwrap_or_default(),
         fee_bid: t.fees.bid,
         resource_fee: t.fees.resource_fee,
         non_refundable_fee: t.fees.non_refundable,

@@ -45,8 +45,8 @@ use soroban_env_host::xdr::{
 use soroban_env_host::{HostError, LedgerInfo};
 use soroban_simulation::simulation::SimulationAdjustmentConfig;
 use soroban_sim_core::session::{
-    account_key, muxed_account_id, op_result_name, show_scval, EntryState, Session, SessionCheckpoint, StoredEntry,
-    TxRecord, TxStatus,
+    account_key, envelope_hash, muxed_account_id, op_result_name, rejection_code, show_scval, EntryState, Session, SessionCheckpoint,
+    StoredEntry, TxRecord, TxStatus,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -135,6 +135,7 @@ struct StoredTx {
     /// Its position (from 1) in its ledger's apply order.
     application_order: u32,
     applied: bool,
+    fee_bump: bool,
     events: Vec<ContractEvent>,
     diagnostics_xdr: Vec<String>,
 }
@@ -146,8 +147,11 @@ struct Pending {
     envelope_xdr: String,
     envelope: TransactionEnvelope,
     label: String,
-    /// The keys whose before-values the meta needs, the source account first.
+    /// The keys whose before-values the meta needs: the source account, the
+    /// fee source if it is another account, then the rest.
     keys: Vec<LedgerKey>,
+    /// How many of `keys` are the source and fee source.
+    accounts: usize,
     seq: i64,
     fee_bid: i64,
     /// Signatures valid on the real network (`TxValidator::base_signed`).
@@ -614,7 +618,7 @@ impl Facade {
         let text = p.str("transaction")?.trim().to_string();
         let envelope = TransactionEnvelope::from_xdr_base64(&text, Limits::none()).map_err(|_| RpcError::invalid("transaction is not a base64 TransactionEnvelope"))?;
         let network_id = self.session.network_id();
-        let hash = tx::envelope_hash(&envelope, network_id).map_err(RpcError::internal)?;
+        let hash = envelope_hash(&envelope, network_id).map_err(RpcError::internal)?;
         let mut reply = self.ledger_window();
         reply.remove("oldestLedger");
         reply.remove("oldestLedgerCloseTime");
@@ -636,7 +640,11 @@ impl Facade {
             return Ok(Value::Object(reply));
         }
         // Every key the envelope names, in one base read.
-        self.session.ledger().prefetch(&tx::envelope_keys(&inner)).map_err(RpcError::internal)?;
+        let mut names = tx::envelope_keys(&inner);
+        if let TransactionEnvelope::TxFeeBump(e) = &envelope {
+            names.push(account_key(&muxed_account_id(&e.tx.fee_source)));
+        }
+        self.session.ledger().prefetch(&names).map_err(RpcError::internal)?;
 
         // What the validator decides, before anything changes: the safety
         // check (whatever the verdict), and the keys whose before-values the
@@ -672,16 +680,17 @@ impl Facade {
             // Refused before inclusion: never in a ledger, held or not.
             let mut record = self.session.submit(&label, &envelope).map_err(RpcError::internal)?;
             record.replayable = real;
-            let result = tx::result(&record, inner.fee as i64).map_err(RpcError::internal)?;
+            let result = tx::result(&record, tx::fee_bid(&envelope));
             let result_xdr = result.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?;
-            if let TxStatus::Rejected { code, detail } = &record.status {
+            if let TxStatus::Rejected { code, detail, fee_bump_inner } = &record.status {
                 for r in &record.replayable {
                     self.replayable.push(format!("{label} ({}, rejected): {r}", hex(&hash)));
                 }
+                let code = rejection_code(*code, *fee_bump_inner);
                 let detail_rc = Rc::new(StepDetail { touched: vec![], envelope: Some(envelope.clone()), applied_in: None });
                 self.push_step(
-                    step(self.steps.len() + 1, &label, "transaction", ledger, time, "rejected", &format!("{}: {detail}", code.as_str()), Some(&record), None),
-                    Some(format!("{label}: {} {detail}", code.as_str())),
+                    step(self.steps.len() + 1, &label, "transaction", ledger, time, "rejected", &format!("{code}: {detail}"), Some(&record), None),
+                    Some(format!("{label}: {code} {detail}")),
                     detail_rc,
                 );
             }
@@ -689,7 +698,18 @@ impl Facade {
             reply.insert("errorResultXdr".into(), json!(result_xdr));
             return Ok(Value::Object(reply));
         };
-        let pending = Pending { hash, envelope_xdr: text, envelope, label, keys: valid.touched_keys(), seq: inner.seq_num.0, fee_bid: inner.fee as i64, real };
+        let accounts = if valid.fee_source() == valid.source() { 1 } else { 2 };
+        let pending = Pending {
+            hash,
+            envelope_xdr: text,
+            fee_bid: tx::fee_bid(&envelope),
+            envelope,
+            label,
+            keys: valid.touched_keys(),
+            accounts,
+            seq: inner.seq_num.0,
+            real,
+        };
         match &mut self.held {
             Some(queue) => queue.push(pending),
             None => {
@@ -723,19 +743,19 @@ impl Facade {
         let mut lines = vec![];
         for (t, mut record) in pending.into_iter().zip(records) {
             record.replayable = t.real.clone();
-            let result = tx::result(&record, t.fee_bid).map_err(RpcError::internal)?;
+            let result = tx::result(&record, t.fee_bid);
             let result_xdr = result.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?;
             let mut line = json!({ "hash": hex(&t.hash), "ledger": record.ledger, "resultXdr": result_xdr });
             if let Some(why) = &record.deferred {
                 line["deferred"] = json!(why);
             }
-            if let TxStatus::Rejected { code, detail } = &record.status {
+            if let TxStatus::Rejected { code, detail, fee_bump_inner } = &record.status {
                 // Valid when it was sent, then dropped when the ledger was
                 // built: like a real network, it never gets a result.
                 for r in &record.replayable {
                     self.replayable.push(format!("{} ({}, rejected): {r}", t.label, hex(&t.hash)));
                 }
-                let detail = format!("dropped when the ledger closed: {}: {detail}", code.as_str());
+                let detail = format!("dropped when the ledger closed: {}: {detail}", rejection_code(*code, *fee_bump_inner));
                 let detail_rc = Rc::new(StepDetail { touched: vec![], envelope: Some(t.envelope), applied_in: None });
                 self.push_step(
                     step(self.steps.len() + 1, &t.label, "transaction", record.ledger, record.close_time, "rejected", &detail, Some(&record), None),
@@ -748,8 +768,9 @@ impl Facade {
                 continue;
             }
             let touched: Vec<Touched> = t.keys.iter().map(|k| Touched { key: k.clone(), before: before[k].clone(), after: after[k].clone() }).collect();
-            let (source, footprint) = touched.split_first().ok_or_else(|| RpcError::internal(anyhow!("a valid transaction has a source account")))?;
-            let meta = tx::meta(&record, source, footprint, record.ledger).map_err(RpcError::internal)?;
+            // The source and fee source (tx-level changes), then the rest.
+            let (payers, footprint) = touched.split_at(t.accounts.min(touched.len()));
+            let meta = tx::meta(&record, payers, footprint, record.ledger).map_err(RpcError::internal)?;
             let diagnostics_xdr = record.diagnostics.iter().map(|d| d.to_xdr_base64(Limits::none())).collect::<std::result::Result<_, _>>().map_err(|e| RpcError::internal(e.into()))?;
             let application_order = record.application_order.unwrap_or(1);
             self.txs.insert(
@@ -762,6 +783,7 @@ impl Facade {
                     close_time: record.close_time,
                     application_order,
                     applied: record.status.is_applied(),
+                    fee_bump: matches!(t.envelope, TransactionEnvelope::TxFeeBump(_)),
                     events: record.events.clone(),
                     diagnostics_xdr,
                 }),
@@ -772,7 +794,13 @@ impl Facade {
             }
             let (outcome, detail, value, failure) = match &record.status {
                 TxStatus::Applied { value } => ("applied", tx_detail(&record, show_scval(value)), record.op_results.is_empty().then(|| value.clone()), None),
-                TxStatus::Failed { reason } => ("failed", tx_detail(&record, reason.clone()), None, Some(format!("{}: txFAILED {reason}", t.label))),
+                TxStatus::Failed { code, reason } => {
+                    let text = match code {
+                        Some(code) => format!("{}: {reason}", code.as_str()),
+                        None => reason.clone(),
+                    };
+                    ("failed", tx_detail(&record, text.clone()), None, Some(format!("{}: txFAILED {text}", t.label)))
+                }
                 TxStatus::Rejected { .. } => unreachable!("handled above"),
             };
             // The ledger it applied in (a later one if it had to wait).
@@ -800,7 +828,7 @@ impl Facade {
         let contract_events: Vec<String> = t.events.iter().map(|e| e.b64()).collect::<Result<_>>().map_err(RpcError::internal)?;
         m.insert("status".into(), json!(if t.applied { "SUCCESS" } else { "FAILED" }));
         m.insert("applicationOrder".into(), json!(t.application_order));
-        m.insert("feeBump".into(), json!(false));
+        m.insert("feeBump".into(), json!(t.fee_bump));
         m.insert("envelopeXdr".into(), json!(t.envelope_xdr));
         m.insert("resultXdr".into(), json!(t.result_xdr));
         m.insert("resultMetaXdr".into(), json!(t.meta_xdr));

@@ -33,6 +33,8 @@ and signer adapter.
 | Option | Meaning |
 |---|---|
 | `--fork mainnet\|testnet\|URL` | The network to fork (default: the plan's `network`). |
+| `--fork-mode head\|checkpoint` | `head` (default) reads RPC's latest ledger lazily; `checkpoint` pins one ledger and rolls every read back to it (see "Fork modes"). |
+| `--fork-ledger N` | The ledger a `checkpoint` fork pins (default: the latest when it opens). |
 | `--network-passphrase P` | Checked against the RPC's `getNetwork`. |
 | `--snapshot FILE` | Fork a snapshot file instead (offline, reproducible). |
 | `--save-snapshot FILE` | Save every base entry the run read, for offline replays. |
@@ -252,7 +254,10 @@ Steps have a `name` and exactly one action:
 
 Transaction steps also take `source`, `sign_with: [keys]` (default: the
 classic signers registered for the source, else the key whose account is the
-source; a classic step adds the keys of its operations' sources), `auth: { address: signer }` (over the plan's `signers`),
+source; a classic step adds the keys of its operations' sources),
+`fee_bump: { source, fee, sign_with }` (another account pays the fee in a fee
+bump; `fee` defaults to the inner transaction's inclusion rate over one more
+operation, and the fee source's signers resolve like a source's), `auth: { address: signer }` (over the plan's `signers`),
 `auth_expiration_ledgers`, `save_envelope: name`, and `hold: true` (prepare and
 sign but do not submit; submit it later with `envelope: "${name}"`).
 
@@ -318,21 +323,69 @@ signature (including CAP-71 delegates), that verifies against a signer the
 base ledger already has; on mainnet such a signature fails the run.
 Smart-account `External` and passkey signatures are not checked yet.
 
+## Fork modes
+
+- **`head`** (default). Entries are fetched lazily from RPC `getLedgerEntries`,
+  which only serves its latest ledger, so a session that runs for minutes can
+  mix ledgers. The drift report lists every fetched entry modified after the
+  fork ledger.
+- **`checkpoint`**. One consistent ledger. The fork pins ledger N (`--fork-ledger`,
+  default the latest), and every read is rolled back to it: RPC answers at its
+  latest ledger S, the fork reads the close meta of ledgers N+1..S with
+  `getLedgers`, and each entry takes the before-image of its first change after
+  N (entries nothing changed are already as they were). Answers are cached, so
+  every fresh fork of the session sees the same state. Two limits: RPC must
+  still serve the ledgers since N (at most 720 behind, about an hour; each
+  mainnet ledger's meta is a few MB), and N must be no older than the last
+  change of the Soroban state-size window that sets the rent rate. Core
+  rewrites that window every 64 ledgers at ledger close, outside any
+  transaction's meta, so nothing records its older values; the fork refuses
+  an older pin and names the first ledger it accepts. An eviction records no
+  before-image either: a read of an entry (or its TTL) evicted after N, with
+  no earlier change since N recording its value, fails and names the key and
+  the eviction ledger instead of serving it as absent.
+
 ## Fidelity and limits
 
-Host-exact, envelope-approximate: contracts run in the same `soroban-env-host`
-as the network's protocol (the session refuses any other), while the
-transaction layer is a port of core's checks. Not modelled yet: fee-bump
-envelopes and muxed fee sources, surge pricing (the inclusion fee charged is
-the base fee per operation), core's parallel Soroban clusters (a ledger's
-Soroban phase is one cluster), and the classic operations listed above. The
-`head` fork reads RPC's latest ledger lazily, so a long session can mix
-ledgers; the drift report shows whether it did.
+The host is exact: contracts run in the same `soroban-env-host` release as the
+network's protocol (the session refuses any other), and transactions apply with
+a build of it that is metered exactly as stellar-core's (simulation needs the
+`recording_mode` feature, and a recording-mode build charges an extra
+storage-map lookup on every write, about 0.2% more CPU; the applier uses a
+second build of the same release without it). The transaction layer is a port
+of core's `TransactionFrame` and `FeeBumpTransactionFrame` checks, in core's
+order, and is checked against real network transactions: `soroban-sim replay`
+replays samples of recent mainnet and testnet Soroban transactions, fee bumps
+and smart-account `__check_auth` included, and compares every result, return
+value, event, after-image, fee and core resource metric
+([`docs/replay.md`](replay.md)); `tests/classic_replay.rs` does the same for
+classic transactions. The committed samples match exactly.
+
+Modelled: v1 and fee-bump envelopes (`txFEE_BUMP_INNER_FAILED` for an inner
+rejection), Soroban or classic inside, muxed sources, preconditions, sequence
+numbers, frozen ledger keys (CAP-77), signatures and thresholds,
+pre-authorized-transaction signers removed after use, the inclusion fee capped
+at the lane base fee (`SubmitOptions::lane_base_fee`, for a surge-priced
+ledger), the resource fee and per-transaction limits, footprint key and entry
+size limits, disk-read metering of classic and restored entries, restores of
+marked archived entries only, rent and events against the refundable fee,
+refunds to the fee source, the classic operations above, and ledgers of
+several transactions with core's per-ledger limits and apply order. Each
+transaction gets core's PRNG seed, `sha256(txSetContentsHash || applyIndex)`,
+over the session's own transaction set (`SubmitOptions::prng_seed` sets the
+real one, for a replay).
+
+Not modelled yet: `ExtendFootprintTtl` and `RestoreFootprint` operations (an
+`InvokeHostFunction` restores marked entries itself), the other classic
+operations, surge pricing beyond a given lane base fee, and core's parallel
+Soroban clusters (a ledger's Soroban phase is one cluster). In a parallel
+Soroban phase core bumps every transaction's sequence number before any
+executes; the session bumps each as it applies, so a Soroban transaction whose
+footprint holds another transaction's source account sees that bump only if
+the other applied first.
 
 The same session also runs behind an RPC facade, `soroban-sim serve --fork …`,
 so existing scripts and stock tools rehearse themselves unchanged
 ([`docs/rpc-facade.md`](rpc-facade.md)), and in the browser, where the web
 demo serves it to stellar-sdk at a virtual RPC URL
-([`docs/browser-session.md`](browser-session.md)). Later phases (see #23):
-replaying real mainnet transactions from their meta, and an exact
-history-archive checkpoint fork.
+([`docs/browser-session.md`](browser-session.md)).

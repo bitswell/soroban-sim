@@ -8,12 +8,13 @@ use soroban_env_host::xdr::{
     AccountId, Asset, ChangeTrustAsset, ChangeTrustOp, ContractExecutable, ContractIdPreimage,
     ContractIdPreimageFromAddress, CreateAccountOp, CreateContractArgs, CreateContractArgsV2, Hash, HostFunction,
     InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerHeader, LedgerKey, LedgerKeyContractCode, Limits, Memo,
-    MuxedAccount, Operation, OperationBody, PaymentOp, Preconditions, PublicKey, ReadXdr, ScAddress, ScString,
+    FeeBumpTransaction, FeeBumpTransactionEnvelope, FeeBumpTransactionExt, FeeBumpTransactionInnerTx, MuxedAccount, Operation,
+    OperationBody, PaymentOp, Preconditions, PublicKey, ReadXdr, ScAddress, ScString,
     ScSymbol, ScVal, SetOptionsOp, Signer, SignerKey, String32, TransactionEnvelope, TransactionV1Envelope, Uint256,
     WriteXdr,
 };
 use soroban_sim_core::session::{
-    account_key, host_protocol, muxed_account_id, op_result_name, show_scval, transaction_hash, AuthSigner,
+    account_key, fee_bump_hash, host_protocol, muxed_account_id, op_result_name, rejection_code, show_scval, transaction_hash, AuthSigner,
     AuthSignerSource, ClassicRequest, Ed25519Key, EntryState, ExternalKey, ForkPoint, LedgerSource, OzDigest, OzSigner,
     PrepareRequest, Secp256r1Key, Session, SessionOptions, StoredEntry, TxRecord, TxStatus, ADDR_OZ_V1_DOMAIN,
 };
@@ -25,6 +26,7 @@ use crate::plan::{
     interpolate, CallSpec, ClassicSpec, Computed, Expect, Fails, KeySpec, NetworkSpec, OperationSpec, OverrideSpec,
     OzSignerSpec, Plan, RuleSpec, SignerSpec, Step, ValueExpr,
 };
+use crate::checkpoint::{CheckpointLedger, CheckpointSource};
 use crate::report::*;
 use crate::rpc::{RpcClient, RpcSource};
 use crate::snapshot::SnapshotFile;
@@ -38,14 +40,51 @@ pub use soroban_sim_facade::{MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
 
 /// Where the fork comes from.
 pub enum Base {
-    Rpc { name: String, url: String, passphrase: Option<String> },
+    Rpc { name: String, url: String, passphrase: Option<String>, mode: ForkMode },
     Snapshot(PathBuf),
+}
+
+/// How an RPC fork reads the network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ForkMode {
+    /// Lazily at RPC's latest ledger: cheap, but a long session can mix
+    /// ledgers (the drift report shows whether it did).
+    #[default]
+    Head,
+    /// Every read rolled back to one pinned ledger through the close meta of
+    /// the ledgers since (`None`: the latest when the fork opens).
+    Checkpoint(Option<u32>),
+}
+
+impl ForkMode {
+    /// `head` or `checkpoint`, with an optional pinned ledger.
+    pub fn parse(mode: Option<&str>, ledger: Option<u32>) -> Result<Self> {
+        match (mode, ledger) {
+            (None | Some("head"), None) => Ok(Self::Head),
+            (Some("head"), Some(_)) => bail!("--fork-ledger pins a checkpoint fork; it needs --fork-mode checkpoint"),
+            (None | Some("checkpoint"), l) => Ok(Self::Checkpoint(l)),
+            (Some(other), _) => bail!("unknown fork mode {other:?}: use head or checkpoint"),
+        }
+    }
+}
+
+impl Base {
+    /// The same base read in `mode` (snapshots are already one ledger).
+    pub fn with_mode(self, mode: ForkMode) -> Result<Self> {
+        match self {
+            Base::Rpc { name, url, passphrase, .. } => Ok(Base::Rpc { name, url, passphrase, mode }),
+            Base::Snapshot(p) if mode == ForkMode::Head => Ok(Base::Snapshot(p)),
+            Base::Snapshot(_) => bail!("a snapshot is already one ledger; --fork-mode applies to RPC forks"),
+        }
+    }
 }
 
 pub struct RunConfig {
     pub plan_path: PathBuf,
     /// `None`: the plan's `network`.
     pub base: Option<Base>,
+    /// How an RPC base is read (the plan's network included).
+    pub fork_mode: ForkMode,
     pub wasm_dirs: Vec<PathBuf>,
     pub differential: bool,
     pub keep_going: bool,
@@ -65,10 +104,10 @@ pub fn network_preset(name: &str) -> Option<(&'static str, &'static str)> {
 /// `mainnet`, `testnet`, or an RPC URL.
 pub fn base_from_name(name: &str, passphrase: Option<String>) -> Result<Base> {
     if let Some((url, p)) = network_preset(name) {
-        return Ok(Base::Rpc { name: name.into(), url: url.into(), passphrase: Some(passphrase.unwrap_or_else(|| p.into())) });
+        return Ok(Base::Rpc { name: name.into(), url: url.into(), passphrase: Some(passphrase.unwrap_or_else(|| p.into())), mode: ForkMode::Head });
     }
     if name.starts_with("http://") || name.starts_with("https://") {
-        return Ok(Base::Rpc { name: name.into(), url: name.into(), passphrase });
+        return Ok(Base::Rpc { name: name.into(), url: name.into(), passphrase, mode: ForkMode::Head });
     }
     bail!("unknown network {name:?}: use mainnet, testnet or an RPC URL")
 }
@@ -76,7 +115,9 @@ pub fn base_from_name(name: &str, passphrase: Option<String>) -> Result<Base> {
 fn base_from_spec(spec: &NetworkSpec) -> Result<Base> {
     match spec {
         NetworkSpec::Named(n) => base_from_name(n, None),
-        NetworkSpec::Custom { rpc, passphrase } => Ok(Base::Rpc { name: rpc.clone(), url: rpc.clone(), passphrase: Some(passphrase.clone()) }),
+        NetworkSpec::Custom { rpc, passphrase } => {
+            Ok(Base::Rpc { name: rpc.clone(), url: rpc.clone(), passphrase: Some(passphrase.clone()), mode: ForkMode::Head })
+        }
     }
 }
 
@@ -106,7 +147,9 @@ impl Outcome {
     }
 }
 
-/// What building a transaction step produced.
+/// What building a transaction step produced. Short-lived, so both
+/// variants stay unboxed.
+#[allow(clippy::large_enum_variant)]
 enum Built {
     /// A signed envelope, and the value its simulation returned (Soroban).
     Ready { envelope: TransactionEnvelope, value: Option<ScVal> },
@@ -131,10 +174,21 @@ fn outcome_of(record: TxRecord) -> Outcome {
             let (detail, value) = if ops.is_empty() { (show_scval(value), Some(value.clone())) } else { (ops.join(", "), None) };
             Outcome { outcome: "applied", detail, text, value, succeeded: true, tx: Some(record) }
         }
-        TxStatus::Failed { reason } => Outcome { outcome: "failed", detail: reason.clone(), text, value: None, succeeded: false, tx: Some(record) },
-        TxStatus::Rejected { code, detail } => {
-            Outcome { outcome: "rejected", detail: format!("{}: {detail}", code.as_str()), text, value: None, succeeded: false, tx: Some(record) }
+        TxStatus::Failed { code, reason } => {
+            let detail = match code {
+                Some(code) => format!("{}: {reason}", code.as_str()),
+                None => reason.clone(),
+            };
+            Outcome { outcome: "failed", detail, text, value: None, succeeded: false, tx: Some(record) }
         }
+        TxStatus::Rejected { code, detail, fee_bump_inner } => Outcome {
+            outcome: "rejected",
+            detail: format!("{}: {detail}", rejection_code(*code, *fee_bump_inner)),
+            text,
+            value: None,
+            succeeded: false,
+            tx: Some(record),
+        },
     }
 }
 
@@ -210,7 +264,8 @@ impl Runner {
         let base = match config.base {
             Some(b) => b,
             None => base_from_spec(plan.network.as_ref().ok_or_else(|| anyhow!("the plan names no network; pass --fork or --snapshot"))?)?,
-        };
+        }
+        .with_mode(config.fork_mode)?;
         let mut options = SessionOptions::new("");
         if let Some(s) = plan.options.seconds_per_ledger {
             options.seconds_per_ledger = s;
@@ -475,10 +530,11 @@ impl Runner {
                 Err(e) => return Ok(Built::Done(refused(e))),
             };
             next_seq.insert(source, envelope_sequence(&prepared.envelope) + 1);
+            let envelope = self.fee_bumped(step, prepared.envelope)?;
             if let Some(name) = &step.save_envelope {
-                self.values.insert(name.clone(), prepared.envelope.to_xdr_base64(Limits::none())?);
+                self.values.insert(name.clone(), envelope.to_xdr_base64(Limits::none())?);
             }
-            return Ok(Built::Ready { envelope: prepared.envelope, value: None });
+            return Ok(Built::Ready { envelope, value: None });
         }
 
         let host_function = if let Some(call) = &step.invoke {
@@ -538,10 +594,38 @@ impl Runner {
             None => prepared.envelope,
         };
         next_seq.insert(source, envelope_sequence(&envelope) + 1);
+        let envelope = self.fee_bumped(step, envelope)?;
         if let Some(name) = &step.save_envelope {
             self.values.insert(name.clone(), envelope.to_xdr_base64(Limits::none())?);
         }
         Ok(Built::Ready { envelope, value: Some(prepared.value) })
+    }
+
+    /// The step's envelope, fee-bumped if the step says so.
+    fn fee_bumped(&mut self, step: &Step, envelope: TransactionEnvelope) -> Result<TransactionEnvelope> {
+        let Some(spec) = &step.fee_bump else { return Ok(envelope) };
+        let TransactionEnvelope::Tx(inner) = envelope else { bail!("fee_bump wraps a v1 transaction envelope") };
+        let fee_source = self.account_id(&spec.source)?;
+        let fee = match &spec.fee {
+            Some(f) => self.eval(f)?.trim().parse::<i64>().context("fee_bump fee is a whole number of stroops")?,
+            None => {
+                // The smallest valid outer fee: the inner inclusion rate (at
+                // least the base fee) over one more operation, rounded up.
+                let resource = match &inner.tx.ext {
+                    soroban_env_host::xdr::TransactionExt::V1(d) => d.resource_fee,
+                    soroban_env_host::xdr::TransactionExt::V0 => 0,
+                };
+                let ops = inner.tx.operations.len().max(1) as i64;
+                let base = self.session.fork_point().base_fee as i64;
+                let rate_total = (inner.tx.fee as i64 - resource).max(base * ops);
+                resource + (rate_total * (ops + 1) + ops - 1) / ops
+            }
+        };
+        let signers = self.signers_of(spec.sign_with.as_deref(), &step.auth, &fee_source)?;
+        let tx = FeeBumpTransaction { fee_source: muxed(&fee_source), fee, inner_tx: FeeBumpTransactionInnerTx::Tx(inner), ext: FeeBumpTransactionExt::V0 };
+        let hash = fee_bump_hash(&tx, self.session.network_id())?;
+        let signatures: Vec<_> = signers.iter().map(|k| k.sign_decorated(&hash)).collect();
+        Ok(TransactionEnvelope::TxFeeBump(FeeBumpTransactionEnvelope { tx, signatures: signatures.try_into()? }))
     }
 
     fn submit(&mut self, label: &str, env: &TransactionEnvelope, step: &Step) -> Result<Outcome> {
@@ -826,11 +910,18 @@ impl Runner {
     }
 
     fn envelope_signers(&mut self, step: &Step, source: &AccountId) -> Result<Vec<Ed25519Key>> {
-        if let Some(names) = &step.sign_with {
+        self.signers_of(step.sign_with.as_deref(), &step.auth, source)
+    }
+
+    /// The keys that sign for `source`: `sign_with`, else the classic signers
+    /// registered for it (the step's `auth`, then the plan's `signers`), else
+    /// the key whose account it is.
+    fn signers_of(&mut self, sign_with: Option<&[String]>, auth: &BTreeMap<String, SignerSpec>, source: &AccountId) -> Result<Vec<Ed25519Key>> {
+        if let Some(names) = sign_with {
             return names.iter().map(|n| self.ed25519(n)).collect();
         }
         let source_addr = ScAddress::Account(source.clone());
-        for (addr, spec) in step.auth.iter().chain(self.plan.signers.clone().iter()) {
+        for (addr, spec) in auth.iter().chain(self.plan.signers.clone().iter()) {
             if let SignerSpec::Classic(c) = spec {
                 if self.address(addr)? == source_addr {
                     let names = match c {
@@ -1037,7 +1128,7 @@ pub(crate) struct Forked {
 
 pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> {
     match base {
-        Base::Rpc { name, url, passphrase } => {
+        Base::Rpc { name, url, passphrase, mode } => {
             let rpc = Rc::new(RpcClient::new(&url));
             let actual = rpc.network_passphrase()?;
             if let Some(p) = &passphrase {
@@ -1045,28 +1136,40 @@ pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> 
                     bail!("{url} serves {actual:?}, not {p:?}");
                 }
             }
-            let latest = rpc.latest_ledger()?;
-            if latest.protocol_version != host_protocol() {
-                bail!("{name} is on protocol {}, this build's host implements protocol {}", latest.protocol_version, host_protocol());
+            let (header, source): (LedgerHeader, Rc<dyn Fn() -> Box<dyn LedgerSource>>) = match mode {
+                ForkMode::Head => {
+                    let latest = rpc.latest_ledger()?;
+                    let source = rpc.clone();
+                    (latest.header, Rc::new(move || Box::new(RpcSource(source.clone()))))
+                }
+                ForkMode::Checkpoint(ledger) => {
+                    let pinned = CheckpointSource::open(rpc.clone(), ledger)?;
+                    let source = pinned.source.clone();
+                    (pinned.header, Rc::new(move || Box::new(CheckpointLedger(source.clone()))))
+                }
+            };
+            if header.ledger_version != host_protocol() {
+                bail!("{name} is on protocol {}, this build's host implements protocol {}", header.ledger_version, host_protocol());
             }
             let fork = ForkPoint {
-                ledger_seq: latest.sequence,
-                close_time: latest.header.scp_value.close_time.0,
-                protocol_version: latest.protocol_version,
-                base_reserve: latest.header.base_reserve,
-                base_fee: latest.header.base_fee,
+                ledger_seq: header.ledger_seq,
+                close_time: header.scp_value.close_time.0,
+                protocol_version: header.ledger_version,
+                base_reserve: header.base_reserve,
+                base_fee: header.base_fee,
             };
             let mut options = options.clone();
             options.network_passphrase = actual.clone();
-            options.max_tx_set_size = Some(latest.header.max_tx_set_size);
-            let source = rpc.clone();
+            // The header's maxTxSetSize is the classic per-ledger limit.
+            options.max_tx_set_size = Some(header.max_tx_set_size);
+            let description = source().describe();
             Ok(Forked {
                 network_name: name,
                 passphrase: actual,
-                description: RpcSource(rpc.clone()).describe(),
+                description,
                 rpc: Some(rpc),
-                header: Some(latest.header),
-                fresh: Box::new(move || Session::new(Box::new(RpcSource(source.clone())), fork.clone(), options.clone())),
+                header: Some(header),
+                fresh: Box::new(move || Session::new(source(), fork.clone(), options.clone())),
             })
         }
         Base::Snapshot(path) => {

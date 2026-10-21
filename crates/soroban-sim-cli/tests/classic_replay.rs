@@ -36,7 +36,6 @@ use soroban_env_host::xdr::{
 };
 use soroban_sim_cli::rpc::RpcClient;
 use soroban_sim_cli::run::{MAINNET_PASSPHRASE, MAINNET_RPC};
-use soroban_sim_facade::tx;
 use soroban_sim_core::ledger_entry_to_ledger_key;
 use soroban_sim_core::session::{
     account_key, classic_op_supported, host_protocol, issuer, muxed_account_id, network_id, trustline_key, ForkPoint,
@@ -148,12 +147,11 @@ fn replay(case: &Case, config: &[StoredEntry]) -> Vec<String> {
     let mut s = Session::new(Box::new(base), fork, SessionOptions::new(MAINNET_PASSPHRASE)).unwrap();
     assert_eq!((s.ledger_info().sequence_number, s.ledger_info().timestamp), (case.ledger, case.close_time));
     let envelope: TransactionEnvelope = decode(&case.envelope);
-    let TransactionEnvelope::Tx(e) = &envelope else { unreachable!("only v1 envelopes are sampled") };
     let record = s.submit("replay", &envelope).unwrap();
 
     let mut diffs = vec![];
     let want: TransactionResult = decode(&case.result);
-    let ours = tx::result(&record, e.tx.fee as i64).unwrap();
+    let ours = record.transaction_result();
     if ours.result != want.result {
         diffs.push(format!("result {} ≠ network {} ({})", result_text(&ours.result), result_text(&want.result), record.status.summary()));
     }

@@ -6,14 +6,15 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use soroban_env_host::xdr::{
-    AccountId, ContractExecutable, ContractIdPreimage, ContractIdPreimageFromAddress, CreateContractArgsV2, Hash,
-    HostFunction, InvokeContractArgs, InvokeHostFunctionOp, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerKey,
-    Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ReadXdr, ScAddress, ScSymbol, ScVal,
-    SequenceNumber, SorobanAuthorizationEntry, SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionMeta, TransactionV0, TransactionV0Envelope, TransactionV0Ext, TransactionV1Envelope, Uint256, WriteXdr,
+    AccountId, ContractExecutable, ContractIdPreimage, ContractIdPreimageFromAddress, CreateContractArgsV2, FeeBumpTransaction,
+    FeeBumpTransactionEnvelope, FeeBumpTransactionExt, FeeBumpTransactionInnerTx, Hash, HostFunction, InvokeContractArgs,
+    InvokeHostFunctionOp, LedgerEntry, LedgerEntryChange, LedgerEntryData, LedgerEntryExt, LedgerKey, Limits, Memo, MuxedAccount,
+    Operation, OperationBody, Preconditions, PublicKey, ReadXdr, ScAddress, ScSymbol, ScVal, SequenceNumber,
+    SorobanAuthorizationEntry, SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt, TransactionMeta,
+    TransactionV0, TransactionV0Envelope, TransactionV0Ext, TransactionV1Envelope, Uint256, WriteXdr,
 };
 use soroban_sim_core::ledger_entry_to_ledger_key;
-use soroban_sim_core::session::{account_key, host_protocol, new_account, transaction_hash, Ed25519Key, ForkPoint, SessionOptions, StoredEntry};
+use soroban_sim_core::session::{account_key, fee_bump_hash, host_protocol, new_account, transaction_hash, Ed25519Key, ForkPoint, SessionOptions, StoredEntry};
 use soroban_sim_facade::{open, DeferredBase, Facade, FacadeConfig, Opened, Reply, MAINNET_PASSPHRASE};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -369,6 +370,55 @@ fn a_real_signature_on_a_v0_envelope_is_flagged() {
     let mut c = Client::open(MAINNET_PASSPHRASE);
     let envelope = v0(&mut c, MAINNET_PASSPHRASE);
     assert_eq!(c.error("sendTransaction", json!({ "transaction": envelope }))["code"], -32001);
+}
+
+#[test]
+fn a_fee_bump_shows_its_fee_source_paying() {
+    let mut c = Client::open(PASSPHRASE);
+    let key = rehearse_alice(&mut c);
+    let bob = Ed25519Key::throwaway("bob");
+    c.call("fork_setBalance", json!({ "account": g(&bob), "xlm": "100", "label": "bob" }));
+    let TransactionEnvelope::Tx(inner) = c.prepare(PASSPHRASE, &alice(), &key, upload(&wasm("add_i32"))) else { unreachable!() };
+    let PublicKey::PublicKeyTypeEd25519(bob_key) = bob.account_id().0;
+    let tx = FeeBumpTransaction {
+        fee_source: MuxedAccount::Ed25519(bob_key),
+        fee: inner.tx.fee as i64 + 200,
+        inner_tx: FeeBumpTransactionInnerTx::Tx(inner),
+        ext: FeeBumpTransactionExt::V0,
+    };
+    let hash = fee_bump_hash(&tx, sha256(PASSPHRASE.as_bytes())).unwrap();
+    let bumped = TransactionEnvelope::TxFeeBump(FeeBumpTransactionEnvelope { tx, signatures: vec![bob.sign_decorated(&hash)].try_into().unwrap() });
+    let (_, got) = c.send(&bumped);
+    assert_eq!(got["status"], "SUCCESS", "{got}");
+
+    let TransactionMeta::V4(meta) = TransactionMeta::from_xdr_base64(got["resultMetaXdr"].as_str().unwrap(), Limits::none()).unwrap() else { panic!("V4 meta") };
+    let balances = |id: &AccountId| -> Vec<i64> {
+        meta.tx_changes_before
+            .iter()
+            .filter_map(|ch| match ch {
+                LedgerEntryChange::State(e) | LedgerEntryChange::Updated(e) => Some(e),
+                _ => None,
+            })
+            .filter_map(|e| match &e.data {
+                LedgerEntryData::Account(a) if a.account_id == *id => Some(a.balance),
+                _ => None,
+            })
+            .collect()
+    };
+    let paid = balances(&bob.account_id());
+    assert_eq!(paid.len(), 2, "bob's fee is in the meta: {paid:?}");
+    assert!(paid[1] < paid[0], "bob pays: {paid:?}");
+    let source = balances(&alice());
+    assert_eq!(source.len(), 2, "alice's sequence bump is in the meta");
+    assert_eq!(source[0], source[1], "alice pays nothing");
+
+    let steps = c.call("fork_steps", json!({}))["steps"].as_array().unwrap().clone();
+    let accounts = steps.last().unwrap()["changes"].as_array().unwrap().iter().filter(|ch| ch["key_type"] == "Account").count();
+    assert_eq!(accounts, 2, "the step lists both accounts: {}", steps.last().unwrap()["changes"]);
+
+    let report = c.call("fork_report", json!({}));
+    let payers: Vec<&str> = report["report"]["fees"]["by_payer"].as_array().unwrap().iter().map(|p| p["account"].as_str().unwrap()).collect();
+    assert_eq!(payers, [g(&bob).as_str()]);
 }
 
 #[test]

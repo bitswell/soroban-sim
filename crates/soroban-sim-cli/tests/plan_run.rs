@@ -3,7 +3,7 @@
 
 use base64::Engine;
 use soroban_env_host::xdr::{LedgerEntry, LedgerEntryData, LedgerEntryExt, Limits, ReadXdr};
-use soroban_sim_cli::run::{Base, RunConfig, Runner, TESTNET_PASSPHRASE};
+use soroban_sim_cli::run::{Base, ForkMode, RunConfig, Runner, TESTNET_PASSPHRASE};
 use soroban_sim_cli::snapshot::SnapshotFile;
 use soroban_sim_core::session::{host_protocol, new_account, Ed25519Key, ForkPoint, StoredEntry};
 use std::collections::BTreeMap;
@@ -62,6 +62,7 @@ fn config(base: PathBuf) -> RunConfig {
     RunConfig {
         plan_path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/rehearsal.yaml"),
         base: Some(Base::Snapshot(base)),
+        fork_mode: ForkMode::Head,
         wasm_dirs: vec![],
         differential: false,
         keep_going: true,
@@ -250,6 +251,7 @@ steps:
       - name: carol adds a co-signer
         source: "${key.carol}"
         set_options: { signer: { key: backup, weight: 1 }, low_threshold: 1, med_threshold: 2, high_threshold: 2, home_domain: carol.invalid }
+        fee_bump: { source: "${alice}" }
   - name: "negative: carol's master key alone"
     payment: { destination: "${alice}", amount: 1 }
     source: "${key.carol}"
@@ -258,6 +260,11 @@ steps:
     payment: { destination: "${alice}", amount: "0.5" }
     source: "${key.carol}"
     sign_with: [carol, backup]
+  - name: "carol pays again, alice pays the fee"
+    payment: { destination: "${key.dave}", amount: 1 }
+    source: "${key.carol}"
+    sign_with: [carol, backup]
+    fee_bump: { source: "${alice}", fee: 1000 }
   - name: dave trusts USD, the issuer mints
     source: "${key.dave}"
     sign_with: [dave, issuer]
@@ -284,6 +291,13 @@ steps:
     assert_eq!(issuer.ledger, dave.ledger + 1);
     assert!(issuer.tx.as_ref().unwrap().deferred.as_deref().unwrap().contains("one per account"));
     assert_eq!(dave.tx.as_ref().unwrap().operations, vec!["CREATE_ACCOUNT_SUCCESS"]);
+    // A fee bump inside the ledger block: alice pays carol's fee (one more
+    // operation than carol's: 200), carol's own sequence number is used.
+    let bumped = cosign.tx.as_ref().unwrap();
+    let carol_g = Ed25519Key::throwaway("carol").strkey();
+    assert_eq!((bumped.source.as_str(), bumped.fee_source.as_str(), bumped.fee_charged), (carol_g.as_str(), alice().strkey().as_str(), 200));
+    let again = step("carol pays again, alice pays the fee").tx.as_ref().unwrap();
+    assert_eq!((again.fee_source.as_str(), again.fee_bid, again.fee_charged), (alice().strkey().as_str(), 1000, 200));
     assert_eq!(step("dave trusts USD, the issuer mints").tx.as_ref().unwrap().operations, vec!["CHANGE_TRUST_SUCCESS", "PAYMENT_SUCCESS"]);
 
     // Every account is a real transaction's: one override, alice's key.
@@ -384,6 +398,7 @@ fn the_two_step_example_runs_over_the_recorded_testnet_fork() {
     let report = Runner::new(RunConfig {
         plan_path: repo().join("examples/session/two-step-add.yaml"),
         base: Some(Base::Snapshot(recorded_testnet_fork(&dir))),
+        fork_mode: ForkMode::Head,
         wasm_dirs: vec![],
         differential: false,
         keep_going: false,

@@ -19,9 +19,10 @@ use std::rc::Rc;
 use crate::{Facade, FacadeConfig};
 
 /// The network settings a session reads when it opens: soroban-simulation's
-/// `NetworkConfig`, the validator's per-transaction limits, the per-ledger
-/// limits, and the frozen ledger keys (CAP-77).
-pub const OPEN_SETTINGS: [ConfigSettingId; 13] = [
+/// `NetworkConfig`, the validator's per-transaction and entry-size limits, the
+/// per-ledger limits, and the frozen ledger keys (CAP-77).
+pub const OPEN_SETTINGS: [ConfigSettingId; 16] = [
+    ConfigSettingId::ContractMaxSizeBytes,
     ConfigSettingId::ContractComputeV0,
     ConfigSettingId::ContractLedgerCostV0,
     ConfigSettingId::ContractLedgerCostExtV0,
@@ -31,6 +32,8 @@ pub const OPEN_SETTINGS: [ConfigSettingId; 13] = [
     ConfigSettingId::StateArchival,
     ConfigSettingId::ContractCostParamsCpuInstructions,
     ConfigSettingId::ContractCostParamsMemoryBytes,
+    ConfigSettingId::ContractDataKeySizeBytes,
+    ConfigSettingId::ContractDataEntrySizeBytes,
     ConfigSettingId::LiveSorobanStateSizeWindow,
     ConfigSettingId::ContractExecutionLanes,
     ConfigSettingId::FrozenLedgerKeys,

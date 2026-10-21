@@ -462,22 +462,6 @@ fn change_trust(ledger: &ForkedLedger, ctx: &OpContext, source: &AccountId, op: 
     Ok(Ok(ChangeTrustResult::Success))
 }
 
-/// Remove `key` from the account's signers if it is one, releasing its
-/// reserve (and its sponsorship): core's `removeAccountSigner`, which spends a
-/// pre-auth transaction signer.
-pub fn remove_signer(ledger: &ForkedLedger, ctx: &OpContext, id: &AccountId, key: &SignerKey) -> Result<()> {
-    let Some(mut a) = ledger.account(id)? else { return Ok(()) };
-    let mut pairs = signer_pairs(&a);
-    let Some(i) = pairs.iter().position(|(s, _)| s.key == *key) else { return Ok(()) };
-    let (_, sponsor) = pairs.remove(i);
-    a.num_sub_entries = a.num_sub_entries.checked_sub(1).ok_or_else(|| anyhow!("{id} has a signer but no sub-entries"))?;
-    if let SponsorshipDescriptor(Some(sponsor)) = sponsor {
-        release_sponsorship(ledger, ctx, &sponsor, &mut a, 1)?;
-    }
-    set_signer_pairs(&mut a, pairs)?;
-    ledger.put_account(a, ctx.ledger_seq)
-}
-
 // --- accounts ---
 
 fn load_account(ledger: &ForkedLedger, id: &AccountId) -> Result<AccountEntry> {
@@ -592,15 +576,7 @@ pub fn trustline_key(account: &AccountId, asset: &Asset) -> LedgerKey {
 /// core's `isAssetValid`: an alphanumeric code of 1-4 (or 5-12) characters,
 /// zero-padded only at the end.
 pub fn asset_valid(asset: &Asset) -> bool {
-    let code_valid = |code: &[u8], min: usize| {
-        let len = code.iter().position(|b| *b == 0).unwrap_or(code.len());
-        len >= min && code[..len].iter().all(u8::is_ascii_alphanumeric) && code[len..].iter().all(|b| *b == 0)
-    };
-    match asset {
-        Asset::Native => true,
-        Asset::CreditAlphanum4(a) => code_valid(&a.asset_code.0, 1),
-        Asset::CreditAlphanum12(a) => code_valid(&a.asset_code.0, 5),
-    }
+    super::validator::asset_valid(asset)
 }
 
 /// How an account holds an asset: core gives the issuer a trustline of

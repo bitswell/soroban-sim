@@ -45,6 +45,7 @@ transaction and per `fork_*` call.
 | Option | Meaning |
 |---|---|
 | `--fork mainnet\|testnet\|URL` | The network to fork. |
+| `--fork-mode head\|checkpoint`, `--fork-ledger N` | Read the network lazily at its latest ledger (default), or pin one ledger and roll every read back to it ([`session.md`, "Fork modes"](session.md#fork-modes)). |
 | `--network-passphrase P` | Checked against the RPC's `getNetwork`. |
 | `--snapshot FILE` | Fork a snapshot file instead (offline). |
 | `--host H`, `--port N` | Where to listen (default `127.0.0.1:8000`). Off loopback, anyone who can reach it can read the fork and call `fork_*`. |
@@ -83,7 +84,7 @@ The stellar-rpc methods:
 | `getLatestLedger` | The last closed session ledger, with a `headerXdr` copied from the fork's header and a header-only `metadataXdr`. |
 | `getLedgerEntries` | The session's view of each key: the overlay first (session writes, overrides), then the base, read lazily. Archived entries come back as RPC returns them; expired temporary entries are absent. TTL keys are refused, as RPC refuses them. |
 | `simulateTransaction` | soroban-simulation against the session's state, in the ledger the next transaction would apply in. It uses stellar-rpc's resource padding, `resourceConfig.instructionLeeway`, the `enforce`/`record`/`record_allow_nonroot` auth modes (default: enforce when the operation carries auth entries), and `useUpgradedAuth`. A failed call is the result's `error`: the host error plus its event log, newest first. |
-| `sendTransaction` | Validates and applies through the same session (signatures, thresholds, sequence numbers, fees, balance, limits), Soroban and classic (`CreateAccount`, `Payment`, `SetOptions`, `ChangeTrust`) alike. `PENDING` once applied (one ledger per transaction) or queued in a held ledger, `ERROR` with `errorResultXdr` when rejected, `DUPLICATE` for a hash already applied or queued, `TRY_AGAIN_LATER` when a held ledger already has a transaction from the same source (core's queue holds one per account). |
+| `sendTransaction` | Validates and applies through the same session (signatures, thresholds, sequence numbers, fees, balance, limits), Soroban and classic (`CreateAccount`, `Payment`, `SetOptions`, `ChangeTrust`) alike, in v1 or fee-bump envelopes. `PENDING` once applied (one ledger per transaction) or queued in a held ledger, `ERROR` with `errorResultXdr` when rejected, `DUPLICATE` for a hash already applied or queued, `TRY_AGAIN_LATER` when a held ledger already has a transaction from the same source (core's queue holds one per account). |
 | `getTransaction` | `SUCCESS` or `FAILED` with `envelopeXdr`, `resultXdr` (a classic transaction's carries every operation's result), a V4 `resultMetaXdr` (return value, events, fees, entry changes; for a classic transaction each operation's changes and no Soroban meta), `applicationOrder` and `events`; `NOT_FOUND` otherwise, and while it waits in a held ledger. |
 | `getEvents` | Contract and system events of the session's transactions, with `type`, `contractIds` and topic filters (`*`, trailing `**`), `startLedger`/`endLedger` and cursor pagination. |
 
@@ -132,7 +133,8 @@ included.
 
 ## Fidelity and limits
 
-The session's fidelity applies: host-exact, envelope-approximate. On top of it:
+The session's fidelity applies (see [`session.md`](session.md#fidelity-and-limits)
+and [`replay.md`](replay.md)). On top of it:
 
 - Simulation runs in the next ledger, the one a transaction sent now applies
   in. stellar-rpc simulates in its latest closed ledger.
@@ -146,8 +148,8 @@ The session's fidelity applies: host-exact, envelope-approximate. On top of it:
   report say why.
 - Not served: `getLedgers`, `getTransactions`, `xdrFormat: json`,
   `ExtendFootprintTtl` and `RestoreFootprint` (archived entries in an
-  `InvokeHostFunction` footprint restore automatically), fee-bump and v0
-  envelopes, the classic operations the session does not model
+  `InvokeHostFunction` footprint restore automatically), v0 envelopes, the
+  classic operations the session does not model
   ([`docs/session.md`](session.md#classic-operations)), and friendbot (use
   `fork_setBalance`, or a `CreateAccount` from a funded account).
 - History before the fork is not there. `getTransaction` knows only session

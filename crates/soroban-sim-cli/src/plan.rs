@@ -290,6 +290,9 @@ pub struct Step {
     /// Save the step's signed envelope (base64 XDR) under this name.
     #[serde(default)]
     pub save_envelope: Option<String>,
+    /// Wrap the transaction in a fee bump: another account pays its fee.
+    #[serde(default)]
+    pub fee_bump: Option<FeeBumpSpec>,
     /// For `view`: run against a fresh fork, without the session's writes
     /// and overrides.
     #[serde(default)]
@@ -301,6 +304,24 @@ pub struct Step {
     pub save: Option<String>,
     #[serde(default)]
     pub expect: Option<Expect>,
+}
+
+/// A fee bump around a transaction step: `source` pays the fee (and gets
+/// any refund) instead of the transaction's own source.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeeBumpSpec {
+    /// The fee source (a G address, or `${key.NAME}`).
+    pub source: String,
+    /// The outer fee in stroops. Default: the inner transaction's inclusion
+    /// fee rate over one more operation (at least the base fee each), plus
+    /// its resource fee.
+    #[serde(default)]
+    pub fee: Option<ValueExpr>,
+    /// Who signs the fee bump (key names). Default: the classic signers
+    /// registered for the fee source, else the key whose account it is.
+    #[serde(default)]
+    pub sign_with: Option<Vec<String>>,
 }
 
 /// `CreateAccount`: a new account funded from the source.
@@ -516,6 +537,9 @@ impl Step {
         }
         if self.hold && self.save_envelope.is_none() {
             bail!("{at}: `hold` needs `save_envelope`");
+        }
+        if self.fee_bump.is_some() && !self.is_transaction() {
+            bail!("{at}: `fee_bump` needs a transaction step");
         }
         if let Some(ops) = &self.operations {
             if ops.is_empty() {

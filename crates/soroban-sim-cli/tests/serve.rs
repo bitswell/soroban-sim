@@ -588,6 +588,23 @@ fn classic_transactions_and_a_held_ledger() {
     let sent = ok(&mut f, "sendTransaction", json!({ "transaction": signed(&short, TESTNET_PASSPHRASE, &[&carol, &backup]) }));
     assert_eq!(ok(&mut f, "getTransaction", json!({ "hash": sent["hash"] }))["status"], "SUCCESS");
 
+    // A fee bump: alice pays carol's payment. getTransaction says so, and
+    // the result is core's txFEE_BUMP_INNER_SUCCESS.
+    {
+        use soroban_env_host::xdr::{FeeBumpTransaction, FeeBumpTransactionEnvelope, FeeBumpTransactionExt, FeeBumpTransactionInnerTx};
+        let inner = classic_tx(&carol, account_seq(&mut f, &carol) + 1, vec![pay(&alice(), 1)]);
+        let hash = transaction_hash(&inner, network_id(TESTNET_PASSPHRASE)).unwrap();
+        let inner = TransactionV1Envelope { tx: inner, signatures: vec![carol.sign_decorated(&hash), backup.sign_decorated(&hash)].try_into().unwrap() };
+        let PublicKey::PublicKeyTypeEd25519(payer) = alice().account_id().0;
+        let bump = FeeBumpTransaction { fee_source: MuxedAccount::Ed25519(payer), fee: 200, inner_tx: FeeBumpTransactionInnerTx::Tx(inner), ext: FeeBumpTransactionExt::V0 };
+        let outer = soroban_sim_core::session::fee_bump_hash(&bump, network_id(TESTNET_PASSPHRASE)).unwrap();
+        let envelope = TransactionEnvelope::TxFeeBump(FeeBumpTransactionEnvelope { tx: bump, signatures: vec![alice_throwaway().sign_decorated(&outer)].try_into().unwrap() });
+        let sent = ok(&mut f, "sendTransaction", json!({ "transaction": b64(&envelope) }));
+        let got = ok(&mut f, "getTransaction", json!({ "hash": sent["hash"] }));
+        assert_eq!((got["status"].as_str(), got["feeBump"].as_bool()), (Some("SUCCESS"), Some(true)), "{got}");
+        assert!(matches!(result_code(&got["resultXdr"]), TransactionResultResult::TxFeeBumpInnerSuccess(_)));
+    }
+
     // An apply-time failure carries core's operation code and pays the fee.
     let lost = classic_tx(&alice(), account_seq(&mut f, &alice()) + 1, vec![pay(&nobody, 1)]);
     let sent = ok(&mut f, "sendTransaction", json!({ "transaction": signed(&lost, TESTNET_PASSPHRASE, &[&alice_throwaway()]) }));

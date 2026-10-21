@@ -33,6 +33,7 @@ const out = process.argv[3] ?? join(repoRoot, "packages/web-demo/tests/fixtures/
 // ConfigSettingId values (stellar-xdr): the settings NetworkConfig and the
 // session's transaction limits load (soroban-sim-facade's OPEN_SETTINGS).
 const OPEN_SETTINGS = {
+  contractMaxSizeBytes: 0,
   contractComputeV0: 1,
   contractLedgerCostV0: 2,
   contractHistoricalDataV0: 3,
@@ -40,6 +41,8 @@ const OPEN_SETTINGS = {
   contractBandwidthV0: 5,
   contractCostParamsCpuInstructions: 6,
   contractCostParamsMemoryBytes: 7,
+  contractDataKeySizeBytes: 8,
+  contractDataEntrySizeBytes: 9,
   stateArchival: 10,
   liveSorobanStateSizeWindow: 12,
   contractLedgerCostExtV0: 15,

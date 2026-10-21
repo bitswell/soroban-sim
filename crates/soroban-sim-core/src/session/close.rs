@@ -9,11 +9,13 @@
 //!                   limits, highest inclusion fee rate first (the rest wait)
 //!   apply order     classic phase, then Soroban phase, each shuffled by
 //!                   (full transaction hash XOR transaction-set hash)
-//!   fees            every fee charged first, in apply order
+//!   fees            every fee charged first, in apply order, to the fee
+//!                   source (a fee bump's payer)
 //!   apply           each transaction validated again against the ledger the
 //!                   ones before it left, its sequence number consumed, its
-//!                   pre-auth signer removed, then its operations applied
-//!   refunds         Soroban refunds once every transaction has applied
+//!                   pre-auth signers removed, then its operations applied
+//!   refunds         Soroban refunds to the fee source once every transaction
+//!                   has applied
 //!   close           the ledger closes; what waited goes into the next one
 //! ```
 //!
@@ -21,23 +23,29 @@
 //! ledger hash, and the Soroban phase is one stage of one cluster. Core's
 //! builder may split independent Soroban transactions into parallel
 //! clusters, which can reorder transactions that do not conflict. No lane
-//! is surge priced: the inclusion fee charged is the base fee per operation.
+//! is surge priced unless [`SubmitOptions::lane_base_fee`] says so: the
+//! inclusion fee charged is the base fee per operation (a fee bump counts one
+//! more).
 
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 use soroban_env_host::storage::SnapshotSource;
 use soroban_env_host::xdr::{
-    AccountId, ConfigSettingEntry, ConfigSettingId, DependentTxCluster, GeneralizedTransactionSet, Hash, LedgerEntryData,
+    ConfigSettingEntry, ConfigSettingId, DependentTxCluster, GeneralizedTransactionSet, Hash, LedgerEntryData,
     LedgerKey, LedgerKeyConfigSetting, Limits, OperationResult, ParallelTxExecutionStage, ParallelTxsComponent, ScVal,
-    SignerKey, TransactionEnvelope, TransactionPhase, TransactionSetV1, TxSetComponent, TxSetComponentTxsMaybeDiscountedFee,
-    Uint256, WriteXdr,
+    TransactionEnvelope, TransactionPhase, TransactionSetV1, TxSetComponent, TxSetComponentTxsMaybeDiscountedFee,
+    WriteXdr,
 };
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+use super::applier::{remove_one_time_signer, Metrics};
 use super::classic::{self, OpContext};
-use super::validator::{bump_sequence, declared_resources, muxed_account_id, Rejection, TxCode, Valid, ValidClassicTx};
-use super::{diagnostics_tail, transaction_hash, Fees, Session, TxRecord, TxStatus};
+use super::validator::{
+    bump_sequence, declared_resources, envelope_fee_source, envelope_hash, envelope_source, transaction_hash, Rejection, TxCode, Valid,
+    ValidClassicTx,
+};
+use super::{diagnostics_tail, Fees, Session, SubmitOptions, TxRecord, TxStatus};
 
 /// Per-ledger maxima: the classic phase's operations (the header's
 /// `maxTxSetSize`) and the Soroban phase's transactions and resources (the
@@ -164,11 +172,13 @@ struct Candidate<'a> {
 }
 
 impl Candidate<'_> {
+    /// Its operations as core counts them: a fee bump counts one more.
     fn ops(&self) -> u64 {
-        match &self.valid {
+        let ops = match &self.valid {
             Valid::Soroban(_) => 1,
             Valid::Classic(c) => c.ops.len() as u64,
-        }
+        };
+        ops + self.valid.inner_hash().is_some() as u64
     }
 
     /// The inclusion fee bid per operation, as a fraction.
@@ -200,9 +210,15 @@ impl Session {
     /// allow) waits for the next ledger, as it would in core's queue.
     /// An error leaves the session as it was before the call.
     pub fn submit_ledger(&mut self, txs: &[(&str, &TransactionEnvelope)]) -> Result<Vec<TxRecord>> {
+        self.submit_ledger_with(txs, &SubmitOptions::default())
+    }
+
+    /// [`Session::submit_ledger`] with what the ledger close decides set
+    /// explicitly: the lanes' base fee, and the first transaction's PRNG seed.
+    pub fn submit_ledger_with(&mut self, txs: &[(&str, &TransactionEnvelope)], options: &SubmitOptions) -> Result<Vec<TxRecord>> {
         let (depth, info, logged) = (self.ledger.depth(), self.info.clone(), self.log.len());
         self.ledger.begin();
-        let settled = self.settle(txs);
+        let settled = self.settle(txs, options);
         if settled.is_ok() {
             self.ledger.commit();
         } else {
@@ -213,7 +229,7 @@ impl Session {
         settled
     }
 
-    fn settle(&mut self, txs: &[(&str, &TransactionEnvelope)]) -> Result<Vec<TxRecord>> {
+    fn settle(&mut self, txs: &[(&str, &TransactionEnvelope)], options: &SubmitOptions) -> Result<Vec<TxRecord>> {
         let mut records: Vec<Option<TxRecord>> = vec![None; txs.len()];
         let mut pending: Vec<Pending> = txs.iter().enumerate().map(|(index, (label, envelope))| Pending { index, label, envelope, deferred: None }).collect();
         while !pending.is_empty() {
@@ -227,7 +243,7 @@ impl Session {
                     waiting.push(Pending { deferred: Some(why), ..p });
                     continue;
                 }
-                match self.validator(false).validate(p.envelope).map_err(|e| self.fetch_failure(e))? {
+                match self.validator_with(false, options.lane_base_fee).validate(p.envelope).map_err(|e| self.fetch_failure(e))? {
                     Ok(valid) => {
                         sources.extend(source);
                         let full_hash = Sha256::digest(p.envelope.to_xdr(Limits::none())?).into();
@@ -238,7 +254,7 @@ impl Session {
             }
             let (selected, deferred, refused) = select(candidates, &self.ledger_limits);
             for (c, why) in refused {
-                let r = Rejection { code: TxCode::SorobanInvalid, detail: why, op_results: vec![] };
+                let r = Rejection { code: TxCode::SorobanInvalid, detail: why, fee_bump_inner: false, op_results: vec![] };
                 records[c.pending.index] = Some(self.rejected(&c.pending, r));
             }
             waiting.extend(deferred.into_iter().map(|(c, why)| Pending { deferred: Some(why), ..c.pending }));
@@ -247,7 +263,7 @@ impl Session {
             // ledger (anything deferred for the limits waits behind one that
             // got in), so the loop ends.
             if !selected.is_empty() {
-                for (index, record) in self.close_with(selected)? {
+                for (index, record) in self.close_with(selected, options)? {
                     records[index] = Some(record);
                 }
             }
@@ -258,7 +274,7 @@ impl Session {
 
     /// Close one ledger with `selected`: core's apply order, fees first,
     /// apply-time validation, refunds last. Returns (submission index, record).
-    fn close_with(&mut self, selected: Vec<Candidate<'_>>) -> Result<Vec<(usize, TxRecord)>> {
+    fn close_with(&mut self, selected: Vec<Candidate<'_>>, options: &SubmitOptions) -> Result<Vec<(usize, TxRecord)>> {
         let seq = self.info.sequence_number;
         let set_hash = self.tx_set_hash(&selected)?;
         let (mut order, soroban): (Vec<_>, Vec<_>) = selected.into_iter().partition(|c| !c.valid.is_soroban());
@@ -272,7 +288,7 @@ impl Session {
         let mut charged = Vec::with_capacity(order.len());
         for c in &order {
             let fee = c.valid.fees().charged_up_front();
-            let source = c.valid.source();
+            let source = c.valid.fee_source();
             let mut payer = self.ledger.account(source)?.ok_or_else(|| anyhow!("fee source {source} vanished"))?;
             let fee = fee.min(payer.balance);
             payer.balance -= fee;
@@ -288,15 +304,20 @@ impl Session {
             record.deferred = c.pending.deferred.clone();
             record.fees = *c.valid.fees();
             record.fee_charged = fee;
-            let seed = core_prng_seed(&set_hash, i as u64);
-            let refund = self.apply_one(&c, &mut record, seed)?;
+            // A given seed is for the first transaction (a replayed one).
+            let seed = match options.prng_seed {
+                Some(seed) if i == 0 => seed,
+                _ => core_prng_seed(&set_hash, i as u64),
+            };
+            let refund = self.apply_one(&c, &mut record, seed, options)?;
             if refund > 0 {
-                refunds.push((c.valid.source().clone(), refund, out.len()));
+                refunds.push((c.valid.fee_source().clone(), refund, out.len()));
             }
             out.push((c.pending.index, record));
         }
-        // Soroban refunds once the whole set has applied; nothing comes back
-        // to an account that is gone or whose liabilities are in the way.
+        // Soroban refunds once the whole set has applied, to the fee source;
+        // nothing comes back to an account that is gone (core's
+        // `refundSorobanFee`).
         for (payer, refund, at) in refunds {
             let Some(mut account) = self.ledger.account(&payer)? else { continue };
             let Some(balance) = account.balance.checked_add(refund) else { continue };
@@ -315,11 +336,16 @@ impl Session {
 
     /// Validate `c` again against the ledger as it is now, consume its
     /// sequence number, then apply it. Returns the refund to credit later.
-    fn apply_one(&mut self, c: &Candidate<'_>, record: &mut TxRecord, seed: [u8; 32]) -> Result<i64> {
+    fn apply_one(&mut self, c: &Candidate<'_>, record: &mut TxRecord, seed: [u8; 32], options: &SubmitOptions) -> Result<i64> {
         let seq = self.info.sequence_number;
-        let verdict = self.validator(true).validate(c.pending.envelope).map_err(|e| self.fetch_failure(e))?;
+        // A fee bump first spends its fee source's pre-auth signer, then
+        // applies the inner transaction (core's `FeeBumpTransactionFrame::apply`).
+        if c.valid.inner_hash().is_some() {
+            remove_one_time_signer(&self.ledger, c.valid.fee_source(), c.valid.hash(), seq)?;
+        }
+        let verdict = self.validator_with(true, options.lane_base_fee).validate_at_apply(c.pending.envelope).map_err(|e| self.fetch_failure(e))?;
         // Core consumes the sequence number once the sequence check passed,
-        // and drops the transaction's pre-auth signer whatever happens next.
+        // and drops the transaction's pre-auth signers whatever happens next.
         let seq_passed = match &verdict {
             Ok(_) => true,
             Err(r) => !matches!(
@@ -342,24 +368,25 @@ impl Session {
             bump_sequence(&mut account, c.valid.seq_num(), seq, self.info.timestamp);
             self.ledger.put_account(account, seq)?;
         }
-        self.remove_one_time_signers(&c.valid, c.pending.envelope)?;
-        let valid = match verdict {
-            Ok(v) => v,
-            Err(r) => {
-                record.failed_code = Some(r.code);
-                record.op_results = r.op_results;
-                record.status = TxStatus::Failed { reason: format!("{} at apply: {}", r.code.as_str(), r.detail) };
-                // No operation ran: the whole refundable fee comes back.
-                return Ok(c.valid.fees().refundable);
-            }
-        };
-        record.signers = valid.signers().to_vec();
-        record.replayable = valid.replayable().to_vec();
-        match valid {
+        let tx_hash = c.valid.inner_hash().unwrap_or(c.valid.hash());
+        for id in std::iter::once(c.valid.source().clone()).chain(c.valid.op_sources()) {
+            remove_one_time_signer(&self.ledger, &id, tx_hash, seq)?;
+        }
+        if let Err(r) = verdict {
+            record.failed_code = Some(r.code);
+            record.failed_fee_bump_inner = r.fee_bump_inner;
+            record.op_results = r.op_results;
+            record.status = TxStatus::Failed { code: None, reason: format!("{} at apply: {}", super::rejection_code(r.code, r.fee_bump_inner), r.detail) };
+            // No operation ran: the whole refundable fee comes back.
+            return Ok(c.valid.fees().refundable);
+        }
+        record.signers = c.valid.signers().to_vec();
+        record.replayable = c.valid.replayable().to_vec();
+        match &c.valid {
             Valid::Soroban(v) => {
                 let applied = self
                     .applier
-                    .apply(&self.ledger, &self.info, &self.network_config, &self.limits, &v, self.options.enable_diagnostics, seed)
+                    .apply(&self.ledger, &self.info, &self.network_config, &self.limits, v, self.options.enable_diagnostics, seed)
                     .map_err(|e| self.fetch_failure(e))?;
                 record.rent_fee = applied.rent_fee;
                 record.events_fee = applied.events_fee;
@@ -372,14 +399,16 @@ impl Session {
                 record.restored = applied.restored;
                 record.events = applied.events;
                 record.diagnostics = applied.diagnostics;
+                record.metrics = applied.metrics;
+                record.success_hash = applied.success_hash;
                 record.status = match applied.result {
                     Ok(value) => TxStatus::Applied { value },
-                    Err(reason) => TxStatus::Failed { reason: format!("{reason}{}", diagnostics_tail(&record.diagnostics)) },
+                    Err(f) => TxStatus::Failed { code: Some(f.code), reason: format!("{}{}", f.reason, diagnostics_tail(&record.diagnostics)) },
                 };
                 Ok(applied.refund)
             }
             Valid::Classic(v) => {
-                self.apply_classic(&v, record)?;
+                self.apply_classic(v, record)?;
                 Ok(0)
             }
         }
@@ -419,31 +448,9 @@ impl Session {
             record.op_changes = changes;
         } else {
             self.ledger.rollback();
-            record.status = TxStatus::Failed { reason: failures.join("; ") };
+            record.status = TxStatus::Failed { code: None, reason: failures.join("; ") };
         }
         record.op_results = results;
-        Ok(())
-    }
-
-    /// core's `removeOneTimeSignerFromAllSourceAccounts`: a pre-auth signer
-    /// for this transaction is spent once it has been applied, valid or not.
-    fn remove_one_time_signers(&self, valid: &Valid, envelope: &TransactionEnvelope) -> Result<()> {
-        let TransactionEnvelope::Tx(e) = envelope else { return Ok(()) };
-        let hash = transaction_hash(&e.tx, self.info.network_id)?;
-        let key = SignerKey::PreAuthTx(Uint256(hash));
-        let mut accounts = vec![valid.source().clone()];
-        for op in e.tx.operations.iter() {
-            if let Some(s) = &op.source_account {
-                let id = muxed_account_id(s);
-                if !accounts.contains(&id) {
-                    accounts.push(id);
-                }
-            }
-        }
-        let ctx = OpContext { ledger_seq: self.info.sequence_number, base_reserve: self.info.base_reserve };
-        for id in accounts {
-            classic::remove_signer(&self.ledger, &ctx, &id, &key)?;
-        }
         Ok(())
     }
 
@@ -451,24 +458,28 @@ impl Session {
     fn rejected(&mut self, p: &Pending<'_>, r: Rejection) -> TxRecord {
         let mut record = self.blank_record(p.label, p.envelope);
         record.deferred = p.deferred.clone();
-        record.status = TxStatus::Rejected { code: r.code, detail: r.detail };
+        record.status = TxStatus::Rejected { code: r.code, detail: r.detail, fee_bump_inner: r.fee_bump_inner };
         record.op_results = r.op_results;
         self.log.push(record.clone());
         record
     }
 
     fn blank_record(&self, label: &str, envelope: &TransactionEnvelope) -> TxRecord {
-        let (hash, source) = match envelope {
-            TransactionEnvelope::Tx(e) => (transaction_hash(&e.tx, self.info.network_id).unwrap_or_default(), Some(muxed_account_id(&e.tx.source_account))),
-            _ => ([0; 32], None),
-        };
         TxRecord {
             label: label.to_string(),
             ledger: self.info.sequence_number,
             close_time: self.info.timestamp,
-            hash,
-            source,
-            status: TxStatus::Rejected { code: TxCode::Malformed, detail: String::new() },
+            hash: envelope_hash(envelope, self.info.network_id).unwrap_or_default(),
+            inner_hash: match envelope {
+                TransactionEnvelope::TxFeeBump(e) => {
+                    let soroban_env_host::xdr::FeeBumpTransactionInnerTx::Tx(inner) = &e.tx.inner_tx;
+                    transaction_hash(&inner.tx, self.info.network_id).ok()
+                }
+                _ => None,
+            },
+            source: envelope_source(envelope),
+            fee_source: envelope_fee_source(envelope),
+            status: TxStatus::Rejected { code: TxCode::Malformed, detail: String::new(), fee_bump_inner: false },
             fees: Fees::default(),
             fee_charged: 0,
             refund: 0,
@@ -483,11 +494,14 @@ impl Session {
             restored: 0,
             events: vec![],
             diagnostics: vec![],
+            metrics: Metrics::default(),
+            success_hash: None,
             signers: vec![],
             replayable: vec![],
             op_results: vec![],
             op_changes: vec![],
             failed_code: None,
+            failed_fee_bump_inner: false,
             application_order: None,
             deferred: None,
         }
@@ -578,12 +592,4 @@ fn xored(h: &[u8; 32], x: &[u8; 32]) -> [u8; 32] {
 /// in apply order.
 pub fn core_prng_seed(set_hash: &[u8; 32], apply_index: u64) -> [u8; 32] {
     Sha256::digest([set_hash.as_slice(), &apply_index.to_be_bytes()].concat()).into()
-}
-
-/// The source of an envelope's transaction.
-fn envelope_source(envelope: &TransactionEnvelope) -> Option<AccountId> {
-    match envelope {
-        TransactionEnvelope::Tx(e) => Some(muxed_account_id(&e.tx.source_account)),
-        _ => None,
-    }
 }
