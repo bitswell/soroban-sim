@@ -557,6 +557,9 @@ fn classic_transactions_and_a_held_ledger() {
     // core's queue holds one transaction per source account.
     let again = ok(&mut f, "sendTransaction", json!({ "transaction": signed(&classic_tx(&alice(), alice_seq + 2, vec![pay(&carol, 1)]), TESTNET_PASSPHRASE, &[&alice_throwaway()]) }));
     assert_eq!(again["status"], "TRY_AGAIN_LATER");
+    let older = ok(&mut f, "sendTransaction", json!({ "transaction": signed(&classic_tx(&alice(), alice_seq, vec![pay(&carol, 1)]), TESTNET_PASSPHRASE, &[&alice_throwaway()]) }));
+    assert_eq!(older["status"], "ERROR", "an older sequence number is txBAD_SEQ, as core's queue says");
+    assert!(matches!(result_code(&older["errorResultXdr"]), TransactionResultResult::TxBadSeq));
     assert_eq!(ok(&mut f, "getTransaction", json!({ "hash": a["hash"] }))["status"], "NOT_FOUND", "still waiting in the held ledger");
     assert_eq!(f.call("fork_advanceLedgers", json!({ "ledgers": 1 })).unwrap_err().code, RpcError::INVALID_PARAMS);
     assert_eq!(ok(&mut f, "fork_info", json!({}))["held"]["transactions"].as_array().unwrap().len(), 2);

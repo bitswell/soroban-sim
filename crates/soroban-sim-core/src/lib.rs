@@ -7,7 +7,8 @@ use soroban_env_host::xdr::{
     ContractCostParamEntry, ContractCostParams, ContractCostType, ContractDataDurability,
     ContractDataEntry, ContractExecutable, ContractId, ExtensionPoint, Hash, HostFunction,
     InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerKey, LedgerKeyAccount,
-    InvokeHostFunctionOp, LedgerKeyConfigSetting, LedgerKeyContractCode, LedgerKeyContractData,
+    InvokeHostFunctionOp, LedgerKeyClaimableBalance, LedgerKeyConfigSetting, LedgerKeyContractCode,
+    LedgerKeyContractData, LedgerKeyData, LedgerKeyLiquidityPool, LedgerKeyOffer, LedgerKeyTrustLine, LedgerKeyTtl,
     Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ReadXdr,
     ScAddress, ScContractInstance, ScMap, ScMapEntry, ScSymbol, ScVal, SequenceNumber, String32,
     Thresholds, Transaction, TransactionEnvelope, TransactionExt, TransactionV1Envelope, Uint256,
@@ -642,7 +643,25 @@ pub fn ledger_entry_to_ledger_key(entry: &LedgerEntry) -> Result<LedgerKey> {
                 config_setting_id: cs.discriminant(),
             }))
         }
-        other => bail!("unsupported fixture ledger entry type: {other:?}"),
+        LedgerEntryData::Trustline(t) => Ok(LedgerKey::Trustline(LedgerKeyTrustLine {
+            account_id: t.account_id.clone(),
+            asset: t.asset.clone(),
+        })),
+        LedgerEntryData::Offer(o) => Ok(LedgerKey::Offer(LedgerKeyOffer {
+            seller_id: o.seller_id.clone(),
+            offer_id: o.offer_id,
+        })),
+        LedgerEntryData::Data(d) => Ok(LedgerKey::Data(LedgerKeyData {
+            account_id: d.account_id.clone(),
+            data_name: d.data_name.clone(),
+        })),
+        LedgerEntryData::ClaimableBalance(c) => Ok(LedgerKey::ClaimableBalance(LedgerKeyClaimableBalance {
+            balance_id: c.balance_id.clone(),
+        })),
+        LedgerEntryData::LiquidityPool(p) => Ok(LedgerKey::LiquidityPool(LedgerKeyLiquidityPool {
+            liquidity_pool_id: p.liquidity_pool_id.clone(),
+        })),
+        LedgerEntryData::Ttl(t) => Ok(LedgerKey::Ttl(LedgerKeyTtl { key_hash: t.key_hash.clone() })),
     }
 }
 

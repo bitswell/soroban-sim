@@ -112,6 +112,7 @@ struct Pending {
     label: String,
     /// The keys whose before-values the meta needs, the source account first.
     keys: Vec<LedgerKey>,
+    seq: i64,
     fee_bid: i64,
 }
 
@@ -513,9 +514,10 @@ impl Facade {
         let label = tx::describe(&inner, network_id);
         let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
         // core's queue holds one transaction per source account, and turns a
-        // second one away before it checks it.
+        // second one away before it checks it (one with an older sequence
+        // number is txBAD_SEQ, which validation below says too).
         let source = account_key(&muxed_account_id(&inner.source_account));
-        if self.held.as_ref().is_some_and(|q| q.iter().any(|t| t.keys[0] == source)) {
+        if self.held.as_ref().is_some_and(|q| q.iter().any(|t| t.keys[0] == source && t.seq <= inner.seq_num.0)) {
             reply.insert("status".into(), json!("TRY_AGAIN_LATER"));
             return Ok(Value::Object(reply));
         }
@@ -556,7 +558,7 @@ impl Facade {
                 ),
             });
         }
-        let pending = Pending { hash, envelope_xdr: text, envelope, label, keys: valid.touched_keys(), fee_bid: inner.fee as i64 };
+        let pending = Pending { hash, envelope_xdr: text, envelope, label, keys: valid.touched_keys(), seq: inner.seq_num.0, fee_bid: inner.fee as i64 };
         match &mut self.held {
             Some(queue) => {
                 queue.push(pending);
