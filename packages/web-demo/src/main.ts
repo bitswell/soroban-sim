@@ -1367,6 +1367,9 @@ function renderSubmissionRequirements(
     : "This run used a public placeholder source. Fund or connect a Testnet G-account, then simulate again to produce a signable envelope.";
 }
 
+/** How long an envelope a real wallet signs for a Mainnet session stays valid. */
+const REAL_SIGNING_WINDOW_SECONDS = 300;
+
 function submitTargetIsSession(): boolean {
   if (!sessionHost?.summary) return false;
   const checked = submitTarget.querySelector<HTMLInputElement>('input[name="submit-target"]:checked');
@@ -1441,16 +1444,23 @@ async function submitIntoSession(): Promise<string> {
   if (call?.type !== "invokeHostFunction") throw new Error("the prepared envelope holds no contract call");
   const feePayer = selectedFeePayer();
   if (!feePayer) throw new Error("connect a wallet or use the session's throwaway account");
+  const wallet = identityMode === "wallet" ? connectedWallet : undefined;
+  const realOnMainnet = wallet !== undefined && session.passphrase === MAINNET_PASSPHRASE;
+  // The envelope stays valid on Mainnet for five minutes of real time, so the
+  // session must not be judging it at a later time than that.
+  if (realOnMainnet && session.next.closeTime > Math.floor(Date.now() / 1000) + REAL_SIGNING_WINDOW_SECONDS) {
+    throw new Error(
+      "this session's clock is ahead of real time; real-wallet signing is only allowed while the session clock is within 5 minutes of now - use a throwaway key",
+    );
+  }
   submitProgress.textContent = "Preparing the call against the session's state…";
   const account = await server.getAccount(feePayer).catch(() => {
     throw new Error(`${shortAddress(feePayer)} has no account in the session; fund it with an override first`);
   });
-  const wallet = identityMode === "wallet" ? connectedWallet : undefined;
-  const realOnMainnet = wallet !== undefined && session.passphrase === MAINNET_PASSPHRASE;
   const unsigned = new TransactionBuilder(account, { fee: "100", networkPassphrase: session.passphrase })
     .addOperation(Operation.invokeHostFunction({ func: call.func, auth: [] }))
     // A real key's signature makes the envelope valid on Mainnet: five minutes, not forever.
-    .setTimeout(realOnMainnet ? 300 : 0)
+    .setTimeout(realOnMainnet ? REAL_SIGNING_WINDOW_SECONDS : 0)
     .build();
   let transaction = await server.prepareTransaction(unsigned);
   try {

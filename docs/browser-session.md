@@ -87,7 +87,7 @@ session worker (session-worker.ts)
   envelopes carry their signatures, so the same log gives the same session
   without a network read. Nothing secret is stored: throwaway keys derive from
   labels, and envelopes are public by design. An envelope a real key signed is
-  never logged, refused or applied, because the real network would accept
+  never logged, whether the session applied, rejected or refused it, because the real network would accept
   it. The timeline marks its step "real-signed, not stored" and offers no
   copy of it, and a resumed session does not have it. `fork_allowRealSigners`
   is not logged either, so a resumed session refuses real signers again.
@@ -122,8 +122,11 @@ valid on that network as it stands.
   real account. The acknowledgement covers that one envelope: the session
   allows real signers (`fork_allowRealSigners`) only once the wallet has
   signed, and refuses them again after the send, even if the wallet declined.
-  That envelope expires five minutes after it is built. The report records
-  both safety steps.
+  That envelope expires five minutes after it is built, so the dialog refuses
+  to ask the wallet at all while the session's clock (the next ledger's close
+  time) is more than five minutes ahead of real time, for example after
+  advancing ledgers. Use a throwaway key there. The report records both
+  safety steps.
 - **Mainnet refuses real signers otherwise.** Like `soroban-sim serve`, a
   Mainnet session refuses an envelope that a signer of the base ledger signed,
   with JSON-RPC error `-32001`. The timeline shows the step as refused. The

@@ -604,38 +604,43 @@ impl Facade {
         self.session.ledger().prefetch(&tx::envelope_keys(&inner)).map_err(RpcError::internal)?;
 
         // What the validator decides, before anything changes: the safety
-        // check, and the keys whose before-values the meta needs.
-        let verdict = TxValidator {
-            ledger: self.session.ledger(),
-            info: self.session.ledger_info(),
-            config: self.session.network_config(),
-            limits: self.session.tx_limits(),
-            base_fee: self.session.fork_point().base_fee,
+        // check (whatever the verdict), and the keys whose before-values the
+        // meta needs.
+        let (real, verdict) = {
+            let validator = TxValidator {
+                ledger: self.session.ledger(),
+                info: self.session.ledger_info(),
+                config: self.session.network_config(),
+                limits: self.session.tx_limits(),
+                base_fee: self.session.fork_point().base_fee,
+            };
+            (
+                validator.base_signed(&envelope).map_err(RpcError::internal)?,
+                validator.validate(&envelope).map_err(RpcError::internal)?,
+            )
+        };
+        if !real.is_empty() && self.is_mainnet() && !self.allow_real_signers {
+            let why = real.join("; ");
+            for r in &real {
+                self.replayable.push(format!("{label} ({}, refused): {r}", hex(&hash)));
+            }
+            let detail = format!("refused: valid on mainnet as signed ({why})");
+            let detail_rc = Rc::new(StepDetail { touched: vec![], envelope: Some(envelope.clone()), applied_in: None });
+            self.push_step(
+                step(self.steps.len() + 1, &label, "transaction", ledger, time, "refused", &detail, None, None),
+                Some(format!("{label}: refused, signed by a real mainnet signer")),
+                detail_rc,
+            );
+            return Err(RpcError {
+                code: RpcError::REFUSED,
+                message: format!(
+                    "soroban-sim refused transaction {}: a signer the real network already has signed it, so it is valid on mainnet as it stands ({why}). Substitute a throwaway signer with fork_addSigner, or allow real signers explicitly.",
+                    hex(&hash)
+                ),
+            });
         }
-        .validate(&envelope)
-        .map_err(RpcError::internal)?;
         let mut keys = vec![];
         if let Ok(valid) = &verdict {
-            if !valid.replayable.is_empty() && self.is_mainnet() && !self.allow_real_signers {
-                let why = valid.replayable.join("; ");
-                for r in &valid.replayable {
-                    self.replayable.push(format!("{label} ({}, refused): {r}", hex(&hash)));
-                }
-                let detail = format!("refused: valid on mainnet as signed ({why})");
-                let detail_rc = Rc::new(StepDetail { touched: vec![], envelope: Some(envelope.clone()), applied_in: None });
-                self.push_step(
-                    step(self.steps.len() + 1, &label, "transaction", ledger, time, "refused", &detail, None, None),
-                    Some(format!("{label}: refused, signed by a real mainnet signer")),
-                    detail_rc,
-                );
-                return Err(RpcError {
-                    code: RpcError::REFUSED,
-                    message: format!(
-                        "soroban-sim refused transaction {}: a signer the real network already has signed it, so it is valid on mainnet as it stands ({why}). Substitute a throwaway signer with fork_addSigner, or allow real signers explicitly.",
-                        hex(&hash)
-                    ),
-                });
-            }
             let source = account_key(&valid.source);
             let fp = &valid.data.resources.footprint;
             let others: Vec<LedgerKey> = fp.read_only.iter().chain(fp.read_write.iter()).filter(|k| **k != source).cloned().collect();
@@ -644,10 +649,14 @@ impl Facade {
         }
         let before: Vec<Option<StoredEntry>> = keys.iter().map(|k| self.session.ledger().get(k)).collect::<Result<_>>().map_err(RpcError::internal)?;
 
-        let record = self.session.submit(&label, &envelope).map_err(RpcError::internal)?;
+        let mut record = self.session.submit(&label, &envelope).map_err(RpcError::internal)?;
+        record.replayable = real;
         let result = tx::result(&record, inner.fee as i64).map_err(RpcError::internal)?;
         let result_xdr = result.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?;
         if let TxStatus::Rejected { code, detail } = &record.status {
+            for r in &record.replayable {
+                self.replayable.push(format!("{label} ({}, rejected): {r}", hex(&hash)));
+            }
             let failure = format!("{label}: {} {detail}", code.as_str());
             let detail_rc = Rc::new(StepDetail { touched: vec![], envelope: Some(envelope.clone()), applied_in: None });
             self.push_step(

@@ -218,6 +218,14 @@ function mainnetWithRealAccount(real: Keypair): { recording: Recording; seq: big
   return withRealAccount(real, { ...recording, getNetwork: { ...recording.getNetwork, passphrase: Networks.PUBLIC } });
 }
 
+/** `recording` with its fork ledger closing at `closeTime` (seconds). */
+function closingAt(recording: Recording, closeTime: number): Recording {
+  const header = Buffer.from(recording.getLatestLedger.headerXdr, "base64");
+  // LedgerHeader: ledgerVersion (4), previousLedgerHash (32), txSetHash (32), closeTime.
+  header.writeBigUInt64BE(BigInt(closeTime), 68);
+  return { ...recording, getLatestLedger: { ...recording.getLatestLedger, headerXdr: header.toString("base64") } };
+}
+
 /**
  * A stand-in for the wallet module the page loads on demand: it connects
  * `real`'s account and hands each envelope to `sign`, here in the test.
@@ -420,4 +428,63 @@ test("a session open in one tab does not open in another", async ({ page, contex
   await expect(page.locator("#session-state")).toHaveText("no session open");
   await other.locator("#session-saved").getByRole("button", { name: "resume" }).click();
   await expect(other.locator("#session-state")).toHaveText(title, { timeout: 60_000 });
+});
+
+test("an envelope a real key signed is not stored even when the session rejects it", async ({ page, context }) => {
+  test.setTimeout(120_000);
+  const real = Keypair.random();
+  const { recording, seq } = withRealAccount(real);
+  await recordedRpc(context, TESTNET_RPC, recording);
+  await fork(page, "testnet");
+  // A sequence number ahead of the account's: rejected here, valid on the
+  // real network once the account catches up.
+  const wasm = readFileSync(repo("fixtures/contracts/add_i32.wasm"));
+  const ahead = new TransactionBuilder(new Account(real.publicKey(), (seq + 4n).toString()), { fee: "100", networkPassphrase: Networks.TESTNET })
+    .addOperation(Operation.uploadContractWasm({ wasm }))
+    .setTimeout(0)
+    .build();
+  ahead.sign(real);
+  await page.locator(".session-envelope summary").click();
+  await page.locator("#session-envelope").fill(ahead.toEnvelope().toXdr("base64"));
+  await page.locator("#session-envelope-submit").click();
+  await expect(page.locator("#session-progress")).toContainText("sendTransaction: ERROR", { timeout: 60_000 });
+
+  await expect(step(page, 2)).toHaveAttribute("data-outcome", "rejected");
+  await expect(step(page, 2).locator(".session-outcome")).toHaveText("rejected · real-signed, not stored");
+  await step(page, 2).locator(".session-step-head").click();
+  await expect(step(page, 2).locator(".session-step-body")).toBeVisible();
+  await expect(step(page, 2).getByRole("button", { name: "copy envelope XDR" })).toHaveCount(0);
+  await expect(page.locator("#session-replayable")).toContainText(real.publicKey());
+  await page.reload();
+  await expect(page.locator("#session-progress")).toContainText("Resumed: replayed 1 logged call", { timeout: 60_000 });
+  await expect(page.locator("#session-steps li")).toHaveCount(1);
+});
+
+test("a real wallet cannot sign for a mainnet session whose clock is ahead of real time", async ({ page, context }) => {
+  test.setTimeout(180_000);
+  const real = Keypair.random();
+  await recordedRpc(context, TESTNET_RPC, withRealAccount(real).recording);
+  await recordedRpc(context, MAINNET_RPC, closingAt(mainnetWithRealAccount(real).recording, Math.floor(Date.now() / 1000)));
+  let asked = 0;
+  await realWallet(page, real, (envelope, passphrase) => {
+    asked += 1;
+    const tx = TransactionBuilder.fromXdr(envelope, passphrase);
+    tx.sign(real);
+    return tx.toEnvelope().toXdr("base64");
+  });
+  await fork(page, "mainnet");
+  // Ten minutes of ledgers: past what a five-minute envelope covers.
+  await page.locator("#session-advance-n").fill("120");
+  await page.locator("#session-advance").click();
+  await expect(page.locator("#session-steps li")).toHaveCount(2);
+
+  await reviewWalletCall(page, real);
+  await page.locator("#replay-ack").check();
+  await page.locator("#confirm-submit").click();
+  await expect(page.locator("#submit-err")).toContainText("this session's clock is ahead of real time", { timeout: 60_000 });
+  await expect(page.locator("#submit-err")).toContainText("use a throwaway key");
+  await page.locator("#submit-dialog .dialog-close").click();
+  expect(asked).toBe(0);
+  await expect(page.locator("#session-steps li")).toHaveCount(2);
+  expect((await forkInfo(page)).allowRealSigners).toBe(false);
 });

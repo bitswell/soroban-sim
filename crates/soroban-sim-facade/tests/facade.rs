@@ -311,6 +311,33 @@ fn a_real_mainnet_signature_is_refused_until_allowed() {
 }
 
 #[test]
+fn a_rejected_real_signature_is_still_flagged() {
+    // A real key signs an envelope the session rejects (a future sequence):
+    // it can still become valid on the real network.
+    let resign = |c: &mut Client, passphrase: &str| {
+        let TransactionEnvelope::Tx(mut e) = c.prepare(passphrase, &alice(), &real_key("alice"), upload(&wasm("add_i32"))) else { unreachable!() };
+        e.tx.seq_num.0 += 5;
+        let hash = transaction_hash(&e.tx, sha256(passphrase.as_bytes())).unwrap();
+        e.signatures = vec![real_key("alice").sign_decorated(&hash)].try_into().unwrap();
+        TransactionEnvelope::Tx(e).to_xdr_base64(Limits::none()).unwrap()
+    };
+    let mut c = Client::open(PASSPHRASE);
+    let envelope = resign(&mut c, PASSPHRASE);
+    let sent = c.call("sendTransaction", json!({ "transaction": envelope }));
+    assert_eq!(sent["status"], "ERROR");
+    assert_eq!(c.call("fork_info", json!({}))["replayable"], 1);
+    let steps = c.call("fork_steps", json!({}))["steps"].as_array().unwrap().clone();
+    let last = steps.last().unwrap();
+    assert_eq!(last["outcome"], "rejected");
+    assert_eq!(last["tx"]["replayable"].as_array().unwrap().len(), 1, "{last}");
+
+    // On mainnet the same envelope is refused, not merely rejected.
+    let mut c = Client::open(MAINNET_PASSPHRASE);
+    let envelope = resign(&mut c, MAINNET_PASSPHRASE);
+    assert_eq!(c.error("sendTransaction", json!({ "transaction": envelope }))["code"], -32001);
+}
+
+#[test]
 fn revert_undoes_transactions_and_keeps_them_listed() {
     let mut c = Client::open(PASSPHRASE);
     let key = rehearse_alice(&mut c);
