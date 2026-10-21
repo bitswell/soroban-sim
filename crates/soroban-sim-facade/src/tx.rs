@@ -6,7 +6,7 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use soroban_env_host::xdr::{
-    ContractId, ContractIdPreimage, ContractIdPreimageFromAddress, ExtensionPoint, Hash, HashIdPreimage,
+    ContractId, ContractIdPreimage, ContractIdPreimageFromAddress, DecoratedSignature, ExtensionPoint, Hash, HashIdPreimage,
     HashIdPreimageContractId, HostFunction, InvokeHostFunctionResult, InvokeHostFunctionSuccessPreImage,
     LedgerEntry, LedgerEntryChange, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt, LedgerKey,
     LedgerKeyTtl, Limits, MuxedAccount, OperationBody, OperationMetaV2, OperationResult,
@@ -93,6 +93,17 @@ pub fn inner_transaction(envelope: &TransactionEnvelope) -> Transaction {
         TransactionEnvelope::TxV0(e) => v0_as_v1(&e.tx),
         TransactionEnvelope::TxFeeBump(e) => match &e.tx.inner_tx {
             soroban_env_host::xdr::FeeBumpTransactionInnerTx::Tx(i) => i.tx.clone(),
+        },
+    }
+}
+
+/// The signatures over [`inner_transaction`] (the inner ones of a fee bump).
+pub fn inner_signatures(envelope: &TransactionEnvelope) -> &[DecoratedSignature] {
+    match envelope {
+        TransactionEnvelope::Tx(e) => &e.signatures,
+        TransactionEnvelope::TxV0(e) => &e.signatures,
+        TransactionEnvelope::TxFeeBump(e) => match &e.tx.inner_tx {
+            soroban_env_host::xdr::FeeBumpTransactionInnerTx::Tx(i) => &i.signatures,
         },
     }
 }

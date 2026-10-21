@@ -10,7 +10,7 @@ use soroban_env_host::xdr::{
     HostFunction, InvokeContractArgs, InvokeHostFunctionOp, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerKey,
     Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ReadXdr, ScAddress, ScSymbol, ScVal,
     SequenceNumber, SorobanAuthorizationEntry, SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionMeta, TransactionV1Envelope, Uint256, WriteXdr,
+    TransactionMeta, TransactionV0, TransactionV0Envelope, TransactionV0Ext, TransactionV1Envelope, Uint256, WriteXdr,
 };
 use soroban_sim_core::ledger_entry_to_ledger_key;
 use soroban_sim_core::session::{account_key, host_protocol, new_account, transaction_hash, Ed25519Key, ForkPoint, SessionOptions, StoredEntry};
@@ -334,6 +334,40 @@ fn a_rejected_real_signature_is_still_flagged() {
     // On mainnet the same envelope is refused, not merely rejected.
     let mut c = Client::open(MAINNET_PASSPHRASE);
     let envelope = resign(&mut c, MAINNET_PASSPHRASE);
+    assert_eq!(c.error("sendTransaction", json!({ "transaction": envelope }))["code"], -32001);
+}
+
+#[test]
+fn a_real_signature_on_a_v0_envelope_is_flagged() {
+    // A v0 envelope signs the same v1-tagged payload, so a real key's
+    // signature on it is valid on the real network too.
+    let v0 = |c: &mut Client, passphrase: &str| {
+        let TransactionEnvelope::Tx(e) = c.prepare(passphrase, &alice(), &real_key("alice"), upload(&wasm("add_i32"))) else { unreachable!() };
+        let MuxedAccount::Ed25519(key) = e.tx.source_account.clone() else { unreachable!() };
+        let tx = TransactionV0 {
+            source_account_ed25519: key,
+            fee: e.tx.fee,
+            seq_num: e.tx.seq_num.clone(),
+            time_bounds: None,
+            memo: e.tx.memo.clone(),
+            operations: e.tx.operations.clone(),
+            ext: TransactionV0Ext::V0,
+        };
+        let as_v1 = Transaction { cond: Preconditions::None, ext: TransactionExt::V0, ..e.tx };
+        let hash = transaction_hash(&as_v1, sha256(passphrase.as_bytes())).unwrap();
+        let signatures = vec![real_key("alice").sign_decorated(&hash)].try_into().unwrap();
+        TransactionEnvelope::TxV0(TransactionV0Envelope { tx, signatures }).to_xdr_base64(Limits::none()).unwrap()
+    };
+    let mut c = Client::open(PASSPHRASE);
+    let envelope = v0(&mut c, PASSPHRASE);
+    let sent = c.call("sendTransaction", json!({ "transaction": envelope }));
+    assert_eq!(sent["status"], "ERROR", "the session does not apply v0 envelopes");
+    assert_eq!(c.call("fork_info", json!({}))["replayable"], 1);
+    let steps = c.call("fork_steps", json!({}))["steps"].as_array().unwrap().clone();
+    assert_eq!(steps.last().unwrap()["tx"]["replayable"].as_array().unwrap().len(), 1);
+
+    let mut c = Client::open(MAINNET_PASSPHRASE);
+    let envelope = v0(&mut c, MAINNET_PASSPHRASE);
     assert_eq!(c.error("sendTransaction", json!({ "transaction": envelope }))["code"], -32001);
 }
 

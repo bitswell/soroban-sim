@@ -615,7 +615,7 @@ impl Facade {
                 base_fee: self.session.fork_point().base_fee,
             };
             (
-                validator.base_signed(&envelope).map_err(RpcError::internal)?,
+                validator.base_signed(&inner, tx::inner_signatures(&envelope)).map_err(RpcError::internal)?,
                 validator.validate(&envelope).map_err(RpcError::internal)?,
             )
         };

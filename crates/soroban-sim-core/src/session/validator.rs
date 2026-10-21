@@ -12,7 +12,7 @@ use soroban_env_host::fees::{compute_transaction_resource_fee, TransactionResour
 use soroban_env_host::storage::SnapshotSource;
 use soroban_env_host::xdr::{
     AccountEntry, AccountEntryExt, AccountEntryExtensionV1Ext, AccountEntryExtensionV2Ext,
-    AccountId, ConfigSettingEntry, ConfigSettingId, DecoratedSignature, FeeBumpTransactionInnerTx, Hash,
+    AccountId, ConfigSettingEntry, ConfigSettingId, DecoratedSignature, Hash,
     InvokeHostFunctionOp, LedgerEntryData, LedgerKey, LedgerKeyConfigSetting, Limits,
     MuxedAccount, OperationBody, Preconditions, PublicKey, ScAddress, ScMap, ScVal, Signer, SignerKey,
     SignerKeyEd25519SignedPayload, SorobanAuthorizationEntry, SorobanCredentials, SorobanDelegateSignature,
@@ -407,19 +407,12 @@ impl TxValidator<'_> {
         })
     }
 
-    /// Signatures `envelope` carries that verify against a signer the BASE
-    /// ledger lists for its source or operation sources, or auth entries
-    /// signed that way, whatever [`Self::validate`] decides: such an envelope
-    /// may be valid on the real network even if this session rejects it.
-    pub fn base_signed(&self, envelope: &TransactionEnvelope) -> Result<Vec<String>> {
-        let (tx, signatures) = match envelope {
-            TransactionEnvelope::Tx(e) => (&e.tx, &e.signatures),
-            TransactionEnvelope::TxFeeBump(f) => {
-                let FeeBumpTransactionInnerTx::Tx(inner) = &f.tx.inner_tx;
-                (&inner.tx, &inner.signatures)
-            }
-            TransactionEnvelope::TxV0(_) => return Ok(vec![]),
-        };
+    /// Signatures over `tx` (the transaction an envelope carries, v0 or fee
+    /// bump unwrapped) that verify against a signer the BASE ledger lists for
+    /// its source or operation sources, or auth entries signed that way,
+    /// whatever [`Self::validate`] decides: such an envelope may be valid on
+    /// the real network even if this session rejects it.
+    pub fn base_signed(&self, tx: &Transaction, signatures: &[DecoratedSignature]) -> Result<Vec<String>> {
         let hash = transaction_hash(tx, self.info.network_id)?;
         let mut accounts = vec![muxed_account_id(&tx.source_account)];
         for op in tx.operations.iter() {
