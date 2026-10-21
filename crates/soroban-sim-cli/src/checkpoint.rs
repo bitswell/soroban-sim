@@ -37,17 +37,24 @@ pub const MAX_CATCH_UP_LEDGERS: u32 = 720;
 /// ~5 seconds).
 const LAG_RETRIES: [Duration; 4] = [Duration::from_secs(1), Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
 
-/// Run `read` until it answers at or after `pin`, waiting `retries` between
-/// attempts; an answer from before the pin cannot be rolled back to it.
-fn served_from_pin(pin: u32, retries: &[Duration], mut read: impl FnMut() -> Result<FetchedBatch>) -> Result<FetchedBatch> {
-    let mut batch = read()?;
+/// Run `read` until `caught_up` accepts its answer, waiting `retries` between
+/// attempts; returns the last answer either way.
+fn until_caught_up<T>(retries: &[Duration], mut read: impl FnMut() -> Result<T>, caught_up: impl Fn(&T) -> bool) -> Result<T> {
+    let mut answer = read()?;
     for wait in retries {
-        if batch.served_at_ledger >= pin {
+        if caught_up(&answer) {
             break;
         }
         std::thread::sleep(*wait);
-        batch = read()?;
+        answer = read()?;
     }
+    Ok(answer)
+}
+
+/// Run `read` until it answers at or after `pin`; an answer from before the
+/// pin cannot be rolled back to it.
+fn served_from_pin(pin: u32, retries: &[Duration], read: impl FnMut() -> Result<FetchedBatch>) -> Result<FetchedBatch> {
+    let batch = until_caught_up(retries, read, |b| b.served_at_ledger >= pin)?;
     if batch.served_at_ledger < pin {
         bail!(
             "RPC answered getLedgerEntries at ledger {} after {} retries, still before the pinned ledger {pin}; its value at the pin is unknown",
@@ -118,9 +125,9 @@ impl CheckpointSource {
         let mut rollback = self.rollback.borrow_mut();
         while rollback.indexed_through() < ledger {
             let next = rollback.indexed_through() + 1;
-            let batch = self.rpc.ledgers(next, 5.min(ledger - next + 1))?;
+            let batch = until_caught_up(&LAG_RETRIES, || self.rpc.ledgers(next, 5.min(ledger - next + 1)), |b| !b.is_empty())?;
             if batch.is_empty() {
-                bail!("{} returned no ledgers from {next}", self.rpc.url);
+                bail!("{} returned no ledgers from {next} after {} retries", self.rpc.url, LAG_RETRIES.len());
             }
             for l in &batch {
                 rollback.add(v2(&l.meta)?)?;
@@ -210,6 +217,25 @@ mod tests {
         };
         assert_eq!(reads, 3);
         assert!(err.contains("ledger 98") && err.contains("pinned ledger 100"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_ledger_batch_from_a_lagging_node_is_re_read() {
+        let mut answers = vec![vec![], vec![], vec![105u32]].into_iter();
+        let got = until_caught_up(&[Duration::ZERO; 4], || Ok(answers.next().unwrap()), |b| !b.is_empty()).unwrap();
+        assert_eq!(got, vec![105]);
+        let mut reads = 0;
+        let got = until_caught_up(
+            &[Duration::ZERO; 2],
+            || {
+                reads += 1;
+                Ok(Vec::<u32>::new())
+            },
+            |b| !b.is_empty(),
+        )
+        .unwrap();
+        assert!(got.is_empty());
+        assert_eq!(reads, 3);
     }
 
     #[test]
