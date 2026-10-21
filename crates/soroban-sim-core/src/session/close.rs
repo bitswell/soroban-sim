@@ -245,10 +245,12 @@ impl Session {
     /// apply-time validation, refunds last. Returns (submission index, record).
     /// An error leaves the session as it was before the ledger.
     fn close_with(&mut self, selected: Vec<Candidate<'_>>) -> Result<Vec<(usize, TxRecord)>> {
-        let checkpoint = self.checkpoint();
+        let depth = self.ledger.depth();
+        self.ledger.begin();
         let closed = self.apply_set(selected);
-        if closed.is_err() {
-            self.restore(&checkpoint);
+        match closed {
+            Ok(_) => self.ledger.commit(),
+            Err(_) => self.ledger.rollback_to(depth),
         }
         closed
     }

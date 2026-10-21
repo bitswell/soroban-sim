@@ -28,6 +28,10 @@ fn alice() -> Ed25519Key {
 }
 
 fn snapshot(dir: &Path) -> PathBuf {
+    snapshot_with(dir, None)
+}
+
+fn snapshot_with(dir: &Path, max_tx_set_size: Option<u32>) -> PathBuf {
     let raw = std::fs::read_to_string(repo().join("fixtures/parity/native-sac-transfer.json")).unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let mut entries: Vec<StoredEntry> = json["snapshot"]
@@ -50,7 +54,7 @@ fn snapshot(dir: &Path) -> PathBuf {
     });
     let fork = ForkPoint { ledger_seq: FORK_LEDGER, close_time: 1_800_000_000, protocol_version: host_protocol(), base_reserve: 5_000_000, base_fee: 100 };
     let path = dir.join("base.snapshot.json");
-    SnapshotFile::new(TESTNET_PASSPHRASE, &fork, &entries).unwrap().save(&path).unwrap();
+    SnapshotFile::new(TESTNET_PASSPHRASE, &fork, max_tx_set_size, &entries).unwrap().save(&path).unwrap();
     path
 }
 
@@ -293,4 +297,46 @@ steps:
     assert_eq!((line.balance_after, line.limit_after, line.authorized), (Some(250 * 10_000_000), Some(1000 * 10_000_000), Some(true)));
     let md = report.to_markdown();
     assert!(md.contains("## Trustlines") && md.contains("USD:"), "{md}");
+}
+
+#[test]
+fn a_snapshot_keeps_the_classic_per_ledger_limit() {
+    let dir = scratch("classic-limit");
+    let plan = dir.join("plan.yaml");
+    std::fs::write(
+        &plan,
+        r#"
+options: { source: "${alice}" }
+keys: { alice: ed25519, carol: ed25519, dave: ed25519, erin: ed25519 }
+signers:
+  "${alice}": { classic: [alice] }
+setup:
+  - substitute_master_key: { account: "${alice}", key: alice }
+steps:
+  - name: create carol
+    create_account: { destination: "${key.carol}", starting_balance: 50 }
+  - name: two one-operation transactions
+    ledger:
+      - name: create dave
+        create_account: { destination: "${key.dave}", starting_balance: 10 }
+      - name: carol creates erin
+        source: "${key.carol}"
+        create_account: { destination: "${key.erin}", starting_balance: 10 }
+"#,
+    )
+    .unwrap();
+    let ledgers = |base: PathBuf, save: Option<&Path>| {
+        let mut cfg = config(base);
+        cfg.plan_path = plan.clone();
+        let report = Runner::new(cfg).unwrap().run(save).unwrap();
+        assert!(report.passed, "{:#?}", report.failures);
+        let at = |name: &str| report.steps.iter().find(|s| s.name == name).unwrap().ledger;
+        (i64::from(at("carol creates erin")) - i64::from(at("create dave"))).abs()
+    };
+    assert_eq!(ledgers(snapshot(&dir), None), 0, "no limit: one ledger");
+
+    let saved = dir.join("resaved.snapshot.json");
+    assert_eq!(ledgers(snapshot_with(&dir, Some(1)), Some(&saved)), 1, "one operation per ledger: the second waits");
+    assert_eq!(SnapshotFile::load(&saved).unwrap().fork.max_tx_set_size, Some(1));
+    assert_eq!(ledgers(saved, None), 1);
 }

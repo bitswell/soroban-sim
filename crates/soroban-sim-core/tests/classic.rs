@@ -660,3 +660,56 @@ fn frozen_keys_refuse_transactions_that_touch_them() {
     rehearse_alice(&s2);
     applied(&s2.submit("bypass", &env).unwrap());
 }
+
+/// A base that cannot answer for one key: an RPC outage mid-close.
+struct Outage {
+    inner: StaticSource,
+    poison: soroban_env_host::xdr::LedgerKey,
+}
+
+impl LedgerSource for Outage {
+    fn fetch(&self, keys: &[soroban_env_host::xdr::LedgerKey]) -> anyhow::Result<FetchedBatch> {
+        if keys.contains(&self.poison) {
+            anyhow::bail!("the base is unreachable");
+        }
+        self.inner.fetch(keys)
+    }
+
+    fn describe(&self) -> String {
+        "a base with an outage".into()
+    }
+}
+
+#[test]
+fn an_error_mid_close_leaves_the_session_as_it_was() {
+    use soroban_env_host::xdr::{LedgerKey, LedgerKeyContractCode, TransactionExt};
+    let poison = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash([9; 32]) });
+    let mut s = Session::new(Box::new(Outage { inner: base(vec![]), poison: poison.clone() }), fork_point(), SessionOptions::new(PASSPHRASE)).unwrap();
+    let alice_key = rehearse_alice(&s);
+    let bob_key = Ed25519Key::throwaway("bob");
+    s.substitute_master_key(&bob(), &bob_key, "bob").unwrap();
+    let before = (balance(&s, &alice()), seq(&s, &alice()), balance(&s, &bob()), seq(&s, &bob()), s.ledger_info().sequence_number);
+
+    let payment = envelope(&s, &bob(), &[bob_key, real_key("bob-cosigner")], vec![op(pay(&alice(), Asset::Native, XLM))]);
+    let upload = prepare(&s, &alice(), std::slice::from_ref(&alice_key), upload(&wasm("add_i32")), &no_auth()).envelope;
+    let upload = resign(&upload, &[alice_key], |tx| {
+        tx.fee += 1_000_000;
+        let TransactionExt::V1(data) = &mut tx.ext else { panic!("soroban data") };
+        data.resource_fee += 1_000_000;
+        let mut read_only = data.resources.footprint.read_only.to_vec();
+        read_only.push(poison);
+        data.resources.footprint.read_only = read_only.try_into().unwrap();
+    });
+
+    let err = s.submit_ledger(&[("pay", &payment), ("upload", &upload)]).unwrap_err();
+    assert!(format!("{err:#}").contains("unreachable"), "{err:#}");
+    // The payment applied and both fees were charged before the upload hit
+    // the outage; all of it is undone.
+    assert_eq!((balance(&s, &alice()), seq(&s, &alice()), balance(&s, &bob()), seq(&s, &bob()), s.ledger_info().sequence_number), before);
+    assert_eq!(s.ledger().depth(), 0);
+    assert!(s.log().is_empty());
+
+    let r = s.submit("pay again", &payment).unwrap();
+    assert!(matches!(r.status, TxStatus::Applied { .. }), "{}", r.status.summary());
+    assert_eq!(balance(&s, &alice()), before.0 + XLM);
+}

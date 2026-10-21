@@ -380,6 +380,16 @@ impl ForkedLedger {
         self.layers.borrow_mut().pop();
     }
 
+    /// How many layers are open.
+    pub fn depth(&self) -> usize {
+        self.layers.borrow().len()
+    }
+
+    /// Drop every layer opened since there were `depth`.
+    pub fn rollback_to(&self, depth: usize) {
+        self.layers.borrow_mut().truncate(depth);
+    }
+
     /// How many keys the innermost open layer wrote.
     pub fn open_writes(&self) -> usize {
         self.layers.borrow().last().map_or(0, BTreeMap::len)

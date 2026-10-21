@@ -1078,6 +1078,7 @@ fn synthetic_header(session: &Session) -> LedgerHeader {
         scp_value: StellarValue { tx_set_hash: Default::default(), close_time: TimePoint(f.close_time), upgrades: Default::default(), ext: StellarValueExt::Basic },
         base_fee: f.base_fee,
         base_reserve: f.base_reserve,
+        max_tx_set_size: session.options().max_tx_set_size.unwrap_or_default(),
         ..Default::default()
     }
 }

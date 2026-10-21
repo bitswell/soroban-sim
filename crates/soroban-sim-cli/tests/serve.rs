@@ -68,7 +68,7 @@ fn snapshot(dir: &Path, passphrase: &str) -> PathBuf {
     });
     let fork = ForkPoint { ledger_seq: FORK_LEDGER, close_time: FORK_TIME, protocol_version: host_protocol(), base_reserve: 5_000_000, base_fee: 100 };
     let path = dir.join("base.snapshot.json");
-    SnapshotFile::new(passphrase, &fork, &entries).unwrap().save(&path).unwrap();
+    SnapshotFile::new(passphrase, &fork, None, &entries).unwrap().save(&path).unwrap();
     path
 }
 

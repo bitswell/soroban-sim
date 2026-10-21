@@ -307,7 +307,7 @@ impl Runner {
             }
         }
         if let Some(path) = save_snapshot {
-            let snap = SnapshotFile::new(&self.passphrase, self.session.fork_point(), &self.session.ledger().base_entries())?;
+            let snap = SnapshotFile::new(&self.passphrase, self.session.fork_point(), self.session.options().max_tx_set_size, &self.session.ledger().base_entries())?;
             snap.save(path)?;
         }
         Ok(self.report())
@@ -1221,6 +1221,7 @@ pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> 
             let snap = SnapshotFile::load(&path)?;
             let mut options = options.clone();
             options.network_passphrase = snap.network_passphrase.clone();
+            options.max_tx_set_size = snap.fork.max_tx_set_size;
             Ok(Forked {
                 network_name: format!("snapshot {}", path.display()),
                 passphrase: snap.network_passphrase.clone(),

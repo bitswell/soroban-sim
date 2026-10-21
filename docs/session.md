@@ -131,7 +131,8 @@ operation's result, the fee charged and every entry's after-image.
    before; a refused one gets its result code. Core's queue holds one
    transaction per source account, so a second one waits for the next ledger.
    The per-ledger limits come from the ledger: the header's `maxTxSetSize`
-   (classic operations) and the `ConfigSetting` entries for the Soroban phase
+   (classic operations; a snapshot saved from an RPC fork keeps it, and one
+   without it has no classic limit) and the `ConfigSetting` entries for the Soroban phase
    (transactions, instructions, transaction bytes, disk reads and writes). The
    highest inclusion fee rate goes first; what does not fit waits for the next
    ledger, and what no ledger can hold is refused.
