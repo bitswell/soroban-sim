@@ -174,33 +174,33 @@ struct Candidate<'a> {
 }
 
 impl Candidate<'_> {
-    /// Its operations as core counts them: a fee bump counts one more.
-    fn ops(&self) -> u64 {
-        let ops = match &self.valid {
-            Valid::Soroban(_) => 1,
-            Valid::Classic(c) => c.ops.len() as u64,
-        };
-        ops + self.valid.inner_hash().is_some() as u64
-    }
-
     /// The inclusion fee bid per operation, as a fraction.
     fn rate(&self) -> (i128, i128) {
         let f = self.valid.fees();
-        ((f.bid - f.resource_fee) as i128, self.ops() as i128)
+        ((f.bid - f.resource_fee) as i128, ops(&self.valid) as i128)
     }
+}
 
-    fn soroban_resources(&self) -> SorobanResources {
-        let Valid::Soroban(v) = &self.valid else { return SorobanResources::default() };
-        let r = &v.data.resources;
-        SorobanResources {
-            txs: 1,
-            instructions: r.instructions as u64,
-            tx_size_bytes: v.size_bytes as u64,
-            disk_read_bytes: r.disk_read_bytes as u64,
-            write_bytes: r.write_bytes as u64,
-            disk_read_entries: declared_resources(&v.data, v.size_bytes).disk_read_entries as u64,
-            write_entries: r.footprint.read_write.len() as u64,
-        }
+/// A transaction's operations as core counts them: a fee bump counts one more.
+fn ops(valid: &Valid) -> u64 {
+    let ops = match valid {
+        Valid::Soroban(_) => 1,
+        Valid::Classic(c) => c.ops.len() as u64,
+    };
+    ops + valid.inner_hash().is_some() as u64
+}
+
+fn soroban_resources(valid: &Valid) -> SorobanResources {
+    let Valid::Soroban(v) = valid else { return SorobanResources::default() };
+    let r = &v.data.resources;
+    SorobanResources {
+        txs: 1,
+        instructions: r.instructions as u64,
+        tx_size_bytes: v.size_bytes as u64,
+        disk_read_bytes: r.disk_read_bytes as u64,
+        write_bytes: r.write_bytes as u64,
+        disk_read_entries: declared_resources(&v.data, v.size_bytes).disk_read_entries as u64,
+        write_entries: r.footprint.read_write.len() as u64,
     }
 }
 
@@ -247,6 +247,9 @@ impl Session {
                     continue;
                 }
                 let mut verdict = self.validator_with(false, options.lane_base_fee).validate(p.envelope).map_err(|e| self.fetch_failure(e))?;
+                if let Some(r) = verdict.as_ref().ok().and_then(|valid| self.ledger_refusal(valid)) {
+                    verdict = Err(r);
+                }
                 if let Ok(valid) = &verdict {
                     let queued = bids.get(valid.fee_source()).copied().unwrap_or(0);
                     if let Some(r) = self.fee_overdraw(valid.fee_source(), queued, valid.fees().bid)? {
@@ -263,11 +266,7 @@ impl Session {
                     Err(r) => records[p.index] = Some(self.rejected(&p, r)),
                 }
             }
-            let (selected, deferred, refused) = select(candidates, &self.ledger_limits);
-            for (c, why) in refused {
-                let r = Rejection { code: TxCode::SorobanInvalid, detail: why, fee_bump_inner: false, op_results: vec![] };
-                records[c.pending.index] = Some(self.rejected(&c.pending, r));
-            }
+            let (selected, deferred) = select(candidates, &self.ledger_limits);
             waiting.extend(deferred.into_iter().map(|(c, why)| Pending { deferred: Some(why), ..c.pending }));
             waiting.sort_by_key(|p| p.index);
             // Every round settles at least one envelope: refused, or in this
@@ -465,6 +464,23 @@ impl Session {
         Ok(())
     }
 
+    /// Refused with txSOROBAN_INVALID when `valid` alone is over the
+    /// per-ledger limits, so no ledger can hold it.
+    pub fn ledger_refusal(&self, valid: &Valid) -> Option<Rejection> {
+        let limits = &self.ledger_limits;
+        let detail = if valid.is_soroban() {
+            let (what, used, cap) = soroban_resources(valid).over(&limits.soroban)?;
+            format!("its {what} ({used}) exceed the per-ledger maximum {cap}")
+        } else {
+            let ops = ops(valid);
+            if ops <= limits.max_classic_ops {
+                return None;
+            }
+            format!("its {ops} operations exceed the per-ledger maximum {}", limits.max_classic_ops)
+        };
+        Some(Rejection { code: TxCode::SorobanInvalid, detail, fee_bump_inner: false, op_results: vec![] })
+    }
+
     /// core's queue `canAfford`: refused with txINSUFFICIENT_BALANCE when
     /// `bid` on top of the `queued` bids `fee_source` already pays for in
     /// this ledger is more than its balance above the reserve.
@@ -582,33 +598,29 @@ impl Session {
 /// Candidates set aside, each with the reason.
 type SetAside<'a> = Vec<(Candidate<'a>, String)>;
 
-/// Split the valid candidates into this ledger's set, those that wait for the
-/// next ledger and those no ledger can hold. Highest inclusion fee rate per
+/// Split the valid candidates (each fits an empty ledger) into this ledger's
+/// set and those that wait for the next ledger. Highest inclusion fee rate per
 /// operation first, then submission order (core breaks ties at random).
-fn select<'a>(mut candidates: Vec<Candidate<'a>>, limits: &LedgerLimits) -> (Vec<Candidate<'a>>, SetAside<'a>, SetAside<'a>) {
+fn select<'a>(mut candidates: Vec<Candidate<'a>>, limits: &LedgerLimits) -> (Vec<Candidate<'a>>, SetAside<'a>) {
     candidates.sort_by(|a, b| {
         let ((an, ad), (bn, bd)) = (a.rate(), b.rate());
         (bn * ad).cmp(&(an * bd)).then(a.pending.index.cmp(&b.pending.index))
     });
-    let (mut selected, mut deferred, mut refused) = (vec![], vec![], vec![]);
+    let (mut selected, mut deferred) = (vec![], vec![]);
     let mut classic_ops = 0u64;
     let mut soroban = SorobanResources::default();
     for c in candidates {
         if c.valid.is_soroban() {
-            let r = c.soroban_resources();
-            if let Some((what, used, cap)) = r.over(&limits.soroban) {
-                refused.push((c, format!("its {what} ({used}) exceed the per-ledger maximum {cap}")));
-            } else if let Some((what, used, cap)) = soroban.plus(&r).over(&limits.soroban) {
+            let r = soroban_resources(&c.valid);
+            if let Some((what, used, cap)) = soroban.plus(&r).over(&limits.soroban) {
                 deferred.push((c, format!("the Soroban phase was full ({what}: {used} > {cap})")));
             } else {
                 soroban = soroban.plus(&r);
                 selected.push(c);
             }
         } else {
-            let ops = c.ops();
-            if ops > limits.max_classic_ops {
-                refused.push((c, format!("its {ops} operations exceed the per-ledger maximum {}", limits.max_classic_ops)));
-            } else if classic_ops + ops > limits.max_classic_ops {
+            let ops = ops(&c.valid);
+            if classic_ops + ops > limits.max_classic_ops {
                 deferred.push((c, format!("the classic phase was full ({} operations > {})", classic_ops + ops, limits.max_classic_ops)));
             } else {
                 classic_ops += ops;
@@ -616,7 +628,7 @@ fn select<'a>(mut candidates: Vec<Candidate<'a>>, limits: &LedgerLimits) -> (Vec
             }
         }
     }
-    (selected, deferred, refused)
+    (selected, deferred)
 }
 
 fn xored(h: &[u8; 32], x: &[u8; 32]) -> [u8; 32] {

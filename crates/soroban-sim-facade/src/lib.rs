@@ -656,12 +656,17 @@ impl Facade {
                 validator.validate(&envelope).map_err(RpcError::internal)?,
             )
         };
-        // core's queue turns away a transaction whose fee source cannot pay
-        // its bid on top of the bids already waiting.
+        // core's queue turns away a transaction no ledger can hold, and one
+        // whose fee source cannot pay its bid on top of the bids already
+        // waiting.
         if let (Ok(valid), Some(queue)) = (&verdict, &self.held) {
             let payer = Some(valid.fee_source().clone());
             let queued = queue.iter().filter(|t| envelope_fee_source(&t.envelope) == payer).map(|t| t.fee_bid).sum();
-            if let Some(r) = self.session.fee_overdraw(valid.fee_source(), queued, valid.fees().bid).map_err(RpcError::internal)? {
+            let refusal = match self.session.ledger_refusal(valid) {
+                Some(r) => Some(r),
+                None => self.session.fee_overdraw(valid.fee_source(), queued, valid.fees().bid).map_err(RpcError::internal)?,
+            };
+            if let Some(r) = refusal {
                 verdict = Err(r);
             }
         }

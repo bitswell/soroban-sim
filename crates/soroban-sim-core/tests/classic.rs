@@ -870,3 +870,30 @@ fn a_fee_source_cannot_bid_more_than_it_has_across_a_ledger() {
     assert_eq!(seq(&s, &d), dave_seq);
     assert_eq!(balance(&s, &e), erin_before - 100);
 }
+
+#[test]
+fn a_transaction_no_ledger_can_hold_does_not_count_against_its_fee_source() {
+    let mut options = SessionOptions::new(PASSPHRASE);
+    let mut limits = LedgerLimits::unlimited();
+    limits.max_classic_ops = 2;
+    options.ledger_limits = Some(limits);
+    let mut s = Session::new(Box::new(base(vec![])), fork_point(), options).unwrap();
+    let key = rehearse_alice(&s);
+    let carol = funded(&mut s, &key, "carol", 10);
+    let dave = funded(&mut s, &key, "dave", 10);
+    let (c, d) = (carol.account_id(), dave.account_id());
+    // frank can pay 400: the 300 bid of a fee bump no ledger can hold (two
+    // operations plus the bump, over the maximum of 2), or the 200 of one
+    // that fits, not both.
+    let frank = barely_funded(&mut s, &key, "frank", 400);
+    let f = frank.account_id();
+    let two_ops = envelope(&s, &c, std::slice::from_ref(&carol), (0..2).map(|_| op(pay(&alice(), Asset::Native, 1))).collect());
+    let too_big = fee_bump(&two_ops, &f, &frank, 300);
+    let fits = fee_bump(&envelope(&s, &d, std::slice::from_ref(&dave), vec![op(pay(&alice(), Asset::Native, XLM))]), &f, &frank, 200);
+    let frank_before = balance(&s, &f);
+    let records = s.submit_ledger(&[("too big, paid by frank", &too_big), ("dave, paid by frank", &fits)]).unwrap();
+    expect_rejected(&records[0], TxCode::SorobanInvalid);
+    assert!(records[0].status.summary().contains("per-ledger maximum 2"), "{}", records[0].status.summary());
+    applied(&records[1]);
+    assert_eq!(balance(&s, &f), frank_before - 200);
+}
