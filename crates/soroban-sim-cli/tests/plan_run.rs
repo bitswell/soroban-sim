@@ -9,7 +9,8 @@ use soroban_sim_core::session::{host_protocol, new_account, Ed25519Key, ForkPoin
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const FORK_LEDGER: u32 = 6_000_000;
+/// Above every captured config entry's last-modified ledger.
+const FORK_LEDGER: u32 = 10_000_000;
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")

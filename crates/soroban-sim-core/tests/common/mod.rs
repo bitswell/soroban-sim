@@ -16,7 +16,9 @@ use soroban_sim_core::session::*;
 use std::collections::BTreeMap;
 
 pub const PASSPHRASE: &str = "soroban-sim session tests ; 2026";
-pub const FORK_LEDGER: u32 = 5_000_000;
+/// Above every captured config entry's last-modified ledger, so only the
+/// tests' own late writes count as drift.
+pub const FORK_LEDGER: u32 = 10_000_000;
 pub const FORK_TIME: u64 = 1_790_000_000;
 pub const XLM: i64 = 10_000_000;
 
