@@ -15,6 +15,12 @@
  *   node scripts/capture-parity-fixture.mjs [case]     # default: native-sac-decimals
  *   pnpm run capture:parity
  *
+ * By default the source (and, for transfer, destination) account is a fresh
+ * keypair funded via friendbot. Set SOURCE_ACCOUNT=<G...> (and
+ * DESTINATION_ACCOUNT=<G...>) to use existing funded accounts instead; the
+ * capture is then read-only against the network. Simulation never checks
+ * envelope signatures, so no secret key is needed.
+ *
  * The script lives at the repo root under scripts/ but the `@stellar/stellar-sdk`
  * dependency is installed only under packages/soroban-sim/node_modules (pnpm does
  * not hoist it to the repo root). ESM bare-specifier resolution walks up from the
@@ -99,9 +105,9 @@ const CASES = {
   // contract's read-only `add(a: i32, b: i32) -> i32`. The contract is not a
   // built-in SAC, so it must be deployed first; its contract id is supplied at
   // capture time via LOCAL_CONTRACT_ID (see docs/local-rpc-parity.md). Intended
-  // to run against a local protocol-28 quickstart RPC so the captured raw
-  // instruction/fee metering matches soroban-sim's pinned host (protocol 28),
-  // closing the cross-protocol residual the testnet(p27) fixtures document.
+  // to run against a local quickstart RPC at soroban-sim's pinned host protocol
+  // so the captured raw instruction/fee metering matches the host. The
+  // committed fixture was captured at protocol 29.
   "local-add-i32": {
     file: "local-add-i32.json",
     // Contract id is a deployed instance, independent of the network passphrase.
@@ -132,7 +138,7 @@ const FRIENDBOT_URL = process.env.FRIENDBOT_URL ?? "https://friendbot.stellar.or
 // SDK's rpc.Server throws on http:// URLs unless `allowHttp: true` is passed.
 const ALLOW_HTTP = process.env.SOROBAN_ALLOW_HTTP === "1";
 // Human-readable label persisted into the fixture's `network` field. For a local
-// protocol-28 quickstart node set SOROBAN_NETWORK=local-p28 so the fixture is
+// protocol-29 quickstart node set SOROBAN_NETWORK=local-p29 so the fixture is
 // unambiguously tagged as captured off the local RPC (vs public testnet).
 const NETWORK = process.env.SOROBAN_NETWORK ?? "testnet";
 // The network passphrase governs signing + networkId + native-SAC contractId
@@ -224,26 +230,33 @@ async function main() {
   const contractId = spec.contractId(PASSPHRASE);
   console.log(`  contract: ${contractId} fn: ${spec.functionName}()`);
 
-  // 1. Throwaway source account, funded via friendbot.
-  const kp = Keypair.random();
-  console.log(`  source: ${kp.publicKey()} (funding via friendbot)`);
+  // 1. Source account: an existing one (SOURCE_ACCOUNT, read-only) or a
+  // throwaway keypair funded via friendbot.
   const fundViaFriendbot = (addr) =>
     withRetry(`friendbot(${addr.slice(0, 6)}…)`, async () => {
       const res = await fetch(`${FRIENDBOT_URL}/?addr=${encodeURIComponent(addr)}`);
       if (!res.ok) throw new Error(`friendbot HTTP ${res.status}`);
       return res;
     });
-  await fundViaFriendbot(kp.publicKey());
+  const existingOrFunded = async (envAddr, role) => {
+    if (envAddr) {
+      console.log(`  ${role}: ${envAddr} (existing account)`);
+      return { publicKey: () => envAddr };
+    }
+    const fresh = Keypair.random();
+    console.log(`  ${role}: ${fresh.publicKey()} (funding via friendbot)`);
+    await fundViaFriendbot(fresh.publicKey());
+    return fresh;
+  };
+  const kp = await existingOrFunded(process.env.SOURCE_ACCOUNT, "source");
   const account = await withRetry("getAccount", () => server.getAccount(kp.publicKey()));
 
-  // Optional destination account (WRITE+AUTH cases like the SAC transfer): fund
-  // it too so its classic account entry exists on-ledger and lands in the
+  // Optional destination account (WRITE+AUTH cases like the SAC transfer): it
+  // must exist so its classic account entry is on-ledger and lands in the
   // read-write footprint.
   let destKp = null;
   if (spec.needsDestination) {
-    destKp = Keypair.random();
-    console.log(`  destination: ${destKp.publicKey()} (funding via friendbot)`);
-    await fundViaFriendbot(destKp.publicKey());
+    destKp = await existingOrFunded(process.env.DESTINATION_ACCOUNT, "destination");
     await withRetry("getAccount(dest)", () => server.getAccount(destKp.publicKey()));
   }
 

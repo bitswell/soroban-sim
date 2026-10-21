@@ -37,7 +37,7 @@ use crate::{
 };
 
 /// Shadow-limit factors replicated from soroban-simulation's private
-/// `NetworkConfig::create_budget` (network_config.rs in 28.0.0), so the
+/// `NetworkConfig::create_budget` (network_config.rs in 29.0.2), so the
 /// pass-2 enforcing budget matches the pass-1 recording budget exactly.
 /// (`create_budget` is `pub(crate)` there, so we rebuild the same budget via
 /// the public `Budget::try_from_configs_with_shadow_limits`.)
@@ -176,7 +176,7 @@ fn replay_with_trace(core: &SimulationCore) -> std::result::Result<Vec<TraceStep
         .collect::<std::result::Result<Vec<Vec<u8>>, String>>()?;
 
     // One item per footprint key, read_only (XDR order) then read_write. The
-    // protocol-28 host lazily decodes present entries and uses a paired TTL
+    // protocol-29 host lazily decodes present entries and uses a paired TTL
     // metadata value for Soroban state. Missing entries remain explicit None.
     let mut encoded_ledger_entries: Vec<(
         Option<Vec<u8>>,

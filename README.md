@@ -38,9 +38,9 @@ Implemented spike:
 Pinned upstream:
 
 - `soroban-simulation = 29.0.2`
-- `soroban-env-host = 29.0.2` (matches the current Testnet and Mainnet protocol)
+- `soroban-env-host = 29.0.2` (protocol 29, matching Testnet and Mainnet)
 - `stellar-xdr = 28.0.0` through upstream crates
-- `soroban-wasmi = 0.31.1-soroban.20.0.1` through `soroban-env-host`
+- `soroban-wasmi = 29.0.0` through `soroban-env-host`
 - fixture contract uses `soroban-sdk = 27.0.5`
 
 ## Milestone status
@@ -54,15 +54,16 @@ Pinned upstream:
   are in place.
 - **M3 (differential testing) — in progress.** Oracles A, B, and C are green (see
   `docs/differential-testing.md`). The RPC-equivalence differential harness has
-  landed and demonstrates parity against a live Stellar testnet
-  `simulateTransaction` over two fixtures: the native SAC `decimals()`
-  (read-only) and a native SAC `transfer()` (write + auth + contract event). On
-  both, the invocation result, footprint (read-only **and** read-write), auth
-  entries, and contract events are byte-identical to RPC. An `AdjustmentSource`
-  knob (`apply-rpc-adjustments`) reproduces stellar-rpc's resource/fee adjustment
-  model exactly (RpcDefault instructions = raw metered + 50000 on both); the only
-  residual is a small raw-CPU-metering delta between the exact env-host build
-  compiled here and the RPC core build, classified `divergent-explained`.
+  landed and demonstrates parity against recorded protocol-29 RPC
+  `simulateTransaction` responses over three fixtures: the native SAC
+  `decimals()` (read-only) and a native SAC `transfer()` (write + auth + contract
+  event) from Testnet, plus a custom-wasm `add()` from a local quickstart node.
+  On all three, the invocation result, footprint (read-only **and** read-write),
+  auth entries, and contract events are byte-identical to RPC. An
+  `AdjustmentSource` knob (`apply-rpc-adjustments`) reproduces stellar-rpc's
+  resource/fee adjustment model exactly (RpcDefault instructions = raw metered +
+  50000 on all three), and instructions and resource fee match RPC exactly at
+  protocol 29; any future residual is classified `divergent-explained`.
   Re-capture with `pnpm run capture:parity <case>`.
 
 ## Requirements
@@ -102,7 +103,7 @@ Golden fixture:
 
 ```text
 len=388
-sha256=3b678efa6ece9309c861a0412b8e1bc45d4d449085217e76c0966b4d8ebe4bca
+sha256=3026ccbc8085dc49520836c688a504a93eb93b8206213d6fa8ef6a1a280e514c
 ```
 
 ## Measured M0 numbers
@@ -127,10 +128,10 @@ Measured on macOS arm64, Rust 1.97.1, Wasmtime 48.0.0, Chromium 151.
   (`SimulationAdjustmentConfig::no_adjustments()`). Setting
   `apply-rpc-adjustments` (`AdjustmentSource::RpcDefault`) reproduces
   stellar-rpc's adjustment model exactly; the parity harness confirms adjusted
-  instructions = raw + 50000 on both fixtures. A small residual remains in the
-  *raw* metered numbers because RPC core and this browser component can use
-  different env-host patch builds. The custom local fixture and live-workbench
-  host both use protocol 29.
+  instructions = raw + 50000 on every fixture. All fixtures are captured at
+  protocol 29, the live-workbench host's protocol (native-SAC from Testnet,
+  custom-wasm `local-add-i32` from a local quickstart node), and match RPC's
+  instructions and resource fee exactly.
 - The single-call simulation API records auth rather than enforcing it against
   a supplied auth tree. The network-session engine (below) enforces and
   verifies every envelope and auth signature.

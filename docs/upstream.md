@@ -8,7 +8,7 @@ The live Testnet workbench pins:
 - `soroban-env-host = 29.0.2`
 - `soroban-simulation = 29.0.2`
 - `stellar-xdr = 28.0.0` through upstream crates
-- `soroban-wasmi = 0.31.1-soroban.20.0.1`
+- `soroban-wasmi = 29.0.0`
 
 The source observations later in this document were originally gathered against
 28.0.2; re-check private/internal API details when upgrading the live host.
@@ -193,9 +193,12 @@ both handled locally without a fork:
     adjustment *model* precisely — any remaining RPC-number gap is in the raw
     metering, not the adjustment. (Note the SSIM `simulated_instructions` header
     stays the raw count regardless of the flag; the adjusted number is encoded in
-    `SorobanTransactionData`.) The residual on the captured fixtures is a
-    protocol-27-vs-28 raw-metering delta, appearing identically in both the raw
-    and adjusted numbers — see the `check_ledger_protocol_supported` note below.
+    `SorobanTransactionData`.) The residual on the original protocol-27
+    captures was a cross-protocol raw-metering delta, appearing identically in
+    both the raw and adjusted numbers — see the `check_ledger_protocol_supported`
+    note below. Recaptured at protocol 29 against the 29.0.2 host, the
+    native-SAC fixtures and a local protocol-29 `local-add-i32` capture match
+    RPC's instructions and resource fee exactly.
   The raw numbers remain the correct default for a portable simulator that must
   not bake in one network's fee policy; `RpcDefault` is opt-in for callers who
   want RPC-matching output.
@@ -203,7 +206,7 @@ both handled locally without a fork:
 - **`check_ledger_protocol_supported` hard-pins the host to its own protocol.**
   The recording-mode setup guard (`Host::set_ledger_info` →
   `check_ledger_protocol_supported`, `host.rs:572`) rejects any ledger protocol
-  != the host's compiled protocol (28 for `soroban-env-host` 28.0.2) with a bare
+  != the host's compiled protocol (29 for `soroban-env-host` 29.0.2) with a bare
   `Error(Context, InternalError)` thrown *before* diagnostics are enabled. This
   means a captured fixture cannot be replayed at its original protocol against a
   differently-versioned host; the replay must pin the ledger context to the
