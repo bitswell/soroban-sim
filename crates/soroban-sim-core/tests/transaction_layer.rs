@@ -7,7 +7,7 @@ mod common;
 use common::*;
 use soroban_env_host::xdr::{
     FeeBumpTransaction, FeeBumpTransactionEnvelope, FeeBumpTransactionExt, FeeBumpTransactionInnerTx,
-    InvokeHostFunctionResult, Memo, MuxedAccount, OperationResult, OperationResultTr, ScAddress, ScVal, StringM,
+    InnerTransactionResultResult, InvokeHostFunctionResult, Memo, MuxedAccount, OperationResult, OperationResultTr, ScAddress, ScVal, StringM,
     TransactionEnvelope, TransactionExt, TransactionResultResult, Uint256,
 };
 use soroban_sim_core::session::*;
@@ -81,13 +81,25 @@ fn fee_bump_rejections_follow_core() {
     forged.signatures = vec![mallory.sign_decorated(&hash)].try_into().unwrap();
     expect_rejected(&s.submit("outer signed by a non-signer", &TransactionEnvelope::TxFeeBump(forged)).unwrap(), TxCode::BadAuth);
     // A fee source that does not exist.
-    expect_rejected(&s.submit("no fee source", &fee_bump(&p.envelope, &mallory, fee + 400)).unwrap(), TxCode::NoAccount);
+    let r = s.submit("no fee source", &fee_bump(&p.envelope, &mallory, fee + 400)).unwrap();
+    expect_rejected(&r, TxCode::NoAccount);
+    assert_eq!(r.transaction_result().result, TransactionResultResult::TxNoAccount, "an outer rejection is not wrapped");
     // An inner failure is the inner transaction's code inside txFEE_BUMP_INNER_FAILED.
     assert!(s.submit("applies", &fee_bump(&p.envelope, &relayer, fee + 400)).unwrap().status.is_applied());
     let r = s.submit("replayed", &fee_bump(&p.envelope, &relayer, fee + 500)).unwrap();
     match &r.status {
         TxStatus::Rejected { code: TxCode::BadSeq, fee_bump_inner: true, .. } => assert!(r.status.summary().starts_with("txFEE_BUMP_INNER_FAILED(txBAD_SEQ)")),
         other => panic!("{}", other.summary()),
+    }
+    let result = r.transaction_result();
+    assert_eq!(result.fee_charged, 0);
+    match result.result {
+        TransactionResultResult::TxFeeBumpInnerFailed(pair) => {
+            assert_eq!(pair.transaction_hash.0, p.hash);
+            assert_eq!(pair.result.fee_charged, 0);
+            assert_eq!(pair.result.result, InnerTransactionResultResult::TxBadSeq);
+        }
+        other => panic!("{other:?}"),
     }
 }
 

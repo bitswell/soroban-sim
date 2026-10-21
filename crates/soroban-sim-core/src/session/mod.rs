@@ -45,7 +45,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 use soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use soroban_env_host::xdr::{
-    Hash, InnerTransactionResult, InnerTransactionResultExt, InnerTransactionResultPair, InnerTransactionResultResult,
+    FeeBumpTransactionInnerTx, Hash, InnerTransactionResult, InnerTransactionResultExt, InnerTransactionResultPair, InnerTransactionResultResult,
     InvokeHostFunctionResult, OperationResult, OperationResultTr, TransactionResult, TransactionResultExt,
     TransactionResultResult,
 };
@@ -201,8 +201,15 @@ impl TxRecord {
                     OpFailure::InsufficientRefundableFee => InvokeHostFunctionResult::InsufficientRefundableFee,
                 })],
             ),
-            TxStatus::Rejected { code, .. } => {
-                return TransactionResult { fee_charged: 0, result: rejected_result(*code), ext: TransactionResultExt::V0 };
+            TxStatus::Rejected { code, fee_bump_inner, .. } => {
+                let result = match self.inner_hash {
+                    Some(inner) if *fee_bump_inner => TransactionResultResult::TxFeeBumpInnerFailed(InnerTransactionResultPair {
+                        transaction_hash: Hash(inner),
+                        result: InnerTransactionResult { fee_charged: 0, result: rejected!(InnerTransactionResultResult, *code), ext: InnerTransactionResultExt::V0 },
+                    }),
+                    _ => rejected!(TransactionResultResult, *code),
+                };
+                return TransactionResult { fee_charged: 0, result, ext: TransactionResultExt::V0 };
             }
         };
         let ops = ops.try_into().unwrap_or_default();
@@ -606,7 +613,13 @@ impl Session {
             ledger: self.info.sequence_number,
             close_time: self.info.timestamp,
             hash: envelope_hash(envelope, self.info.network_id).unwrap_or_default(),
-            inner_hash: None,
+            inner_hash: match envelope {
+                TransactionEnvelope::TxFeeBump(e) => {
+                    let FeeBumpTransactionInnerTx::Tx(inner) = &e.tx.inner_tx;
+                    transaction_hash(&inner.tx, self.info.network_id).ok()
+                }
+                _ => None,
+            },
             source: envelope_source(envelope),
             fee_source: envelope_fee_source(envelope),
             status: TxStatus::Rejected { code: TxCode::Malformed, detail: String::new(), fee_bump_inner: false },
@@ -641,7 +654,6 @@ impl Session {
             .applier
             .apply(&self.ledger, &self.info, &self.network_config, &self.limits, &valid, self.options.enable_diagnostics, options.prng_seed)
             .map_err(|e| with_fetch_error(e, &self.ledger))?;
-        record.inner_hash = valid.inner_hash;
         record.fees = valid.fees;
         record.fee_charged = applied.fee_charged;
         record.refund = applied.refund;
@@ -670,27 +682,32 @@ impl Session {
     }
 }
 
-fn rejected_result(code: TxCode) -> TransactionResultResult {
-    match code {
-        TxCode::Malformed => TransactionResultResult::TxMalformed,
-        TxCode::MissingOperation => TransactionResultResult::TxMissingOperation,
-        TxCode::NotSupported => TransactionResultResult::TxNotSupported,
-        TxCode::TooEarly => TransactionResultResult::TxTooEarly,
-        TxCode::TooLate => TransactionResultResult::TxTooLate,
-        TxCode::BadMinSeqAgeOrGap => TransactionResultResult::TxBadMinSeqAgeOrGap,
-        TxCode::NoAccount => TransactionResultResult::TxNoAccount,
-        TxCode::BadSeq => TransactionResultResult::TxBadSeq,
-        TxCode::BadAuth => TransactionResultResult::TxBadAuth,
-        TxCode::OpBadAuth => TransactionResultResult::TxFailed(vec![OperationResult::OpBadAuth].try_into().unwrap_or_default()),
-        TxCode::OpMalformed => TransactionResultResult::TxFailed(
-            vec![OperationResult::OpInner(OperationResultTr::InvokeHostFunction(InvokeHostFunctionResult::Malformed))].try_into().unwrap_or_default(),
-        ),
-        TxCode::BadAuthExtra => TransactionResultResult::TxBadAuthExtra,
-        TxCode::InsufficientFee => TransactionResultResult::TxInsufficientFee,
-        TxCode::InsufficientBalance => TransactionResultResult::TxInsufficientBalance,
-        TxCode::SorobanInvalid => TransactionResultResult::TxSorobanInvalid,
-    }
+/// A rejection code as a `TransactionResultResult`, or as the
+/// `InnerTransactionResultResult` of a fee bump's inner transaction.
+macro_rules! rejected {
+    ($result:ident, $code:expr) => {
+        match $code {
+            TxCode::Malformed => $result::TxMalformed,
+            TxCode::MissingOperation => $result::TxMissingOperation,
+            TxCode::NotSupported => $result::TxNotSupported,
+            TxCode::TooEarly => $result::TxTooEarly,
+            TxCode::TooLate => $result::TxTooLate,
+            TxCode::BadMinSeqAgeOrGap => $result::TxBadMinSeqAgeOrGap,
+            TxCode::NoAccount => $result::TxNoAccount,
+            TxCode::BadSeq => $result::TxBadSeq,
+            TxCode::BadAuth => $result::TxBadAuth,
+            TxCode::OpBadAuth => $result::TxFailed(vec![OperationResult::OpBadAuth].try_into().unwrap_or_default()),
+            TxCode::OpMalformed => $result::TxFailed(
+                vec![OperationResult::OpInner(OperationResultTr::InvokeHostFunction(InvokeHostFunctionResult::Malformed))].try_into().unwrap_or_default(),
+            ),
+            TxCode::BadAuthExtra => $result::TxBadAuthExtra,
+            TxCode::InsufficientFee => $result::TxInsufficientFee,
+            TxCode::InsufficientBalance => $result::TxInsufficientBalance,
+            TxCode::SorobanInvalid => $result::TxSorobanInvalid,
+        }
+    };
 }
+use rejected;
 
 /// `NetworkConfig` is not `Clone` upstream.
 pub fn clone_network_config(c: &NetworkConfig) -> NetworkConfig {

@@ -275,14 +275,19 @@ fn footprint(e: &TransactionEnvelope) -> (std::collections::HashSet<LedgerKey>, 
 
 /// Rolls entries back to the end of one ledger (the pin): the before-image
 /// of each key's first change after it. Fed every later ledger in order.
+/// An eviction records no image, so a key evicted before any change
+/// recorded it has no known value at the pin.
 pub struct Rollback {
     first_before: HashMap<LedgerKey, Option<LedgerEntry>>,
+    /// Keys evicted before their first recorded change, and the ledger.
+    evicted: HashMap<LedgerKey, u32>,
+    pin: u32,
     indexed_through: u32,
 }
 
 impl Rollback {
     pub fn new(pin: u32) -> Self {
-        Self { first_before: HashMap::new(), indexed_through: pin }
+        Self { first_before: HashMap::new(), evicted: HashMap::new(), pin, indexed_through: pin }
     }
 
     /// The last ledger fed so far.
@@ -296,21 +301,37 @@ impl Rollback {
             bail!("ledger {seq} does not follow ledger {}", self.indexed_through);
         }
         for_each_change(meta, |_, key, before, _| {
-            self.first_before.entry(key).or_insert(before);
+            if !self.evicted.contains_key(&key) {
+                self.first_before.entry(key).or_insert(before);
+            }
         })?;
+        // The eviction scan runs after every transaction of the ledger.
+        for key in meta.evicted_keys.iter() {
+            if !self.first_before.contains_key(key) {
+                self.evicted.entry(key.clone()).or_insert(seq);
+            }
+        }
         self.indexed_through = seq;
         Ok(())
     }
 
-    /// `key` as it was at the pin, if anything since changed it.
-    pub fn value_at_pin(&self, key: &LedgerKey) -> Option<Option<LedgerEntry>> {
-        self.first_before.get(key).cloned()
+    /// `key` as it was at the pin, if anything since changed it. An error if
+    /// it was evicted since with no earlier change recording its value.
+    pub fn value_at_pin(&self, key: &LedgerKey) -> Result<Option<Option<LedgerEntry>>> {
+        if let Some(ledger) = self.evicted.get(key) {
+            let name = match key {
+                LedgerKey::Ttl(t) => format!("TTL entry {}", crate::report::hex(&t.key_hash.0)),
+                other => crate::report::describe_key(other),
+            };
+            bail!("{name} was evicted at ledger {ledger}, after the pin {}, and no ledger meta records its value at the pin", self.pin);
+        }
+        Ok(self.first_before.get(key).cloned())
     }
 
     /// The live-until ledger of a contract entry at the pin, if anything
     /// since changed its TTL (`Some(None)`: it had no TTL entry).
     pub fn live_until_at_pin(&self, key: &LedgerKey) -> Result<Option<Option<u32>>> {
-        Ok(self.value_at_pin(&ttl_key(key)?).map(|e| match e.map(|e| e.data) {
+        Ok(self.value_at_pin(&ttl_key(key)?)?.map(|e| match e.map(|e| e.data) {
             Some(LedgerEntryData::Ttl(t)) => Some(t.live_until_ledger_seq),
             _ => None,
         }))
@@ -593,7 +614,32 @@ mod tests {
         assert_eq!(sub_entries(&index.value_before(&key, Pos::executing(L, 1, true)).unwrap()), 2);
         let mut rollback = Rollback::new(L - 1);
         rollback.add(&meta).unwrap();
-        assert_eq!(sub_entries(&rollback.value_at_pin(&key).unwrap()), 1, "the first change in time is the fee charge");
+        assert_eq!(sub_entries(&rollback.value_at_pin(&key).unwrap().unwrap()), 1, "the first change in time is the fee charge");
+    }
+
+    #[test]
+    fn evictions_without_an_earlier_change_have_no_value_at_the_pin() {
+        // Entry 4 changes in the ledger, then entries 3 and 4 (with their
+        // TTLs) are evicted by the scan at its close.
+        let k4 = data_key(4);
+        let t = Tx { envelope: Some(envelope(1, 1, &[], &[k4.clone()])), fee: changes(&[]), before: changes(&[]), op: changes(&[(data(4), data(4)), (ttl(4, 90), ttl(4, 95))]) };
+        let mut meta = ledger(&[t], &[vec![vec![0]]]);
+        let evicted = [data_key(3), ttl_key(&data_key(3)).unwrap(), k4.clone(), ttl_key(&k4).unwrap()];
+        meta.evicted_keys = evicted.to_vec().try_into().unwrap();
+        let mut rollback = Rollback::new(L - 1);
+        rollback.add(&meta).unwrap();
+        let err = rollback.value_at_pin(&data_key(3)).unwrap_err().to_string();
+        assert!(err.contains("evicted at ledger 100") && err.contains("pin 99"), "{err}");
+        assert!(rollback.live_until_at_pin(&data_key(3)).is_err());
+        // A change before the eviction recorded entry 4's value at the pin.
+        assert!(rollback.value_at_pin(&k4).unwrap().unwrap().is_some());
+        assert_eq!(rollback.live_until_at_pin(&k4).unwrap(), Some(Some(90)));
+        // Re-creating an evicted entry later does not make it absent at the pin.
+        let recreate = Tx { envelope: Some(envelope(1, 2, &[], &[data_key(3)])), fee: changes(&[]), before: changes(&[]), op: LedgerEntryChanges(vec![LedgerEntryChange::Created(data(3))].try_into().unwrap()) };
+        let mut next = ledger(&[recreate], &[vec![vec![0]]]);
+        next.ledger_header.header.ledger_seq = L + 1;
+        rollback.add(&next).unwrap();
+        assert!(rollback.value_at_pin(&data_key(3)).is_err());
     }
 
     #[test]

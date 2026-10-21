@@ -13,6 +13,8 @@
 //! sets the rent rate, which core rewrites every sample period at ledger
 //! close. The pin must therefore be no older than the window's last change;
 //! the window is read once, when the fork opens, and served as it was then.
+//! Nor is an evicted entry's value: a read of one evicted since the pin with
+//! no earlier change recording it fails rather than serving it as absent.
 
 use anyhow::{anyhow, bail, Result};
 use soroban_env_host::xdr::{ConfigSettingId, LedgerHeader, LedgerKey, LedgerKeyConfigSetting};
@@ -119,7 +121,7 @@ impl LedgerSource for CheckpointLedger {
             let mut cache = s.cache.borrow_mut();
             for key in missing {
                 let head_value = found.remove(&key);
-                let entry = match rollback.value_at_pin(&key) {
+                let entry = match rollback.value_at_pin(&key)? {
                     Some(before) => before,
                     None => head_value.as_ref().map(|e| e.entry.clone()),
                 };

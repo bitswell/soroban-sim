@@ -194,6 +194,7 @@ struct Candidate {
     rare: bool,
     keys: Vec<LedgerKey>,
     close_time: u64,
+    protocol_version: u32,
     base_fee: u32,
     base_reserve: u32,
     component_base_fee: Option<i64>,
@@ -257,6 +258,9 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
             if contents_hash != header.scp_value.tx_set_hash.0 {
                 bail!("ledger {}: the transaction set does not hash to the header's", l.sequence);
             }
+            if header.ledger_version != host_protocol() {
+                bail!("ledger {} is on protocol {}, this build's host implements protocol {}", l.sequence, header.ledger_version, host_protocol());
+            }
             let parallel = parallel_soroban_phase(&m.tx_set);
             layouts.insert(l.sequence, ParallelLayout::of(m, network_id)?);
             for (i, t) in m.tx_processing.iter().enumerate() {
@@ -283,6 +287,7 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
                     rare,
                     keys,
                     close_time: header.scp_value.close_time.0,
+                    protocol_version: header.ledger_version,
                     base_fee: header.base_fee,
                     base_reserve: header.base_reserve,
                     component_base_fee: member.component_base_fee,
@@ -399,7 +404,7 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
             ledger: c.ledger,
             close_time: c.close_time,
             apply_index: c.index,
-            protocol_version: host_protocol(),
+            protocol_version: c.protocol_version,
             base_fee: c.base_fee,
             base_reserve: c.base_reserve,
             component_base_fee: c.component_base_fee,

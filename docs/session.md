@@ -234,7 +234,10 @@ Smart-account `External` and passkey signatures are not checked yet.
   change of the Soroban state-size window that sets the rent rate. Core
   rewrites that window every 64 ledgers at ledger close, outside any
   transaction's meta, so nothing records its older values; the fork refuses
-  an older pin and names the first ledger it accepts.
+  an older pin and names the first ledger it accepts. An eviction records no
+  before-image either: a read of an entry (or its TTL) evicted after N, with
+  no earlier change since N recording its value, fails and names the key and
+  the eviction ledger instead of serving it as absent.
 
 ## Fidelity and limits
 
