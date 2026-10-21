@@ -61,6 +61,28 @@ export interface DebugMsg {
   type: "debug";
   id: number;
 }
+/**
+ * Trace a network-session step: the session supplies everything the step's
+ * footprint held just before it, so the trace pass needs no network.
+ */
+export interface DebugContextMsg {
+  type: "debug-context";
+  id: number;
+  networkPassphrase: string;
+  ledgerContext: {
+    protocolVersion: number;
+    sequenceNumber: number;
+    timestamp: string;
+    networkId: string;
+    baseReserve: number;
+    minTempEntryTtl: number;
+    minPersistentEntryTtl: number;
+    maxEntryTtl: number;
+  };
+  hostFunctionXdr: string;
+  sourceAccountXdr: string;
+  entries: Array<{ keyXdr: string; entryXdr: string; liveUntilLedger: number | null }>;
+}
 /** Parse an uploaded contract wasm: hash it, extract the spec, list functions. */
 export interface UploadParseMsg {
   type: "upload-parse";
@@ -113,6 +135,7 @@ export type MainToWorker =
   | SimulateMsg
   | CancelMsg
   | DebugMsg
+  | DebugContextMsg
   | UploadParseMsg
   | SimulateUploadMsg
   | LoadContractMsg

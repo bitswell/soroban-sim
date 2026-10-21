@@ -1862,6 +1862,7 @@ dependencies = [
  "sha2",
  "soroban-env-host",
  "soroban-sim-core",
+ "soroban-sim-facade",
  "soroban-simulation",
  "stellar-xdr",
  "tiny_http",
@@ -1877,6 +1878,7 @@ dependencies = [
  "serde_json",
  "soroban-env-host",
  "soroban-sim-core",
+ "soroban-sim-facade",
  "wit-bindgen",
 ]
 
@@ -1894,6 +1896,21 @@ dependencies = [
  "soroban-env-host",
  "soroban-simulation",
  "stellar-strkey",
+]
+
+[[package]]
+name = "soroban-sim-facade"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "soroban-env-host",
+ "soroban-sim-core",
+ "soroban-simulation",
+ "stellar-xdr",
 ]
 
 [[package]]

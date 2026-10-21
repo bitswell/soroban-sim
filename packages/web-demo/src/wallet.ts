@@ -62,14 +62,19 @@ export async function disconnectWallet(): Promise<void> {
   await StellarWalletsKit.disconnect();
 }
 
+/**
+ * Ask the wallet to sign `xdr`. A network session keeps its network's real
+ * passphrase, so the passphrase is the session's when signing into one.
+ */
 export async function signWithWallet(
   xdr: string,
   address: string,
+  networkPassphrase: string = Networks.TESTNET,
 ): Promise<WalletSignResult> {
   init();
   return (await StellarWalletsKit.signTransaction(xdr, {
     address,
-    networkPassphrase: Networks.TESTNET,
+    networkPassphrase,
   })) as WalletSignResult;
 }
 

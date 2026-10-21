@@ -407,6 +407,39 @@ impl TxValidator<'_> {
         })
     }
 
+    /// Signatures over `tx` (the transaction an envelope carries, v0 or fee
+    /// bump unwrapped) that verify against a signer the BASE ledger lists for
+    /// its source or operation sources, or auth entries signed that way,
+    /// whatever [`Self::validate`] decides: such an envelope may be valid on
+    /// the real network even if this session rejects it.
+    pub fn base_signed(&self, tx: &Transaction, signatures: &[DecoratedSignature]) -> Result<Vec<String>> {
+        let hash = transaction_hash(tx, self.info.network_id)?;
+        let mut accounts = vec![muxed_account_id(&tx.source_account)];
+        for op in tx.operations.iter() {
+            let id = op.source_account.as_ref().map(muxed_account_id);
+            if let Some(id) = id.filter(|id| !accounts.contains(id)) {
+                accounts.push(id);
+            }
+        }
+        let mut out = vec![];
+        for account in &accounts {
+            let Some(base) = self.ledger.base_account(account)? else { continue };
+            for s in account_signers(&base) {
+                if signatures.iter().any(|sig| verify(&hash, sig, &s.key)) {
+                    out.push(format!("{} signed for {account}, and it is a signer of that account on the base network", s.key));
+                }
+            }
+        }
+        for op in tx.operations.iter() {
+            if let OperationBody::InvokeHostFunction(ihf) = &op.body {
+                for entry in ihf.auth.iter() {
+                    out.extend(self.auth_replayable(entry)?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Signers that already sign for the account on the base network: an
     /// envelope they signed is valid there too.
     fn replayable(&self, matched: &[MatchedSigner]) -> Result<Vec<String>> {

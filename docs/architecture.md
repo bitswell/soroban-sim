@@ -20,8 +20,10 @@ Individual contracts stay normal Soroban core Wasm. The host loads contract code
 
 - `crates/soroban-sim-core`: Rust simulation core. Owns in-memory snapshots, fixture construction, simulation call, and deterministic output encoding.
 - `crates/soroban-sim-component`: WIT export wrapper for `wasm32-wasip2`.
-- `packages/soroban-sim`: TypeScript package placeholder around Jco output.
-- `packages/web-demo`: Vite + Playwright browser Worker proof.
+- `crates/soroban-sim-facade`: the stellar-rpc and `fork_*` JSON-RPC methods over a network session, without a transport. `soroban-sim serve` and the component's `network-session` resource both use it.
+- `crates/soroban-sim-cli`: the `soroban-sim` CLI (`session run`, `serve`).
+- `packages/soroban-sim`: TypeScript package around the Jco output: the simulator driver, state providers, caches, and the network-session API (`src/session/`).
+- `packages/web-demo`: Vite + Playwright browser demo: the workbench, the time-travel debugger, the wallet pre-submit flow and the network-session panel.
 
 ## Current WIT
 
@@ -29,6 +31,8 @@ Individual contracts stay normal Soroban core Wasm. The host loads contract code
 
 - `run-fixture() -> result<list<u8>, string>` for Milestone 0 proof.
 - `simulate(request) -> result<outcome, string>` for host-function simulation.
+- `simulate-transaction` and `simulate-trace`, the envelope and trace variants.
+- the `network-session` interface: a `session` resource over a forked ledger that answers JSON-RPC and returns `needs-state` for base entries the caller has not provided ([`docs/browser-session.md`](browser-session.md)).
 
 The request carries XDR bytes for host function, source account, and ledger entries. Ledger context is a small WIT record because `LedgerInfo` is host-side context, not Stellar XDR.
 
