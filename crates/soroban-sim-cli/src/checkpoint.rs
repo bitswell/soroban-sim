@@ -26,7 +26,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::meta::{v2, Rollback};
-use crate::rpc::RpcClient;
+use crate::rpc::{RpcClient, RpcError};
 
 /// How far behind RPC's latest ledger a pin may be: catching up reads the
 /// close meta of every ledger since (a few MB each on mainnet).
@@ -49,6 +49,26 @@ fn until_caught_up<T>(retries: &[Duration], mut read: impl FnMut() -> Result<T>,
         answer = read()?;
     }
     Ok(answer)
+}
+
+/// A `getLedgers` from `start` that a node not yet at `start` refused
+/// (stellar-rpc answers InvalidParams naming its latest ledger) reads as no
+/// ledgers yet; every other error stands.
+fn not_closed_yet_as_empty<T>(start: u32, read: Result<Vec<T>>) -> Result<Vec<T>> {
+    let behind = |e: &anyhow::Error| {
+        let error = &e.downcast_ref::<RpcError>()?.error;
+        if error["code"].as_i64() != Some(-32602) {
+            return None;
+        }
+        let message = error["message"].as_str()?;
+        let rest = &message[message.find("latest ledger: ")? + "latest ledger: ".len()..];
+        let latest: u32 = rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())].parse().ok()?;
+        Some(latest < start)
+    };
+    match read {
+        Err(e) if behind(&e) == Some(true) => Ok(vec![]),
+        r => r,
+    }
 }
 
 /// Run `read` until it answers at or after `pin`; an answer from before the
@@ -125,7 +145,11 @@ impl CheckpointSource {
         let mut rollback = self.rollback.borrow_mut();
         while rollback.indexed_through() < ledger {
             let next = rollback.indexed_through() + 1;
-            let batch = until_caught_up(&LAG_RETRIES, || self.rpc.ledgers(next, 5.min(ledger - next + 1)), |b| !b.is_empty())?;
+            let batch = until_caught_up(
+                &LAG_RETRIES,
+                || not_closed_yet_as_empty(next, self.rpc.ledgers(next, 5.min(ledger - next + 1))),
+                |b| !b.is_empty(),
+            )?;
             if batch.is_empty() {
                 bail!("{} returned no ledgers from {next} after {} retries", self.rpc.url, LAG_RETRIES.len());
             }
@@ -236,6 +260,42 @@ mod tests {
         .unwrap();
         assert!(got.is_empty());
         assert_eq!(reads, 3);
+    }
+
+    fn get_ledgers_error(code: i64, latest: u32) -> anyhow::Error {
+        RpcError {
+            method: "getLedgers".into(),
+            error: serde_json::json!({
+                "code": code,
+                "message": format!("start ledger must be between the oldest ledger: 10 and the latest ledger: {latest} for this rpc instance."),
+            }),
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_node_refusing_a_start_past_its_latest_ledger_is_re_read() {
+        let mut answers = vec![Err(get_ledgers_error(-32602, 104)), Err(get_ledgers_error(-32602, 104)), Ok(vec![105u32])].into_iter();
+        let got = until_caught_up(&[Duration::ZERO; 4], || not_closed_yet_as_empty(105, answers.next().unwrap()), |b| !b.is_empty()).unwrap();
+        assert_eq!(got, vec![105]);
+    }
+
+    #[test]
+    fn other_get_ledgers_errors_are_not_retried() {
+        for err in [get_ledgers_error(-32602, 200), get_ledgers_error(-32603, 104), anyhow!("getLedgers to rpc: connection refused")] {
+            let mut reads = 0;
+            let mut answers = vec![Err(err)].into_iter();
+            let got = until_caught_up(
+                &[Duration::ZERO; 4],
+                || {
+                    reads += 1;
+                    not_closed_yet_as_empty::<u32>(105, answers.next().unwrap())
+                },
+                |b| !b.is_empty(),
+            );
+            assert!(got.is_err());
+            assert_eq!(reads, 1);
+        }
     }
 
     #[test]

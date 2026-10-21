@@ -36,6 +36,21 @@ pub struct Retention {
     pub oldest: u32,
 }
 
+/// A JSON-RPC error response, kept whole so callers can tell errors apart.
+#[derive(Debug)]
+pub struct RpcError {
+    pub method: String,
+    pub error: Value,
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.method, self.error)
+    }
+}
+
+impl std::error::Error for RpcError {}
+
 /// One closed ledger from `getLedgers`.
 pub struct ClosedLedger {
     pub sequence: u32,
@@ -76,7 +91,7 @@ impl RpcClient {
             }
         };
         if let Some(err) = response.get("error") {
-            bail!("{method}: {err}");
+            return Err(RpcError { method: method.to_string(), error: err.clone() }.into());
         }
         response.get("result").cloned().ok_or_else(|| anyhow!("{method}: no result"))
     }
