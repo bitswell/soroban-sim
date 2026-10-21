@@ -11,7 +11,7 @@ use soroban_env_host::xdr::{
     Preconditions, ReadXdr, ScAddress, ScString, ScSymbol, ScVal, TransactionEnvelope, Uint256, WriteXdr,
 };
 use soroban_sim_core::session::{
-    account_key, host_protocol, show_scval, AuthSigner, AuthSignerSource, Ed25519Key, EntryState,
+    account_key, host_protocol, rejection_code, show_scval, AuthSigner, AuthSignerSource, Ed25519Key, EntryState,
     ExternalKey, ForkPoint, LedgerSource, OzDigest, OzSigner, PrepareRequest, Secp256r1Key, Session,
     SessionOptions, StoredEntry, TxRecord, TxStatus, ADDR_OZ_V1_DOMAIN,
 };
@@ -397,10 +397,17 @@ impl Runner {
         let text = record.status.summary();
         Ok(match &record.status {
             TxStatus::Applied { value } => Outcome { outcome: "applied", detail: show_scval(value), text, value: Some(value.clone()), succeeded: true, tx: Some(record) },
-            TxStatus::Failed { reason } => Outcome { outcome: "failed", detail: reason.clone(), text, value: None, succeeded: false, tx: Some(record) },
-            TxStatus::Rejected { code, detail } => {
-                Outcome { outcome: "rejected", detail: format!("{}: {detail}", code.as_str()), text, value: None, succeeded: false, tx: Some(record) }
+            TxStatus::Failed { code, reason } => {
+                Outcome { outcome: "failed", detail: format!("{}: {reason}", code.as_str()), text, value: None, succeeded: false, tx: Some(record) }
             }
+            TxStatus::Rejected { code, detail, fee_bump_inner } => Outcome {
+                outcome: "rejected",
+                detail: format!("{}: {detail}", rejection_code(*code, *fee_bump_inner)),
+                text,
+                value: None,
+                succeeded: false,
+                tx: Some(record),
+            },
         })
     }
 

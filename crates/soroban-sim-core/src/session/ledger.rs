@@ -132,6 +132,15 @@ pub(crate) fn is_temporary(entry: &LedgerEntry) -> bool {
     matches!(&entry.data, LedgerEntryData::ContractData(cd) if cd.durability == ContractDataDurability::Temporary)
 }
 
+/// Contract code or persistent contract data: the keys that can be archived.
+pub fn is_persistent_key(key: &LedgerKey) -> bool {
+    match key {
+        LedgerKey::ContractCode(_) => true,
+        LedgerKey::ContractData(cd) => cd.durability == ContractDataDurability::Persistent,
+        _ => false,
+    }
+}
+
 /// What kind of departure from the base network an override is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverrideKind {

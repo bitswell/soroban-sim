@@ -13,7 +13,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow.workspace = true
 soroban-env-host = { workspace = true, features = ["recording_mode"] }
-soroban-sim-core = { path = "../soroban-sim-core" }
+# No network sessions in the browser build, so no second host either.
+soroban-sim-core = { path = "../soroban-sim-core", default-features = false }
 wit-bindgen.workspace = true
 
 [dev-dependencies]

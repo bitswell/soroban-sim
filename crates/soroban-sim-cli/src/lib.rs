@@ -3,7 +3,9 @@
 //! Nothing is ever submitted to the network.
 
 pub mod differential;
+pub mod meta;
 pub mod plan;
+pub mod replay;
 pub mod report;
 pub mod rpc;
 pub mod run;

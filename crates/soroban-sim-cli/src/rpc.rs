@@ -6,7 +6,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::{json, Value};
 use soroban_env_host::xdr::{
-    LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerHeader, LedgerKey, Limits, ReadXdr, WriteXdr,
+    LedgerCloseMeta, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerHeader, LedgerKey,
+    Limits, ReadXdr, WriteXdr,
 };
 use soroban_sim_core::session::{FetchedBatch, LedgerSource, StoredEntry};
 use std::cell::Cell;
@@ -14,7 +15,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 /// The only methods this client will call.
-pub const READ_ONLY_METHODS: &[&str] = &["getLatestLedger", "getNetwork", "getLedgerEntries", "simulateTransaction", "getVersionInfo"];
+pub const READ_ONLY_METHODS: &[&str] =
+    &["getLatestLedger", "getNetwork", "getLedgerEntries", "simulateTransaction", "getVersionInfo", "getHealth", "getLedgers"];
 
 pub struct RpcClient {
     pub url: String,
@@ -26,6 +28,18 @@ pub struct LatestLedger {
     pub sequence: u32,
     pub protocol_version: u32,
     pub header: LedgerHeader,
+}
+
+/// The ledgers an RPC still serves history for.
+pub struct Retention {
+    pub latest: u32,
+    pub oldest: u32,
+}
+
+/// One closed ledger from `getLedgers`.
+pub struct ClosedLedger {
+    pub sequence: u32,
+    pub meta: LedgerCloseMeta,
 }
 
 impl RpcClient {
@@ -101,6 +115,28 @@ impl RpcClient {
             });
         }
         Ok(FetchedBatch { served_at_ledger: r["latestLedger"].as_u64().unwrap_or(0) as u32, entries })
+    }
+
+    /// The ledger range the RPC keeps history (`getLedgers`) for.
+    pub fn retention(&self) -> Result<Retention> {
+        let r = self.call("getHealth", json!({}))?;
+        let n = |f: &str| r[f].as_u64().map(|v| v as u32).ok_or_else(|| anyhow!("getHealth: no {f}"));
+        Ok(Retention { latest: n("latestLedger")?, oldest: n("oldestLedger")? })
+    }
+
+    /// Closed ledgers with their full close meta, from `start`, at most
+    /// `limit` of them (fewer when the RPC has not closed them yet).
+    pub fn ledgers(&self, start: u32, limit: u32) -> Result<Vec<ClosedLedger>> {
+        let r = self.call("getLedgers", json!({ "startLedger": start, "pagination": { "limit": limit } }))?;
+        let mut out = vec![];
+        for l in r["ledgers"].as_array().into_iter().flatten() {
+            let field = |f: &str| l[f].as_str().ok_or_else(|| anyhow!("getLedgers: no {f}"));
+            out.push(ClosedLedger {
+                sequence: l["sequence"].as_u64().ok_or_else(|| anyhow!("getLedgers: no sequence"))? as u32,
+                meta: LedgerCloseMeta::from_xdr(B64.decode(field("metadataXdr")?)?, Limits::none())?,
+            });
+        }
+        Ok(out)
     }
 
     /// `simulateTransaction` of an envelope (base64 XDR). Simulation never

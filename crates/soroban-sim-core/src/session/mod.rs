@@ -15,15 +15,16 @@
 //! does. `prepare` is only a convenience for building envelopes the session's
 //! throwaway signers sign. Fidelity: the host is exact (same env-host as the
 //! network's protocol); the transaction layer ports stellar-core's checks and
-//! is approximate where noted (one transaction per ledger, no surge pricing,
-//! no fee-bump or classic operations).
+//! is approximate where noted (one transaction per ledger, surge pricing only
+//! as a given lane base fee, no classic operations).
 
 mod applier;
+pub mod replay;
 mod ledger;
 mod signers;
 mod validator;
 
-pub use applier::{Applied, Applier};
+pub use applier::{Applied, Applier, Failure, Metrics, OpFailure};
 pub use ledger::{
     account_key, ed25519_account_id, new_account, strkey_ed25519, Change, DiffEntry, EntryState,
     FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerSource, LedgerStats, Override,
@@ -35,8 +36,9 @@ pub use signers::{
     ADDR_OZ_V1_DOMAIN, WEBAUTHN_RP_ID,
 };
 pub use validator::{
-    account_signers, available_balance, declared_resources, muxed_account_id, transaction_hash,
-    xlm, Fees, MatchedSigner, Rejection, TxCode, TxLimits, TxValidator, ValidTx,
+    account_signers, available_balance, declared_resources, envelope_fee_source, envelope_hash, envelope_source,
+    fee_bump_hash, muxed_account_id, rejection_code, transaction_hash, xlm, Fees, MatchedSigner, Rejection, TxCode,
+    TxLimits, TxValidator, ValidTx,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -113,9 +115,9 @@ pub enum TxStatus {
     Applied { value: ScVal },
     /// Included but the operation failed: fee charged, sequence consumed,
     /// no state change.
-    Failed { reason: String },
+    Failed { code: OpFailure, reason: String },
     /// Refused before inclusion: no fee, no sequence number consumed.
-    Rejected { code: TxCode, detail: String },
+    Rejected { code: TxCode, detail: String, fee_bump_inner: bool },
 }
 
 impl TxStatus {
@@ -127,8 +129,8 @@ impl TxStatus {
     pub fn summary(&self) -> String {
         match self {
             Self::Applied { value } => show_scval(value),
-            Self::Failed { reason } => format!("txFAILED: {reason}"),
-            Self::Rejected { code, detail } => format!("{}: {detail}", code.as_str()),
+            Self::Failed { code, reason } => format!("txFAILED({}): {reason}", code.as_str()),
+            Self::Rejected { code, detail, fee_bump_inner } => format!("{}: {detail}", rejection_code(*code, *fee_bump_inner)),
         }
     }
 }
@@ -140,8 +142,13 @@ pub struct TxRecord {
     /// The ledger it applied in (or would have, if rejected).
     pub ledger: u32,
     pub close_time: u64,
+    /// The envelope's hash (the outer hash of a fee bump).
     pub hash: [u8; 32],
+    /// A fee bump's inner transaction hash.
+    pub inner_hash: Option<[u8; 32]>,
     pub source: Option<AccountId>,
+    /// Who paid the fee: the fee-bump source, else the source.
+    pub fee_source: Option<AccountId>,
     pub status: TxStatus,
     /// Declared fees (zero for rejected envelopes).
     pub fees: Fees,
@@ -158,6 +165,10 @@ pub struct TxRecord {
     pub restored: u32,
     pub events: Vec<ContractEvent>,
     pub diagnostics: Vec<DiagnosticEvent>,
+    /// What core would report in its `core_metrics` diagnostic events.
+    pub metrics: Metrics,
+    /// The operation's success result: `sha256(return value, events)`.
+    pub success_hash: Option<[u8; 32]>,
     pub signers: Vec<MatchedSigner>,
     pub replayable: Vec<String>,
 }
@@ -217,6 +228,23 @@ pub struct PrepareRequest<'a> {
     pub auth_expiration_ledgers: Option<u32>,
     pub memo: Memo,
     pub preconditions: Preconditions,
+}
+
+/// What a real ledger close decides for a transaction, rather than its
+/// envelope. The defaults are a ledger without surge pricing and a session
+/// PRNG seed.
+#[derive(Clone, Debug, Default)]
+pub struct SubmitOptions {
+    /// The base fee of the transaction set's Soroban lane, which caps the
+    /// inclusion fee charged per operation (a fee bump counts one more).
+    /// `None`: the ledger's base fee. `Some(i64::MAX)`: the full bid, as for a
+    /// transaction-set component without a base fee.
+    pub lane_base_fee: Option<i64>,
+    /// The host's PRNG seed. stellar-core seeds each transaction with
+    /// `sha256(txSetContentsHash || applyIndex as u64)`; `None` derives a
+    /// deterministic session seed instead, so contracts that use the PRNG see
+    /// other values than on chain.
+    pub prng_seed: Option<[u8; 32]>,
 }
 
 pub struct Session {
@@ -347,6 +375,12 @@ impl Session {
         Ok(())
     }
 
+    /// Set the close time of the ledger the next transaction applies in (for
+    /// replaying a real ledger at its real time).
+    pub fn set_close_time(&mut self, time: u64) {
+        self.info.timestamp = time;
+    }
+
     // --- overrides (each one is logged for the report) ---
 
     pub fn substitute_master_key(&self, id: &AccountId, throwaway: &Ed25519Key, label: &str) -> Result<()> {
@@ -467,20 +501,28 @@ impl Session {
     /// Validate and apply one envelope. A valid envelope closes the ledger it
     /// applied in, success or failure; a rejected one never reaches a ledger.
     pub fn submit(&mut self, label: &str, envelope: &TransactionEnvelope) -> Result<TxRecord> {
+        self.submit_with(label, envelope, &SubmitOptions::default())
+    }
+
+    /// [`Session::submit`] with what the ledger close decides set explicitly.
+    pub fn submit_with(&mut self, label: &str, envelope: &TransactionEnvelope, options: &SubmitOptions) -> Result<TxRecord> {
         let validator = TxValidator {
             ledger: &self.ledger,
             info: &self.info,
             config: &self.network_config,
             limits: &self.limits,
             base_fee: self.fork.base_fee,
+            lane_base_fee: options.lane_base_fee,
         };
         let mut record = TxRecord {
             label: label.to_string(),
             ledger: self.info.sequence_number,
             close_time: self.info.timestamp,
-            hash: [0; 32],
-            source: None,
-            status: TxStatus::Rejected { code: TxCode::Malformed, detail: String::new() },
+            hash: envelope_hash(envelope, self.info.network_id).unwrap_or_default(),
+            inner_hash: None,
+            source: envelope_source(envelope),
+            fee_source: envelope_fee_source(envelope),
+            status: TxStatus::Rejected { code: TxCode::Malformed, detail: String::new(), fee_bump_inner: false },
             fees: Fees::default(),
             fee_charged: 0,
             refund: 0,
@@ -495,25 +537,24 @@ impl Session {
             restored: 0,
             events: vec![],
             diagnostics: vec![],
+            metrics: Metrics::default(),
+            success_hash: None,
             signers: vec![],
             replayable: vec![],
         };
-        if let TransactionEnvelope::Tx(e) = envelope {
-            record.hash = transaction_hash(&e.tx, self.info.network_id)?;
-            record.source = Some(muxed_account_id(&e.tx.source_account));
-        }
         let valid = match validator.validate(envelope).map_err(|e| with_fetch_error(e, &self.ledger))? {
             Ok(v) => v,
             Err(r) => {
-                record.status = TxStatus::Rejected { code: r.code, detail: r.detail };
+                record.status = TxStatus::Rejected { code: r.code, detail: r.detail, fee_bump_inner: r.fee_bump_inner };
                 self.log.push(record.clone());
                 return Ok(record);
             }
         };
         let applied = self
             .applier
-            .apply(&self.ledger, &self.info, &self.network_config, &self.limits, &valid, self.options.enable_diagnostics)
+            .apply(&self.ledger, &self.info, &self.network_config, &self.limits, &valid, self.options.enable_diagnostics, options.prng_seed)
             .map_err(|e| with_fetch_error(e, &self.ledger))?;
+        record.inner_hash = valid.inner_hash;
         record.fees = valid.fees;
         record.fee_charged = applied.fee_charged;
         record.refund = applied.refund;
@@ -528,11 +569,13 @@ impl Session {
         record.restored = applied.restored;
         record.events = applied.events;
         record.diagnostics = applied.diagnostics;
+        record.metrics = applied.metrics;
+        record.success_hash = applied.success_hash;
         record.signers = valid.signers;
         record.replayable = valid.replayable;
         record.status = match applied.result {
             Ok(value) => TxStatus::Applied { value },
-            Err(reason) => TxStatus::Failed { reason: format!("{reason}{}", diagnostics_tail(&record.diagnostics)) },
+            Err(f) => TxStatus::Failed { code: f.code, reason: format!("{}{}", f.reason, diagnostics_tail(&record.diagnostics)) },
         };
         self.log.push(record.clone());
         self.close_ledger();

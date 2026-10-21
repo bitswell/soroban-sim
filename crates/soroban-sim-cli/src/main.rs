@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use soroban_sim_cli::plan::Plan;
+use soroban_sim_cli::replay::{self, ReplayFixture};
+use soroban_sim_cli::rpc::RpcClient;
 use soroban_sim_cli::run::{base_from_name, Base, RunConfig, Runner};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -19,6 +21,56 @@ enum Command {
     /// Network sessions: many signed transactions over a fork, nothing sent.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Fidelity: replay real network transactions through the session.
+    #[command(subcommand)]
+    Replay(ReplayCommand),
+}
+
+#[derive(Subcommand)]
+enum ReplayCommand {
+    /// Record a sample of the latest ledgers' Soroban transactions, with the
+    /// exact state each applied against, as a fixture (read-only RPC).
+    Fetch(FetchArgs),
+    /// Replay fixtures offline and write a JSON and a Markdown fidelity report.
+    Run(ReplayRunArgs),
+}
+
+#[derive(Args)]
+struct FetchArgs {
+    /// mainnet, testnet, or an RPC URL.
+    #[arg(long, default_value = "mainnet")]
+    network: String,
+    #[arg(long)]
+    network_passphrase: Option<String>,
+    /// How many of the latest ledgers to sample from (capped at the current
+    /// state-size window period).
+    #[arg(long, default_value_t = 60)]
+    ledgers: u32,
+    #[arg(long, default_value_t = 400)]
+    max_transactions: usize,
+    /// Transactions per (call, outcome, auth kind) group; rare kinds get 4x.
+    #[arg(long, default_value_t = 6)]
+    per_group: usize,
+    /// The fixture to write (gzipped when it ends in .gz).
+    #[arg(long)]
+    out: PathBuf,
+    /// Replay the fixture right away and write PREFIX.json and PREFIX.md.
+    #[arg(long)]
+    report: Option<PathBuf>,
+    #[arg(long, short)]
+    quiet: bool,
+}
+
+#[derive(Args)]
+struct ReplayRunArgs {
+    /// Fixture files.
+    #[arg(required = true)]
+    fixtures: Vec<PathBuf>,
+    /// Report path prefix: writes PREFIX.json and PREFIX.md.
+    #[arg(long, default_value = "replay.report")]
+    report: PathBuf,
+    #[arg(long, short)]
+    quiet: bool,
 }
 
 #[derive(Subcommand)]
@@ -83,8 +135,74 @@ fn main() -> ExitCode {
     }
 }
 
+fn replay_report(fixtures: Vec<(PathBuf, ReplayFixture)>, prefix: &std::path::Path, progress: bool) -> Result<bool> {
+    let loaded: Vec<ReplayFixture> = fixtures.iter().map(|(_, f)| f.clone()).collect();
+    let outcomes = replay::run(&loaded, progress)?;
+    let info = fixtures
+        .iter()
+        .map(|(p, f)| replay::FixtureInfo {
+            path: p.display().to_string(),
+            source: f.source.clone(),
+            ledgers: f.ledgers,
+            soroban_transactions_seen: f.soroban_transactions_seen,
+            sampled: f.transactions.len(),
+        })
+        .collect();
+    let report = replay::FidelityReport::build(info, &outcomes);
+    let json = PathBuf::from(format!("{}.json", prefix.display()));
+    let md = PathBuf::from(format!("{}.md", prefix.display()));
+    std::fs::write(&json, report.to_json()?).with_context(|| format!("writing {}", json.display()))?;
+    std::fs::write(&md, report.to_markdown()).with_context(|| format!("writing {}", md.display()))?;
+    eprintln!(
+        "{}: {} transactions, {} matched, {} explained, {} unexplained; report {} and {}",
+        if report.passed { "passed" } else { "FAILED" },
+        report.transactions,
+        report.matched,
+        report.explained,
+        report.unexplained,
+        json.display(),
+        md.display()
+    );
+    Ok(report.passed)
+}
+
 fn run() -> Result<bool> {
     match Cli::parse().command {
+        Command::Replay(ReplayCommand::Fetch(args)) => {
+            let Base::Rpc { url, passphrase, .. } = base_from_name(&args.network, args.network_passphrase.clone())? else {
+                anyhow::bail!("replay fetch needs an RPC network");
+            };
+            let rpc = RpcClient::new(&url);
+            let actual = rpc.network_passphrase()?;
+            if let Some(p) = &passphrase {
+                if *p != actual {
+                    anyhow::bail!("{url} serves {actual:?}, not {p:?}");
+                }
+            }
+            let fixture = replay::fetch(
+                &rpc,
+                &actual,
+                &replay::FetchOptions { ledgers: args.ledgers, max_transactions: args.max_transactions, per_group: args.per_group, progress: !args.quiet },
+            )?;
+            fixture.save(&args.out)?;
+            eprintln!(
+                "wrote {}: {} transactions from ledgers {}..={} ({} entries, {} RPC calls)",
+                args.out.display(),
+                fixture.transactions.len(),
+                fixture.ledgers[0],
+                fixture.ledgers[1],
+                fixture.entries.len(),
+                rpc.calls()
+            );
+            match &args.report {
+                Some(prefix) => replay_report(vec![(args.out.clone(), fixture)], prefix, !args.quiet),
+                None => Ok(true),
+            }
+        }
+        Command::Replay(ReplayCommand::Run(args)) => {
+            let fixtures = args.fixtures.iter().map(|p| Ok((p.clone(), ReplayFixture::load(p)?))).collect::<Result<Vec<_>>>()?;
+            replay_report(fixtures, &args.report, !args.quiet)
+        }
         Command::Session(SessionCommand::Check { plan }) => {
             let p = Plan::load(&plan)?;
             println!("{}: {} steps, {} keys, {} vars, {} setup overrides", plan.display(), p.steps.len(), p.keys.len(), p.vars.len(), p.setup.len());
