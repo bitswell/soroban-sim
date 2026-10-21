@@ -132,17 +132,35 @@ Measured on macOS arm64, Rust 1.97.1, Wasmtime 48.0.0, Chromium 151.
   protocol 29, the live-workbench host's protocol (native-SAC from Testnet,
   custom-wasm `local-add-i32` from a local quickstart node), and match RPC's
   instructions and resource fee exactly.
-- No authorization-enforcement API (recording-mode auth is captured but not
-  enforced against a supplied auth tree) yet.
+- The single-call simulation API records auth rather than enforcing it against
+  a supplied auth tree. The network-session engine (below) enforces and
+  verifies every envelope and auth signature.
 
 Now implemented (previously listed as gaps): full network-config encoding
 (explicit + `FromLedgerEntries`), missing-state / present-absent-unknown state
 with `needs-state` reruns, the RPC state provider, IndexedDB caching,
 transaction-envelope decoding, and cancellation / budget limits.
 
+## Network sessions
+
+`soroban-sim-core::session` rehearses many signed transactions in order over a
+fork of a real network, and the `soroban-sim` CLI (`crates/soroban-sim-cli`)
+runs a plan file through it and writes a JSON and a Markdown report. Nothing is
+ever submitted; throwaway keys stand in for every real signer.
+
+```sh
+cargo run -p soroban-sim-cli -- session run examples/session/perch-nido-bootstrap.yaml \
+  --wasm-dir path/to/release-wasm --differential
+```
+
+See `docs/session.md` for the design, the plan format, the signer adapters
+(classic, OZ `oz_rule_ids`/`addr_oz_v1`, CAP-71 delegates, secp256r1, WebAuthn)
+and what the rehearsal does and does not model.
+
 ## Docs
 
 - `docs/architecture.md` — design and state-loading plan.
+- `docs/session.md` — network sessions: engine, plan format, CLI, report.
 - `docs/feasibility.md` — Milestone 0 proof and blocker inventory.
 - `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.
 - `docs/upstream.md` — upstream pins and contribution notes.

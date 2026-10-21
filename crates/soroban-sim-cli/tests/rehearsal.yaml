@@ -1,0 +1,175 @@
+# An offline rehearsal over the fixture contracts: every step kind, every
+# signer adapter, and the network-session negative controls. The test forks a
+# snapshot file it builds itself and passes `alice` (the account's real
+# address) and `fixtures` (the fixture Wasm directory) as --var values.
+name: fixture rehearsal
+description: Plan-format end-to-end test over the repository's fixture contracts.
+
+options:
+  source: "${alice}"
+  auth_expiration_ledgers: 50
+
+keys:
+  alice: ed25519
+  carol: ed25519
+  admin: ed25519
+  mallory: ed25519
+  ci: { ed25519: ci-delegate }
+  passkey: { webauthn: passkey, credential_id: "6372656431" }
+
+vars:
+  add_id: { contract_id: { deployer: "${alice}", salt: { sha256: add } } }
+  ed_verifier: { contract_id: { deployer: "${alice}", salt: { sha256: verifier-ed25519 } } }
+  webauthn_verifier: { contract_id: { deployer: "${alice}", salt: { sha256: verifier-webauthn } } }
+  admin_account: { contract_id: { deployer: "${alice}", salt: { sha256: admin-account } } }
+  passkey_account: { contract_id: { deployer: "${alice}", salt: { sha256: passkey-account } } }
+  ci_account: { contract_id: { deployer: "${alice}", salt: { sha256: ci-account } } }
+  sac: CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+
+signers:
+  "${alice}": { classic: [alice] }
+  "${admin_account}":
+    oz:
+      digest: addr_oz_v1
+      rule: 0
+      signers: [{ external: { verifier: "${ed_verifier}", key: admin } }]
+  "${passkey_account}":
+    oz:
+      digest: addr_oz_v1
+      rule: 0
+      signers: [{ external: { verifier: "${webauthn_verifier}", key: passkey } }]
+  "${ci_account}":
+    oz:
+      digest: oz_rule_ids
+      rule: [0]
+      signers: [{ delegated: { account: "${key.ci}", keys: [ci] } }]
+
+setup:
+  - label: alice (master key -> throwaway)
+    substitute_master_key: { account: "${alice}", key: alice }
+  - label: carol (assumed funded before the run)
+    fund: { account: "${key.carol}", xlm: 100 }
+  - label: CI delegate account
+    fund: { account: "${key.ci}", xlm: 20 }
+
+steps:
+  - name: upload add_i32
+    upload: { file: "${fixtures}/add_i32.wasm" }
+    save: add_hash
+  - name: upload add_i32 again (already on the ledger)
+    upload: { file: "${fixtures}/add_i32.wasm" }
+  - name: deploy add
+    deploy: { deployer: "${alice}", salt: { sha256: add }, wasm_hash: "${add_hash}" }
+    expect: { equals: "${add_id}" }
+  - name: add 40 + 2
+    invoke: { contract: "${add_id}", fn: add, args: [{ i32: 40 }, { i32: 2 }] }
+    expect: { value: { i32: 42 } }
+    save_envelope: add_envelope
+  - name: "negative: replay the applied envelope"
+    envelope: "${add_envelope}"
+    expect: { fails: txBAD_SEQ }
+  - name: "negative: envelope signed by a non-signer"
+    invoke: { contract: "${add_id}", fn: add, args: [{ i32: 1 }, { i32: 1 }] }
+    sign_with: [mallory]
+    expect: { fails: txBAD_AUTH }
+  - name: "negative: a fresh fork has no add contract"
+    view: { contract: "${add_id}", fn: add, args: [{ i32: 1 }, { i32: 1 }] }
+    fresh_fork: true
+    expect: { fails: MissingValue }
+
+  - name: upload verifier
+    upload: { file: "${fixtures}/verifier.wasm" }
+    save: verifier_hash
+  - name: deploy the ed25519 verifier
+    deploy: { deployer: "${alice}", salt: { sha256: verifier-ed25519 }, wasm_hash: "${verifier_hash}", args: [{ u32: 0 }] }
+  - name: deploy the WebAuthn verifier
+    deploy: { deployer: "${alice}", salt: { sha256: verifier-webauthn }, wasm_hash: "${verifier_hash}", args: [{ u32: 2 }] }
+  - name: upload smart account
+    upload: { file: "${fixtures}/smart_account.wasm" }
+    save: account_hash
+  - name: deploy the admin's account (External ed25519, addr_oz_v1)
+    deploy:
+      deployer: "${alice}"
+      salt: { sha256: admin-account }
+      wasm_hash: "${account_hash}"
+      args:
+        - { vec: [{ vec: [{ symbol: External }, { address: "${ed_verifier}" }, { bytes: "${key.admin.pk}" }] }] }
+        - { u32: 1 }
+        - { u32: 0 }
+  - name: admin account authorizes through __check_auth
+    invoke: { contract: "${admin_account}", fn: guarded, args: [{ u32: 7 }] }
+    expect: { equals: "7" }
+  - name: "negative: smart-account auth signed by the wrong key"
+    invoke: { contract: "${admin_account}", fn: guarded, args: [{ u32: 8 }] }
+    auth:
+      "${admin_account}":
+        oz:
+          digest: addr_oz_v1
+          rule: 0
+          signers: [{ external: { verifier: "${ed_verifier}", key: mallory } }]
+    expect: { fails: Auth }
+  - name: "negative: the oz_rule_ids digest on an addr_oz_v1 account"
+    invoke: { contract: "${admin_account}", fn: guarded, args: [{ u32: 9 }] }
+    auth:
+      "${admin_account}":
+        oz:
+          digest: oz_rule_ids
+          rule: 0
+          signers: [{ external: { verifier: "${ed_verifier}", key: admin } }]
+    expect: { fails: Auth }
+
+  - name: deploy the passkey account (External WebAuthn)
+    deploy:
+      deployer: "${alice}"
+      salt: { sha256: passkey-account }
+      wasm_hash: "${account_hash}"
+      args:
+        - { vec: [{ vec: [{ symbol: External }, { address: "${webauthn_verifier}" }, { bytes: "${key.passkey.pk}" }] }] }
+        - { u32: 1 }
+        - { u32: 0 }
+  - name: passkey account authorizes with a WebAuthn assertion
+    invoke: { contract: "${passkey_account}", fn: guarded, args: [{ u32: 11 }] }
+    expect: { equals: "11" }
+
+  - name: the CI rule's last ledger
+    set: { ci_until: { ledger_plus: 30 } }
+  - name: deploy the CI account (Delegated G, rule valid until ci_until)
+    deploy:
+      deployer: "${alice}"
+      salt: { sha256: ci-account }
+      wasm_hash: "${account_hash}"
+      args:
+        - { vec: [{ vec: [{ symbol: Delegated }, { address: "${key.ci}" }] }] }
+        - { u32: 0 }
+        - { u32: "${ci_until}" }
+  - name: CAP-71 delegate publishes, fee paid by the CI account
+    invoke: { contract: "${ci_account}", fn: guarded, args: [{ u32: 12 }] }
+    source: "${key.ci}"
+    expect: { equals: "12" }
+  - name: pre-sign a CI publish while the rule is live
+    invoke: { contract: "${ci_account}", fn: guarded, args: [{ u32: 13 }] }
+    source: "${key.ci}"
+    auth_expiration_ledgers: 200
+    hold: true
+    save_envelope: early
+  - name: close ledgers past the rule
+    advance: { to_ledger: "${ci_until}" }
+  - advance: { ledgers: 1 }
+  - name: "negative: the pre-signed publish after the rule expired"
+    envelope: "${early}"
+    expect: { fails: "3002" }
+
+  - name: deploy the native asset contract
+    deploy_sac: native
+    source: "${key.carol}"
+  - name: carol pays, alice authorizes a transfer to carol
+    invoke:
+      contract: "${sac}"
+      fn: transfer
+      args: [{ address: "${alice}" }, { address: "${key.carol}" }, { i128: "50000000" }]
+    source: "${key.carol}"
+  - name: carol's balance
+    view: { contract: "${sac}", fn: balance, args: [{ address: "${key.carol}" }] }
+    save: carol_balance
+  - name: top up alice mid-session
+    override: { fund: { account: "${alice}", xlm: 5 }, label: "alice top-up" }

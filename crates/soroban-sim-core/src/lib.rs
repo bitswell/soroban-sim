@@ -21,6 +21,7 @@ use soroban_simulation::simulation::{
 use soroban_simulation::NetworkConfig;
 use std::rc::Rc;
 
+pub mod session;
 mod snapshot;
 mod trace;
 pub use snapshot::*;
