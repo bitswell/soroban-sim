@@ -14,20 +14,16 @@
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 use soroban_env_host::xdr::{
-    AccountId, ContractEvent, ContractEventBody, ContractExecutable, DiagnosticEvent, Hash, HostFunction,
-    InnerTransactionResult, InnerTransactionResultExt, InnerTransactionResultPair, InnerTransactionResultResult,
-    InvokeHostFunctionResult, LedgerEntry, LedgerEntryChange, LedgerEntryChanges, LedgerEntryData, LedgerKey,
-    LedgerKeyContractData, Limits, OperationBody, OperationResult, OperationResultTr, ScAddress, ScVal,
-    SorobanCredentials, SorobanTransactionMetaExt, TransactionEnvelope, TransactionMeta, TransactionResult,
-    TransactionResultExt, TransactionResultResult, WriteXdr, ContractDataDurability, FeeBumpTransactionInnerTx,
+    AccountId, ContractDataDurability, ContractEvent, ContractEventBody, ContractExecutable, DiagnosticEvent,
+    FeeBumpTransactionInnerTx, HostFunction, InnerTransactionResultResult, LedgerEntry, LedgerEntryChange,
+    LedgerEntryChanges, LedgerEntryData, LedgerKey, LedgerKeyContractData, Limits, OperationBody, OperationResult,
+    OperationResultTr, ScAddress, ScVal, SorobanCredentials, SorobanTransactionMetaExt, TransactionEnvelope,
+    TransactionMeta, TransactionResult, TransactionResultResult, WriteXdr,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::ledger::{StaticSource, StoredEntry};
-use super::{
-    envelope_fee_source, show_scval, ForkPoint, OpFailure, Session, SessionOptions, SubmitOptions, TxCode,
-    TxRecord, TxStatus,
-};
+use super::{envelope_fee_source, show_scval, ForkPoint, Session, SessionOptions, SubmitOptions, TxStatus};
 use crate::ledger_entry_to_ledger_key;
 
 /// One real transaction, with everything needed to apply it again.
@@ -154,7 +150,7 @@ pub fn replay(tx: &ReplayTx) -> Result<ReplayOutcome> {
     }
 
     // --- result, return value, events ---
-    let ours = transaction_result(&record);
+    let ours = record.transaction_result();
     if ours != tx.result {
         mismatch("result", None, xdr_text(&tx.result), xdr_text(&ours));
     }
@@ -333,68 +329,6 @@ pub fn balance_delta(changes: &LedgerEntryChanges, id: &AccountId) -> Result<Opt
         (Some(b), Some(a)) => Some(a - b),
         _ => None,
     })
-}
-
-/// The `TransactionResult` core would record for this submission.
-pub fn transaction_result(record: &TxRecord) -> TransactionResult {
-    let op = |r: InvokeHostFunctionResult| OperationResult::OpInner(OperationResultTr::InvokeHostFunction(r));
-    let (success, ops) = match &record.status {
-        TxStatus::Applied { .. } => (true, vec![op(InvokeHostFunctionResult::Success(Hash(record.success_hash.unwrap_or_default())))]),
-        TxStatus::Failed { code, .. } => (
-            false,
-            vec![op(match code {
-                OpFailure::Malformed => InvokeHostFunctionResult::Malformed,
-                OpFailure::Trapped => InvokeHostFunctionResult::Trapped,
-                OpFailure::ResourceLimitExceeded => InvokeHostFunctionResult::ResourceLimitExceeded,
-                OpFailure::EntryArchived => InvokeHostFunctionResult::EntryArchived,
-                OpFailure::InsufficientRefundableFee => InvokeHostFunctionResult::InsufficientRefundableFee,
-            })],
-        ),
-        TxStatus::Rejected { code, .. } => {
-            return TransactionResult { fee_charged: 0, result: rejected_result(*code), ext: TransactionResultExt::V0 };
-        }
-    };
-    let ops = ops.try_into().unwrap_or_default();
-    let result = match record.inner_hash {
-        None if success => TransactionResultResult::TxSuccess(ops),
-        None => TransactionResultResult::TxFailed(ops),
-        Some(inner) => {
-            let pair = InnerTransactionResultPair {
-                transaction_hash: Hash(inner),
-                result: InnerTransactionResult {
-                    // Since protocol 25 the inner result charges nothing.
-                    fee_charged: 0,
-                    result: if success { InnerTransactionResultResult::TxSuccess(ops) } else { InnerTransactionResultResult::TxFailed(ops) },
-                    ext: InnerTransactionResultExt::V0,
-                },
-            };
-            if success {
-                TransactionResultResult::TxFeeBumpInnerSuccess(pair)
-            } else {
-                TransactionResultResult::TxFeeBumpInnerFailed(pair)
-            }
-        }
-    };
-    TransactionResult { fee_charged: record.fee_charged, result, ext: TransactionResultExt::V0 }
-}
-
-fn rejected_result(code: TxCode) -> TransactionResultResult {
-    match code {
-        TxCode::Malformed => TransactionResultResult::TxMalformed,
-        TxCode::MissingOperation => TransactionResultResult::TxMissingOperation,
-        TxCode::NotSupported => TransactionResultResult::TxNotSupported,
-        TxCode::TooEarly => TransactionResultResult::TxTooEarly,
-        TxCode::TooLate => TransactionResultResult::TxTooLate,
-        TxCode::BadMinSeqAgeOrGap => TransactionResultResult::TxBadMinSeqAgeOrGap,
-        TxCode::NoAccount => TransactionResultResult::TxNoAccount,
-        TxCode::BadSeq => TransactionResultResult::TxBadSeq,
-        TxCode::BadAuth => TransactionResultResult::TxBadAuth,
-        TxCode::OpBadAuth | TxCode::OpMalformed => TransactionResultResult::TxFailed(Default::default()),
-        TxCode::BadAuthExtra => TransactionResultResult::TxBadAuthExtra,
-        TxCode::InsufficientFee => TransactionResultResult::TxInsufficientFee,
-        TxCode::InsufficientBalance => TransactionResultResult::TxInsufficientBalance,
-        TxCode::SorobanInvalid => TransactionResultResult::TxSorobanInvalid,
-    }
 }
 
 fn result_succeeded(r: &TransactionResult) -> bool {

@@ -169,7 +169,8 @@ pub struct Applier {
     module_cache: ModuleCache,
     compile_host: Host,
     cached: BTreeSet<Hash>,
-    tx_index: u32,
+    /// Transactions applied so far: part of each one's PRNG seed.
+    pub(super) tx_index: u32,
 }
 
 impl Applier {

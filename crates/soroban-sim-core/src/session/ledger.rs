@@ -235,6 +235,13 @@ pub struct LedgerStats {
     pub local_answers: u32,
 }
 
+/// The session's writes and overrides at one moment, to return to later.
+#[derive(Clone)]
+pub struct LedgerCheckpoint {
+    overlay: BTreeMap<LedgerKey, Option<StoredEntry>>,
+    overrides: Vec<Override>,
+}
+
 pub struct ForkedLedger {
     base: Box<dyn LedgerSource>,
     fork_ledger: u32,
@@ -485,6 +492,18 @@ impl ForkedLedger {
 
     pub fn overrides(&self) -> Vec<Override> {
         self.overrides.borrow().clone()
+    }
+
+    /// The session's writes and overrides now. What the base said stays
+    /// cached across a restore: it describes the base, not the session.
+    pub fn checkpoint(&self) -> LedgerCheckpoint {
+        LedgerCheckpoint { overlay: self.overlay.borrow().clone(), overrides: self.overrides.borrow().clone() }
+    }
+
+    /// Return to `checkpoint`: every write and override since is undone.
+    pub fn restore(&self, checkpoint: &LedgerCheckpoint) {
+        *self.overlay.borrow_mut() = checkpoint.overlay.clone();
+        *self.overrides.borrow_mut() = checkpoint.overrides.clone();
     }
 
     pub fn fetches(&self) -> Vec<FetchRecord> {

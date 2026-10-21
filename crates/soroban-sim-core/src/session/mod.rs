@@ -27,8 +27,8 @@ mod validator;
 pub use applier::{Applied, Applier, Failure, Metrics, OpFailure};
 pub use ledger::{
     account_key, ed25519_account_id, new_account, strkey_ed25519, Change, DiffEntry, EntryState,
-    FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerSource, LedgerStats, Override,
-    OverrideKind, StaticSource, StoredEntry,
+    FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerCheckpoint, LedgerSource, LedgerStats,
+    Override, OverrideKind, StaticSource, StoredEntry,
 };
 pub use signers::{
     auth_payload, base64url, oz_digest, sign_auth_entry, webauthn_sig_data, AuthSigner,
@@ -37,13 +37,18 @@ pub use signers::{
 };
 pub use validator::{
     account_signers, available_balance, declared_resources, envelope_fee_source, envelope_hash, envelope_source,
-    fee_bump_hash, muxed_account_id, rejection_code, transaction_hash, xlm, Fees, MatchedSigner, Rejection, TxCode,
+    fee_bump_hash, muxed_account_id, rejection_code, transaction_hash, v0_as_v1, xlm, Fees, MatchedSigner, Rejection, TxCode,
     TxLimits, TxValidator, ValidTx,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 use soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
+use soroban_env_host::xdr::{
+    Hash, InnerTransactionResult, InnerTransactionResultExt, InnerTransactionResultPair, InnerTransactionResultResult,
+    InvokeHostFunctionResult, OperationResult, OperationResultTr, TransactionResult, TransactionResultExt,
+    TransactionResultResult,
+};
 use soroban_env_host::xdr::{
     AccountId, ContractEvent, DiagnosticEvent, HostFunction, InvokeHostFunctionOp, Memo,
     MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ScAddress, ScVal,
@@ -179,6 +184,50 @@ impl TxRecord {
     pub fn contract_errors(&self) -> Vec<u32> {
         contract_errors(&self.diagnostics)
     }
+
+    /// The `TransactionResult` core would record for this submission. A
+    /// rejected envelope gets its result code with nothing charged.
+    pub fn transaction_result(&self) -> TransactionResult {
+        let op = |r: InvokeHostFunctionResult| OperationResult::OpInner(OperationResultTr::InvokeHostFunction(r));
+        let (success, ops) = match &self.status {
+            TxStatus::Applied { .. } => (true, vec![op(InvokeHostFunctionResult::Success(Hash(self.success_hash.unwrap_or_default())))]),
+            TxStatus::Failed { code, .. } => (
+                false,
+                vec![op(match code {
+                    OpFailure::Malformed => InvokeHostFunctionResult::Malformed,
+                    OpFailure::Trapped => InvokeHostFunctionResult::Trapped,
+                    OpFailure::ResourceLimitExceeded => InvokeHostFunctionResult::ResourceLimitExceeded,
+                    OpFailure::EntryArchived => InvokeHostFunctionResult::EntryArchived,
+                    OpFailure::InsufficientRefundableFee => InvokeHostFunctionResult::InsufficientRefundableFee,
+                })],
+            ),
+            TxStatus::Rejected { code, .. } => {
+                return TransactionResult { fee_charged: 0, result: rejected_result(*code), ext: TransactionResultExt::V0 };
+            }
+        };
+        let ops = ops.try_into().unwrap_or_default();
+        let result = match self.inner_hash {
+            None if success => TransactionResultResult::TxSuccess(ops),
+            None => TransactionResultResult::TxFailed(ops),
+            Some(inner) => {
+                let pair = InnerTransactionResultPair {
+                    transaction_hash: Hash(inner),
+                    result: InnerTransactionResult {
+                        // Since protocol 25 the inner result charges nothing.
+                        fee_charged: 0,
+                        result: if success { InnerTransactionResultResult::TxSuccess(ops) } else { InnerTransactionResultResult::TxFailed(ops) },
+                        ext: InnerTransactionResultExt::V0,
+                    },
+                };
+                if success {
+                    TransactionResultResult::TxFeeBumpInnerSuccess(pair)
+                } else {
+                    TransactionResultResult::TxFeeBumpInnerFailed(pair)
+                }
+            }
+        };
+        TransactionResult { fee_charged: self.fee_charged, result, ext: TransactionResultExt::V0 }
+    }
 }
 
 /// An envelope `prepare` built and signed.
@@ -245,6 +294,15 @@ pub struct SubmitOptions {
     /// deterministic session seed instead, so contracts that use the PRNG see
     /// other values than on chain.
     pub prng_seed: Option<[u8; 32]>,
+}
+
+/// Everything [`Session::restore`] needs to undo what happened since.
+#[derive(Clone)]
+pub struct SessionCheckpoint {
+    ledger: LedgerCheckpoint,
+    info: LedgerInfo,
+    log: Vec<TxRecord>,
+    tx_index: u32,
 }
 
 pub struct Session {
@@ -381,6 +439,22 @@ impl Session {
         self.info.timestamp = time;
     }
 
+    // --- checkpoints ---
+
+    /// The session as it is now: ledger writes, overrides, clock and log.
+    pub fn checkpoint(&self) -> SessionCheckpoint {
+        SessionCheckpoint { ledger: self.ledger.checkpoint(), info: self.info.clone(), log: self.log.clone(), tx_index: self.applier.tx_index }
+    }
+
+    /// Return to `checkpoint`: every transaction, override and clock move
+    /// since is undone. Base reads and parsed modules stay cached.
+    pub fn restore(&mut self, checkpoint: &SessionCheckpoint) {
+        self.ledger.restore(&checkpoint.ledger);
+        self.info = checkpoint.info.clone();
+        self.log = checkpoint.log.clone();
+        self.applier.tx_index = checkpoint.tx_index;
+    }
+
     // --- overrides (each one is logged for the report) ---
 
     pub fn substitute_master_key(&self, id: &AccountId, throwaway: &Ed25519Key, label: &str) -> Result<()> {
@@ -407,11 +481,24 @@ impl Session {
 
     /// Simulate `host_function` against the session's current state.
     pub fn simulate(&self, source: &AccountId, host_function: &HostFunction, auth: RecordingInvocationAuthMode) -> Result<InvokeHostFunctionSimulationResult> {
+        self.simulate_adjusted(source, host_function, auth, &SimulationAdjustmentConfig::default_adjustment())
+    }
+
+    /// [`Session::simulate`] with explicit resource adjustments, for callers
+    /// that pad the way RPC's `simulateTransaction` does with a custom
+    /// instruction leeway.
+    pub fn simulate_adjusted(
+        &self,
+        source: &AccountId,
+        host_function: &HostFunction,
+        auth: RecordingInvocationAuthMode,
+        adjustment: &SimulationAdjustmentConfig,
+    ) -> Result<InvokeHostFunctionSimulationResult> {
         let seed = prng_seed(b"simulate", self.info.sequence_number, self.log.len() as u32);
         let result = simulate_invoke_host_function_op(
             Rc::new(ForkView(self.ledger.clone())),
             &self.network_config,
-            &SimulationAdjustmentConfig::default_adjustment(),
+            adjustment,
             &self.info,
             host_function.clone(),
             auth,
@@ -580,6 +667,28 @@ impl Session {
         self.log.push(record.clone());
         self.close_ledger();
         Ok(record)
+    }
+}
+
+fn rejected_result(code: TxCode) -> TransactionResultResult {
+    match code {
+        TxCode::Malformed => TransactionResultResult::TxMalformed,
+        TxCode::MissingOperation => TransactionResultResult::TxMissingOperation,
+        TxCode::NotSupported => TransactionResultResult::TxNotSupported,
+        TxCode::TooEarly => TransactionResultResult::TxTooEarly,
+        TxCode::TooLate => TransactionResultResult::TxTooLate,
+        TxCode::BadMinSeqAgeOrGap => TransactionResultResult::TxBadMinSeqAgeOrGap,
+        TxCode::NoAccount => TransactionResultResult::TxNoAccount,
+        TxCode::BadSeq => TransactionResultResult::TxBadSeq,
+        TxCode::BadAuth => TransactionResultResult::TxBadAuth,
+        TxCode::OpBadAuth => TransactionResultResult::TxFailed(vec![OperationResult::OpBadAuth].try_into().unwrap_or_default()),
+        TxCode::OpMalformed => TransactionResultResult::TxFailed(
+            vec![OperationResult::OpInner(OperationResultTr::InvokeHostFunction(InvokeHostFunctionResult::Malformed))].try_into().unwrap_or_default(),
+        ),
+        TxCode::BadAuthExtra => TransactionResultResult::TxBadAuthExtra,
+        TxCode::InsufficientFee => TransactionResultResult::TxInsufficientFee,
+        TxCode::InsufficientBalance => TransactionResultResult::TxInsufficientBalance,
+        TxCode::SorobanInvalid => TransactionResultResult::TxSorobanInvalid,
     }
 }
 

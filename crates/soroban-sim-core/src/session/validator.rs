@@ -18,7 +18,7 @@ use soroban_env_host::xdr::{
     MuxedAccount, OperationBody, Preconditions, PublicKey, ScAddress, ScMap, ScVal, Signer, SignerKey,
     SignerKeyEd25519SignedPayload, SorobanAuthorizationEntry, SorobanCredentials, SorobanDelegateSignature,
     SorobanTransactionData, SorobanTransactionDataExt, Transaction, TransactionEnvelope,
-    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction, TransactionV1Envelope,
+    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction, TransactionV0, TransactionV1Envelope,
     TrustLineAsset, Uint256, WriteXdr,
 };
 use soroban_env_host::LedgerInfo;
@@ -297,7 +297,24 @@ pub fn envelope_hash(envelope: &TransactionEnvelope, network_id: [u8; 32]) -> Re
     match envelope {
         TransactionEnvelope::Tx(e) => transaction_hash(&e.tx, network_id),
         TransactionEnvelope::TxFeeBump(e) => fee_bump_hash(&e.tx, network_id),
-        TransactionEnvelope::TxV0(_) => Err(anyhow!("v0 envelopes are not supported")),
+        TransactionEnvelope::TxV0(e) => transaction_hash(&v0_as_v1(&e.tx), network_id),
+    }
+}
+
+/// A v0 transaction as core hashes and checks it: the same transaction with
+/// an ed25519 source and its time bounds as preconditions.
+pub fn v0_as_v1(tx: &TransactionV0) -> Transaction {
+    Transaction {
+        source_account: MuxedAccount::Ed25519(tx.source_account_ed25519.clone()),
+        fee: tx.fee,
+        seq_num: tx.seq_num.clone(),
+        cond: match &tx.time_bounds {
+            Some(tb) => Preconditions::Time(tb.clone()),
+            None => Preconditions::None,
+        },
+        memo: tx.memo.clone(),
+        operations: tx.operations.clone(),
+        ext: soroban_env_host::xdr::TransactionExt::V0,
     }
 }
 
@@ -309,8 +326,12 @@ pub fn envelope_source(envelope: &TransactionEnvelope) -> Option<AccountId> {
             let FeeBumpTransactionInnerTx::Tx(inner) = &e.tx.inner_tx;
             Some(muxed_account_id(&inner.tx.source_account))
         }
-        TransactionEnvelope::TxV0(_) => None,
+        TransactionEnvelope::TxV0(e) => Some(ed25519_account(&e.tx.source_account_ed25519)),
     }
+}
+
+fn ed25519_account(k: &Uint256) -> AccountId {
+    AccountId(PublicKey::PublicKeyTypeEd25519(k.clone()))
 }
 
 /// Who pays an envelope's fee: the fee-bump source or the transaction source.
