@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! tool ── simulateTransaction ──▶ Session::simulate_adjusted (stellar-rpc's padding and auth modes)
-//!      ── sendTransaction ──────▶ TxValidator, then Session::submit (one ledger per transaction)
+//!      ── sendTransaction ──────▶ TxValidator, then Session::submit_ledger (one ledger per
+//!                                transaction, or a held ledger's set at fork_closeLedger)
 //!      ── getTransaction ───────▶ the stored result and a rebuilt V4 meta
 //!      ── getLedgerEntries ─────▶ the session's view: overlay, then the lazily read base
 //!      ── fork_* ───────────────▶ overrides, the clock, snapshots, the report
@@ -34,8 +35,8 @@ use soroban_env_host::xdr::{
 };
 use soroban_simulation::simulation::SimulationAdjustmentConfig;
 use soroban_sim_core::session::{
-    account_key, muxed_account_id, show_scval, EntryState, Session, SessionCheckpoint, SessionOptions, StoredEntry,
-    TxRecord, TxStatus, TxValidator,
+    account_key, muxed_account_id, op_result_name, show_scval, EntryState, Session, SessionCheckpoint, SessionOptions,
+    StoredEntry, TxRecord, TxStatus,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -96,9 +97,22 @@ struct StoredTx {
     meta_xdr: String,
     ledger: u32,
     close_time: u64,
+    /// Its position (from 1) in its ledger's apply order.
+    application_order: u32,
     applied: bool,
     events: Vec<ContractEvent>,
     diagnostics_xdr: Vec<String>,
+}
+
+/// A valid transaction on its way into a ledger.
+struct Pending {
+    hash: [u8; 32],
+    envelope_xdr: String,
+    envelope: TransactionEnvelope,
+    label: String,
+    /// The keys whose before-values the meta needs, the source account first.
+    keys: Vec<LedgerKey>,
+    fee_bid: i64,
 }
 
 /// One state-changing call, for the report. Reverted steps stay listed.
@@ -139,6 +153,9 @@ pub struct Facade {
     /// Every signature valid on the real network, refused or applied. A
     /// revert does not undo a signature.
     replayable: Vec<String>,
+    /// `fork_holdLedger` keeps the next ledger open: transactions sent now
+    /// wait in it, in the order sent, until `fork_closeLedger`.
+    held: Option<Vec<Pending>>,
 }
 
 impl Facade {
@@ -172,6 +189,7 @@ impl Facade {
             steps: vec![],
             snapshots: vec![],
             replayable: vec![],
+            held: None,
         })
     }
 
@@ -257,6 +275,8 @@ impl Facade {
             "fork_addSigner" => self.fork_add_signer(&p),
             "fork_setLedgerEntry" => self.fork_set_ledger_entry(&p),
             "fork_removeLedgerEntry" => self.fork_remove_ledger_entry(&p),
+            "fork_holdLedger" => self.fork_hold_ledger(),
+            "fork_closeLedger" => self.fork_close_ledger(),
             "fork_report" => self.fork_report(),
             _ => Err(RpcError { code: RpcError::METHOD_NOT_FOUND, message: format!("method {method:?} not found (soroban-sim serve)") }),
         }
@@ -484,99 +504,147 @@ impl Facade {
         reply.remove("oldestLedger");
         reply.remove("oldestLedgerCloseTime");
         reply.insert("hash".into(), json!(hex(&hash)));
-        if self.txs.contains_key(&hash) {
+        let queued = self.held.as_ref().is_some_and(|q| q.iter().any(|t| t.hash == hash));
+        if self.txs.contains_key(&hash) || queued {
             reply.insert("status".into(), json!("DUPLICATE"));
             return Ok(Value::Object(reply));
         }
         let inner = tx::inner_transaction(&envelope);
         let label = tx::describe(&inner, network_id);
         let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
-
-        // What the validator decides, before anything changes: the safety
-        // check, and the keys whose before-values the meta needs.
-        let verdict = TxValidator {
-            ledger: self.session.ledger(),
-            info: self.session.ledger_info(),
-            config: self.session.network_config(),
-            limits: self.session.tx_limits(),
-            base_fee: self.session.fork_point().base_fee,
-        }
-        .validate(&envelope)
-        .map_err(RpcError::internal)?;
-        let mut keys = vec![];
-        if let Ok(valid) = &verdict {
-            if !valid.replayable.is_empty() && self.is_mainnet() && !self.allow_real_signers {
-                let why = valid.replayable.join("; ");
-                for r in &valid.replayable {
-                    self.replayable.push(format!("{label} ({}, refused): {r}", hex(&hash)));
-                }
-                let detail = format!("refused: valid on mainnet as signed ({why})");
-                self.push_step(
-                    step(self.steps.len() + 1, &label, "transaction", ledger, time, "refused", &detail, None, None),
-                    Some(format!("{label}: refused, signed by a real mainnet signer")),
-                );
-                return Err(RpcError {
-                    code: RpcError::REFUSED,
-                    message: format!(
-                        "soroban-sim refused transaction {}: a signer the real network already has signed it, so it is valid on mainnet as it stands ({why}). Substitute a throwaway signer with fork_addSigner, or restart with --allow-real-signers.",
-                        hex(&hash)
-                    ),
-                });
-            }
-            let source = account_key(&valid.source);
-            let fp = &valid.data.resources.footprint;
-            let others: Vec<LedgerKey> = fp.read_only.iter().chain(fp.read_write.iter()).filter(|k| **k != source).cloned().collect();
-            keys.push(source);
-            keys.extend(others);
-        }
-        let before: Vec<Option<StoredEntry>> = keys.iter().map(|k| self.session.ledger().get(k)).collect::<Result<_>>().map_err(RpcError::internal)?;
-
-        let record = self.session.submit(&label, &envelope).map_err(RpcError::internal)?;
-        let result = tx::result(&record, inner.fee as i64).map_err(RpcError::internal)?;
-        let result_xdr = result.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?;
-        if let TxStatus::Rejected { code, detail } = &record.status {
-            let failure = format!("{label}: {} {detail}", code.as_str());
-            self.push_step(
-                step(self.steps.len() + 1, &label, "transaction", ledger, time, "rejected", &format!("{}: {detail}", code.as_str()), Some(&record), None),
-                Some(failure),
-            );
-            reply.insert("status".into(), json!("ERROR"));
-            reply.insert("errorResultXdr".into(), json!(result_xdr));
+        // core's queue holds one transaction per source account, and turns a
+        // second one away before it checks it.
+        let source = account_key(&muxed_account_id(&inner.source_account));
+        if self.held.as_ref().is_some_and(|q| q.iter().any(|t| t.keys[0] == source)) {
+            reply.insert("status".into(), json!("TRY_AGAIN_LATER"));
             return Ok(Value::Object(reply));
         }
 
-        let after: Vec<Option<StoredEntry>> = keys.iter().map(|k| self.session.ledger().get(k)).collect::<Result<_>>().map_err(RpcError::internal)?;
-        let mut touched = keys.into_iter().zip(before.into_iter().zip(after)).map(|(key, (before, after))| Touched { key, before, after });
-        let source = touched.next().ok_or_else(|| RpcError::internal(anyhow!("a valid transaction has a source account")))?;
-        let footprint: Vec<Touched> = touched.collect();
-        let meta = tx::meta(&record, &source, &footprint, record.ledger).map_err(RpcError::internal)?;
-        let diagnostics_xdr = record.diagnostics.iter().map(|d| d.to_xdr_base64(Limits::none())).collect::<std::result::Result<_, _>>().map_err(|e| RpcError::internal(e.into()))?;
-        self.txs.insert(
-            hash,
-            StoredTx {
-                envelope_xdr: text,
-                result_xdr,
-                meta_xdr: meta.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?,
-                ledger: record.ledger,
-                close_time: record.close_time,
-                applied: record.status.is_applied(),
-                events: record.events.clone(),
-                diagnostics_xdr,
-            },
-        );
-        self.tx_order.push(hash);
-        self.closed = (record.ledger, record.close_time);
-        for r in &record.replayable {
-            self.replayable.push(format!("{label} ({}): {r}", hex(&hash)));
-        }
-        let (outcome, detail, value, failure) = match &record.status {
-            TxStatus::Applied { value } => ("applied", show_scval(value), Some(value.clone()), None),
-            TxStatus::Failed { reason } => ("failed", reason.clone(), None, Some(format!("{label}: txFAILED {reason}"))),
-            TxStatus::Rejected { .. } => unreachable!("handled above"),
+        // What the validator decides, before anything changes: the safety
+        // check, and the keys whose before-values the meta needs.
+        let verdict = self.session.validator(false).validate(&envelope).map_err(RpcError::internal)?;
+        let Ok(valid) = verdict else {
+            // Refused before inclusion: never in a ledger, held or not.
+            let record = self.session.submit(&label, &envelope).map_err(RpcError::internal)?;
+            let result = tx::result(&record, inner.fee as i64).map_err(RpcError::internal)?;
+            let result_xdr = result.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?;
+            if let TxStatus::Rejected { code, detail } = &record.status {
+                self.push_step(
+                    step(self.steps.len() + 1, &label, "transaction", ledger, time, "rejected", &format!("{}: {detail}", code.as_str()), Some(&record), None),
+                    Some(format!("{label}: {} {detail}", code.as_str())),
+                );
+            }
+            reply.insert("status".into(), json!("ERROR"));
+            reply.insert("errorResultXdr".into(), json!(result_xdr));
+            return Ok(Value::Object(reply));
         };
-        self.push_step(step(self.steps.len() + 1, &label, "transaction", record.ledger, record.close_time, outcome, &detail, Some(&record), value), failure);
-        reply.insert("status".into(), json!("PENDING"));
+        if !valid.replayable().is_empty() && self.is_mainnet() && !self.allow_real_signers {
+            let why = valid.replayable().join("; ");
+            for r in valid.replayable() {
+                self.replayable.push(format!("{label} ({}, refused): {r}", hex(&hash)));
+            }
+            let detail = format!("refused: valid on mainnet as signed ({why})");
+            self.push_step(
+                step(self.steps.len() + 1, &label, "transaction", ledger, time, "refused", &detail, None, None),
+                Some(format!("{label}: refused, signed by a real mainnet signer")),
+            );
+            return Err(RpcError {
+                code: RpcError::REFUSED,
+                message: format!(
+                    "soroban-sim refused transaction {}: a signer the real network already has signed it, so it is valid on mainnet as it stands ({why}). Substitute a throwaway signer with fork_addSigner, or restart with --allow-real-signers.",
+                    hex(&hash)
+                ),
+            });
+        }
+        let pending = Pending { hash, envelope_xdr: text, envelope, label, keys: valid.touched_keys(), fee_bid: inner.fee as i64 };
+        match &mut self.held {
+            Some(queue) => {
+                queue.push(pending);
+                reply.insert("status".into(), json!("PENDING"));
+            }
+            None => {
+                self.close_with(vec![pending])?;
+                reply.insert("status".into(), json!("PENDING"));
+            }
+        }
         Ok(Value::Object(reply))
+    }
+
+    /// Apply `pending` in the next ledger (and any later ones core's queue
+    /// would push some of them to), store each result for `getTransaction`
+    /// and report it. One line per transaction: its hash, status, ledger and
+    /// position in the apply order.
+    fn close_with(&mut self, pending: Vec<Pending>) -> std::result::Result<Vec<Value>, RpcError> {
+        let mut keys: Vec<LedgerKey> = vec![];
+        for k in pending.iter().flat_map(|t| t.keys.iter()) {
+            if !keys.contains(k) {
+                keys.push(k.clone());
+            }
+        }
+        let read = |s: &Session| -> std::result::Result<BTreeMap<LedgerKey, Option<StoredEntry>>, RpcError> {
+            keys.iter().map(|k| Ok((k.clone(), s.ledger().get(k)?))).collect::<Result<_>>().map_err(RpcError::internal)
+        };
+        let before = read(&self.session)?;
+        let envelopes: Vec<(&str, &TransactionEnvelope)> = pending.iter().map(|t| (t.label.as_str(), &t.envelope)).collect();
+        let records = self.session.submit_ledger(&envelopes).map_err(RpcError::internal)?;
+        let after = read(&self.session)?;
+        self.note_clock();
+        let mut lines = vec![];
+        for (t, record) in pending.into_iter().zip(records) {
+            let result = tx::result(&record, t.fee_bid).map_err(RpcError::internal)?;
+            let result_xdr = result.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?;
+            let mut line = json!({ "hash": hex(&t.hash), "ledger": record.ledger, "resultXdr": result_xdr });
+            if let Some(why) = &record.deferred {
+                line["deferred"] = json!(why);
+            }
+            if let TxStatus::Rejected { code, detail } = &record.status {
+                // Valid when it was sent, then dropped when the ledger was
+                // built: like a real network, it never gets a result.
+                let detail = format!("dropped when the ledger closed: {}: {detail}", code.as_str());
+                self.push_step(
+                    step(self.steps.len() + 1, &t.label, "transaction", record.ledger, record.close_time, "rejected", &detail, Some(&record), None),
+                    Some(format!("{}: {detail}", t.label)),
+                );
+                line["status"] = json!("DROPPED");
+                line["error"] = json!(detail);
+                lines.push(line);
+                continue;
+            }
+            let touched = |k: &LedgerKey| Touched { key: k.clone(), before: before[k].clone(), after: after[k].clone() };
+            let source = touched(&t.keys[0]);
+            let footprint: Vec<Touched> = t.keys[1..].iter().map(touched).collect();
+            let meta = tx::meta(&record, &source, &footprint, record.ledger).map_err(RpcError::internal)?;
+            let diagnostics_xdr = record.diagnostics.iter().map(|d| d.to_xdr_base64(Limits::none())).collect::<std::result::Result<_, _>>().map_err(|e| RpcError::internal(e.into()))?;
+            let application_order = record.application_order.unwrap_or(1);
+            self.txs.insert(
+                t.hash,
+                StoredTx {
+                    envelope_xdr: t.envelope_xdr,
+                    result_xdr,
+                    meta_xdr: meta.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?,
+                    ledger: record.ledger,
+                    close_time: record.close_time,
+                    application_order,
+                    applied: record.status.is_applied(),
+                    events: record.events.clone(),
+                    diagnostics_xdr,
+                },
+            );
+            self.tx_order.push(t.hash);
+            for r in &record.replayable {
+                self.replayable.push(format!("{} ({}): {r}", t.label, hex(&t.hash)));
+            }
+            let (outcome, detail, value, failure) = match &record.status {
+                TxStatus::Applied { value } => ("applied", tx_detail(&record, show_scval(value)), record.op_results.is_empty().then(|| value.clone()), None),
+                TxStatus::Failed { reason } => ("failed", tx_detail(&record, reason.clone()), None, Some(format!("{}: txFAILED {reason}", t.label))),
+                TxStatus::Rejected { .. } => unreachable!("handled above"),
+            };
+            self.push_step(step(self.steps.len() + 1, &t.label, "transaction", record.ledger, record.close_time, outcome, &detail, Some(&record), value), failure);
+            line["status"] = json!(if record.status.is_applied() { "SUCCESS" } else { "FAILED" });
+            line["applicationOrder"] = json!(application_order);
+            lines.push(line);
+        }
+        Ok(lines)
     }
 
     fn get_transaction(&self, p: &Params) -> RpcResult {
@@ -590,7 +658,7 @@ impl Facade {
         };
         let contract_events: Vec<String> = t.events.iter().map(|e| e.b64()).collect::<Result<_>>().map_err(RpcError::internal)?;
         m.insert("status".into(), json!(if t.applied { "SUCCESS" } else { "FAILED" }));
-        m.insert("applicationOrder".into(), json!(1));
+        m.insert("applicationOrder".into(), json!(t.application_order));
         m.insert("feeBump".into(), json!(false));
         m.insert("envelopeXdr".into(), json!(t.envelope_xdr));
         m.insert("resultXdr".into(), json!(t.result_xdr));
@@ -680,6 +748,7 @@ impl Facade {
             "transactions": self.session.log().len(),
             "overrides": self.session.ledger().overrides().len(),
             "snapshots": snapshots,
+            "held": self.held.as_ref().map(|q| json!({ "ledger": info.sequence_number, "transactions": q.iter().map(|t| hex(&t.hash)).collect::<Vec<_>>() })),
             "allowRealSigners": self.allow_real_signers,
         })
     }
@@ -689,7 +758,55 @@ impl Facade {
         json!({ "latestLedger": self.closed.0, "latestLedgerCloseTime": self.closed.1, "next": { "ledger": info.sequence_number, "closeTime": info.timestamp } })
     }
 
+    /// Keep the next ledger open: transactions sent from now on wait in it
+    /// (`sendTransaction` answers `PENDING`, `getTransaction` `NOT_FOUND`)
+    /// until `fork_closeLedger` applies them together, the way a validator
+    /// builds one transaction set from its queue.
+    fn fork_hold_ledger(&mut self) -> RpcResult {
+        if self.held.is_none() {
+            self.held = Some(vec![]);
+            let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
+            self.push_step(step(self.steps.len() + 1, "fork_holdLedger", "ledger", ledger, time, "ok", &format!("ledger {ledger} held open"), None, None), None);
+        }
+        let mut r = self.clock();
+        r["held"] = json!(self.held.as_ref().map_or(0, Vec::len));
+        Ok(r)
+    }
+
+    /// Close the held ledger with every transaction sent since
+    /// `fork_holdLedger`: core's transaction set (per-ledger limits, apply
+    /// order, fees first), then back to one ledger per transaction. What one
+    /// ledger cannot take closes in the next.
+    fn fork_close_ledger(&mut self) -> RpcResult {
+        let pending = self.held.take().ok_or_else(|| RpcError::invalid("no ledger is held: fork_holdLedger first (fork_advanceLedgers closes empty ledgers)"))?;
+        let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
+        let lines = if pending.is_empty() {
+            self.session.close_ledger();
+            self.note_clock();
+            vec![]
+        } else {
+            self.close_with(pending)?
+        };
+        let closed = self.session.ledger_info().sequence_number - ledger;
+        let detail = format!("{} transaction(s) in ledger {ledger}{}", lines.len(), if closed > 1 { format!(" (and {} more ledger(s) for what did not fit)", closed - 1) } else { String::new() });
+        self.push_step(step(self.steps.len() + 1, "fork_closeLedger", "ledger", ledger, time, "ok", &detail, None, None), None);
+        let mut r = self.clock();
+        r["ledger"] = json!(ledger);
+        r["transactions"] = json!(lines);
+        Ok(r)
+    }
+
+    /// Refuse a clock move or snapshot while a held ledger has transactions
+    /// waiting in it.
+    fn not_holding(&self, method: &str) -> std::result::Result<(), RpcError> {
+        match self.held.as_ref().map_or(0, Vec::len) {
+            0 => Ok(()),
+            n => Err(RpcError::invalid(format!("{method}: the held ledger has {n} transaction(s) waiting; fork_closeLedger first"))),
+        }
+    }
+
     fn fork_snapshot(&mut self, p: &Params) -> RpcResult {
+        self.not_holding("fork_snapshot")?;
         let id = self.snapshots.len();
         let label = p.opt_str("label").unwrap_or_default().to_string();
         let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
@@ -708,6 +825,8 @@ impl Facade {
         let id = p.u64("id")? as usize;
         let snap = self.snapshots.get(id).and_then(Option::as_ref).ok_or_else(|| RpcError::invalid(format!("no snapshot {id}: it never existed, or a revert to an earlier one dropped it")))?;
         let (checkpoint, closed, txs, steps) = (snap.session.clone(), snap.closed, snap.txs, snap.steps);
+        // A held ledger and what waits in it are dropped too.
+        self.held = None;
         self.session.restore(&checkpoint);
         self.closed = closed;
         for h in self.tx_order.drain(txs..) {
@@ -731,6 +850,7 @@ impl Facade {
     }
 
     fn fork_advance_ledgers(&mut self, p: &Params) -> RpcResult {
+        self.not_holding("fork_advanceLedgers")?;
         let info = self.session.ledger_info();
         let (from_seq, from_time) = (info.sequence_number, info.timestamp);
         let n = match (p.opt_u64("ledgers")?, p.opt_u64("toLedger")?) {
@@ -759,6 +879,7 @@ impl Facade {
     /// Move the clock so the next ledger closes at exactly `time`, closing
     /// `ledgers` ledgers on the way (default: one per step of the clock).
     fn fork_set_time(&mut self, p: &Params) -> RpcResult {
+        self.not_holding("fork_setTime")?;
         let time = p.u64("time")?;
         let info = self.session.ledger_info();
         let (from_seq, from_time) = (info.sequence_number, info.timestamp);
@@ -911,6 +1032,15 @@ impl Facade {
         let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
         self.push_step(step(self.steps.len() + 1, label, "override", ledger, time, "ok", &detail, None, None), None);
         detail
+    }
+}
+
+/// A transaction step's detail: a classic transaction's operation results
+/// when it applied, else `text`.
+fn tx_detail(record: &TxRecord, text: String) -> String {
+    match &record.status {
+        TxStatus::Applied { .. } if !record.op_results.is_empty() => record.op_results.iter().map(op_result_name).collect::<Vec<_>>().join(", "),
+        _ => text,
     }
 }
 

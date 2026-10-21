@@ -3,29 +3,37 @@
 //!
 //! ```text
 //! Session
-//!   prepare(): simulate (recording) -> sign auth entries -> re-simulate
-//!              (enforcing, so signature checks are metered) -> signed envelope
-//!   submit():  TxValidator (seq, preconditions, signatures + thresholds, fee,
-//!              balance, resource limits) -> Applier (fee charged first,
-//!              enforcing host + module cache, rent, refund) -> close ledger
-//!   ForkedLedger: overlay + logged overrides over a lazily fetched base
+//!   prepare():         simulate (recording) -> sign auth entries -> re-simulate
+//!                      (enforcing, so signature checks are metered) -> envelope
+//!   prepare_classic(): classic operations -> signed envelope
+//!   submit_ledger():   the transaction set (one per source account, per-ledger
+//!                      limits) -> fees first -> each validated again and applied
+//!                      in core's apply order -> refunds -> close ledger
+//!   TxValidator:       seq, preconditions, signatures + thresholds, frozen
+//!                      keys, fee, balance, resource limits, classic operations
+//!   Applier:           enforcing host + module cache, rent, refund
+//!   ForkedLedger:      overlay + logged overrides over a lazily fetched base
 //! ```
 //!
 //! `submit` treats every envelope as untrusted input, the way stellar-core
 //! does. `prepare` is only a convenience for building envelopes the session's
 //! throwaway signers sign. Fidelity: the host is exact (same env-host as the
 //! network's protocol); the transaction layer ports stellar-core's checks and
-//! is approximate where noted (one transaction per ledger, no surge pricing,
-//! no fee-bump or classic operations).
+//! is approximate where noted (no surge pricing, no fee-bump, classic
+//! operations limited to CreateAccount, Payment, SetOptions and ChangeTrust).
 
 mod applier;
+mod classic;
+mod close;
 mod ledger;
 mod signers;
 mod validator;
 
 pub use applier::{Applied, Applier};
+pub use classic::{asset_valid, initial_result, is_supported as classic_op_supported, issuer, result_name as op_result_name, trustline_key};
+pub use close::{core_prng_seed, LedgerLimits, SorobanResources};
 pub use ledger::{
-    account_key, ed25519_account_id, new_account, strkey_ed25519, Change, DiffEntry, EntryState,
+    account_key, ed25519_account_id, new_account, strkey_ed25519, Change, DiffEntry, EntryChange, EntryState,
     FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerCheckpoint, LedgerSource, LedgerStats,
     Override, OverrideKind, StaticSource, StoredEntry,
 };
@@ -35,8 +43,9 @@ pub use signers::{
     ADDR_OZ_V1_DOMAIN, WEBAUTHN_RP_ID,
 };
 pub use validator::{
-    account_signers, available_balance, declared_resources, muxed_account_id, transaction_hash,
-    xlm, Fees, MatchedSigner, Rejection, TxCode, TxLimits, TxValidator, ValidTx,
+    account_signers, available_balance, declared_resources, min_balance, muxed_account_id, transaction_hash,
+    xlm, ClassicOp, Fees, FrozenKeys, MatchedSigner, Rejection, TxCode, TxLimits, TxValidator, Valid,
+    ValidClassicTx, ValidTx,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -44,7 +53,7 @@ use sha2::{Digest, Sha256};
 use soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use soroban_env_host::xdr::{
     AccountId, ContractEvent, DiagnosticEvent, HostFunction, InvokeHostFunctionOp, Memo,
-    MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ScAddress, ScVal,
+    MuxedAccount, Operation, OperationBody, OperationResult, Preconditions, PublicKey, ScAddress, ScVal,
     SequenceNumber, SorobanAuthorizationEntry, SorobanCredentials, SorobanTransactionData,
     Transaction, TransactionEnvelope, TransactionExt, TransactionV1Envelope,
 };
@@ -77,6 +86,11 @@ pub struct SessionOptions {
     pub network_config: Option<NetworkConfig>,
     /// `None` loads the per-transaction limits from the ledger.
     pub tx_limits: Option<TxLimits>,
+    /// `None` loads the per-ledger limits from the ledger.
+    pub ledger_limits: Option<LedgerLimits>,
+    /// The base's `maxTxSetSize` (from its ledger header): the most classic
+    /// operations one ledger holds. `None`: no classic limit.
+    pub max_tx_set_size: Option<u32>,
     pub enable_diagnostics: bool,
 }
 
@@ -88,6 +102,8 @@ impl Clone for SessionOptions {
             auth_expiration_ledgers: self.auth_expiration_ledgers,
             network_config: self.network_config.as_ref().map(clone_network_config),
             tx_limits: self.tx_limits.clone(),
+            ledger_limits: self.ledger_limits.clone(),
+            max_tx_set_size: self.max_tx_set_size,
             enable_diagnostics: self.enable_diagnostics,
         }
     }
@@ -101,6 +117,8 @@ impl SessionOptions {
             auth_expiration_ledgers: 100,
             network_config: None,
             tx_limits: None,
+            ledger_limits: None,
+            max_tx_set_size: None,
             enable_diagnostics: true,
         }
     }
@@ -109,10 +127,12 @@ impl SessionOptions {
 /// How a submitted transaction ended.
 #[derive(Clone, Debug)]
 pub enum TxStatus {
-    /// Applied: fee charged, state committed.
+    /// Applied: fee charged, state committed. A classic transaction's value
+    /// is `Void`; its operation results are in [`TxRecord::op_results`].
     Applied { value: ScVal },
-    /// Included but the operation failed: fee charged, sequence consumed,
-    /// no state change.
+    /// Included but an operation failed, or the transaction failed its
+    /// checks at apply ([`TxRecord::failed_code`]): fee charged, no state
+    /// change besides the fee and (usually) the sequence number.
     Failed { reason: String },
     /// Refused before inclusion: no fee, no sequence number consumed.
     Rejected { code: TxCode, detail: String },
@@ -160,6 +180,20 @@ pub struct TxRecord {
     pub diagnostics: Vec<DiagnosticEvent>,
     pub signers: Vec<MatchedSigner>,
     pub replayable: Vec<String>,
+    /// A classic transaction's operation results, in core's codes (also for
+    /// a `txFAILED` rejection). Empty for Soroban transactions.
+    pub op_results: Vec<OperationResult>,
+    /// What each operation of an applied classic transaction changed, in
+    /// order (empty when the transaction failed: nothing stays).
+    pub op_changes: Vec<Vec<EntryChange>>,
+    /// Included, then refused by the checks core repeats at apply (an earlier
+    /// transaction of the same ledger changed what they depend on): the code
+    /// core reports. The fee is charged.
+    pub failed_code: Option<TxCode>,
+    /// The transaction's position (from 1) in its ledger's apply order.
+    pub application_order: Option<u32>,
+    /// Why it waited for a later ledger than the one it was submitted for.
+    pub deferred: Option<String>,
 }
 
 impl TxRecord {
@@ -219,13 +253,24 @@ pub struct PrepareRequest<'a> {
     pub preconditions: Preconditions,
 }
 
+/// A classic transaction to build: its operations, signed by
+/// `envelope_signers`, with a fee bid of the base fee per operation.
+pub struct ClassicRequest<'a> {
+    pub source: AccountId,
+    pub operations: Vec<Operation>,
+    pub envelope_signers: &'a [Ed25519Key],
+    pub memo: Memo,
+    pub preconditions: Preconditions,
+    /// `None`: the source's next sequence number.
+    pub sequence: Option<i64>,
+}
+
 /// Everything [`Session::restore`] needs to undo what happened since.
 #[derive(Clone)]
 pub struct SessionCheckpoint {
     ledger: LedgerCheckpoint,
     info: LedgerInfo,
     log: Vec<TxRecord>,
-    tx_index: u32,
 }
 
 pub struct Session {
@@ -235,6 +280,8 @@ pub struct Session {
     options: SessionOptions,
     network_config: NetworkConfig,
     limits: TxLimits,
+    ledger_limits: LedgerLimits,
+    frozen: FrozenKeys,
     applier: Applier,
     log: Vec<TxRecord>,
 }
@@ -269,6 +316,13 @@ impl Session {
             Some(l) => l,
             None => TxLimits::load_from_snapshot(&view).map_err(|e| with_fetch_error(e, &ledger)).context("loading the transaction limits")?,
         };
+        let ledger_limits = match options.ledger_limits.clone() {
+            Some(l) => l,
+            None => LedgerLimits::load_from_snapshot(&view, options.max_tx_set_size)
+                .map_err(|e| with_fetch_error(e, &ledger))
+                .context("loading the ledger limits")?,
+        };
+        let frozen = FrozenKeys::load_from_snapshot(&view).map_err(|e| with_fetch_error(e, &ledger)).context("loading the frozen ledger keys")?;
         let mut info = LedgerInfo {
             protocol_version: fork.protocol_version,
             sequence_number: fork.ledger_seq + 1,
@@ -281,7 +335,7 @@ impl Session {
         };
         network_config.fill_config_fields_in_ledger_info(&mut info);
         let applier = Applier::new(&network_config)?;
-        Ok(Self { ledger, info, fork, options, network_config, limits, applier, log: vec![] })
+        Ok(Self { ledger, info, fork, options, network_config, limits, ledger_limits, frozen, applier, log: vec![] })
     }
 
     pub fn ledger(&self) -> &ForkedLedger {
@@ -307,6 +361,34 @@ impl Session {
 
     pub fn tx_limits(&self) -> &TxLimits {
         &self.limits
+    }
+
+    pub fn ledger_limits(&self) -> &LedgerLimits {
+        &self.ledger_limits
+    }
+
+    /// The keys the network froze (CAP-77).
+    pub fn frozen_keys(&self) -> &FrozenKeys {
+        &self.frozen
+    }
+
+    /// A validator over the session's current state. `applying`: the checks
+    /// core repeats when a transaction applies, its fee already charged.
+    pub fn validator(&self, applying: bool) -> TxValidator<'_> {
+        TxValidator {
+            ledger: &self.ledger,
+            info: &self.info,
+            config: &self.network_config,
+            limits: &self.limits,
+            frozen: &self.frozen,
+            base_fee: self.fork.base_fee,
+            applying,
+        }
+    }
+
+    /// Prefer the base fetch failure over the error it caused.
+    fn fetch_failure(&self, e: anyhow::Error) -> anyhow::Error {
+        with_fetch_error(e, &self.ledger)
     }
 
     pub fn network_id(&self) -> [u8; 32] {
@@ -360,7 +442,7 @@ impl Session {
 
     /// The session as it is now: ledger writes, overrides, clock and log.
     pub fn checkpoint(&self) -> SessionCheckpoint {
-        SessionCheckpoint { ledger: self.ledger.checkpoint(), info: self.info.clone(), log: self.log.clone(), tx_index: self.applier.tx_index }
+        SessionCheckpoint { ledger: self.ledger.checkpoint(), info: self.info.clone(), log: self.log.clone() }
     }
 
     /// Return to `checkpoint`: every transaction, override and clock move
@@ -369,7 +451,6 @@ impl Session {
         self.ledger.restore(&checkpoint.ledger);
         self.info = checkpoint.info.clone();
         self.log = checkpoint.log.clone();
-        self.applier.tx_index = checkpoint.tx_index;
     }
 
     // --- overrides (each one is logged for the report) ---
@@ -502,79 +583,44 @@ impl Session {
         })
     }
 
-    /// Validate and apply one envelope. A valid envelope closes the ledger it
-    /// applied in, success or failure; a rejected one never reaches a ledger.
+    /// Build and sign a classic transaction (no simulation: classic
+    /// operations have no resources to declare). The fee bid is the base fee
+    /// per operation.
+    pub fn prepare_classic(&self, request: &ClassicRequest<'_>) -> Result<Prepared> {
+        let sequence = match request.sequence {
+            Some(s) => s,
+            None => self.ledger.account(&request.source)?.ok_or_else(|| anyhow!("source account {} is not on the ledger", request.source))?.seq_num.0 + 1,
+        };
+        let fee = (self.fork.base_fee as u64).saturating_mul(request.operations.len().max(1) as u64);
+        let PublicKey::PublicKeyTypeEd25519(source_key) = &request.source.0;
+        let tx = Transaction {
+            source_account: MuxedAccount::Ed25519(source_key.clone()),
+            fee: fee.try_into().map_err(|_| anyhow!("fee {fee} does not fit a u32 bid"))?,
+            seq_num: SequenceNumber(sequence),
+            cond: request.preconditions.clone(),
+            memo: request.memo.clone(),
+            operations: request.operations.clone().try_into().map_err(|_| anyhow!("a transaction holds at most 100 operations"))?,
+            ext: TransactionExt::V0,
+        };
+        let hash = transaction_hash(&tx, self.info.network_id)?;
+        let signatures: Vec<_> = request.envelope_signers.iter().map(|k| k.sign_decorated(&hash)).collect();
+        let empty = Recorded { value: ScVal::Void, transaction_data: SorobanTransactionData::default(), auth: vec![] };
+        Ok(Prepared {
+            envelope: TransactionEnvelope::Tx(TransactionV1Envelope { tx, signatures: signatures.try_into()? }),
+            hash,
+            value: ScVal::Void,
+            transaction_data: SorobanTransactionData::default(),
+            auth: vec![],
+            recorded: empty,
+        })
+    }
+
+    /// Validate and apply one envelope in a ledger of its own. A valid
+    /// envelope closes the ledger it applied in, success or failure; a
+    /// rejected one never reaches a ledger.
     pub fn submit(&mut self, label: &str, envelope: &TransactionEnvelope) -> Result<TxRecord> {
-        let validator = TxValidator {
-            ledger: &self.ledger,
-            info: &self.info,
-            config: &self.network_config,
-            limits: &self.limits,
-            base_fee: self.fork.base_fee,
-        };
-        let mut record = TxRecord {
-            label: label.to_string(),
-            ledger: self.info.sequence_number,
-            close_time: self.info.timestamp,
-            hash: [0; 32],
-            source: None,
-            status: TxStatus::Rejected { code: TxCode::Malformed, detail: String::new() },
-            fees: Fees::default(),
-            fee_charged: 0,
-            refund: 0,
-            rent_fee: 0,
-            events_fee: 0,
-            cpu_insns: 0,
-            declared_insns: 0,
-            mem_bytes: 0,
-            write_bytes: 0,
-            declared_write_bytes: 0,
-            entries_written: 0,
-            restored: 0,
-            events: vec![],
-            diagnostics: vec![],
-            signers: vec![],
-            replayable: vec![],
-        };
-        if let TransactionEnvelope::Tx(e) = envelope {
-            record.hash = transaction_hash(&e.tx, self.info.network_id)?;
-            record.source = Some(muxed_account_id(&e.tx.source_account));
-        }
-        let valid = match validator.validate(envelope).map_err(|e| with_fetch_error(e, &self.ledger))? {
-            Ok(v) => v,
-            Err(r) => {
-                record.status = TxStatus::Rejected { code: r.code, detail: r.detail };
-                self.log.push(record.clone());
-                return Ok(record);
-            }
-        };
-        let applied = self
-            .applier
-            .apply(&self.ledger, &self.info, &self.network_config, &self.limits, &valid, self.options.enable_diagnostics)
-            .map_err(|e| with_fetch_error(e, &self.ledger))?;
-        record.fees = valid.fees;
-        record.fee_charged = applied.fee_charged;
-        record.refund = applied.refund;
-        record.rent_fee = applied.rent_fee;
-        record.events_fee = applied.events_fee;
-        record.cpu_insns = applied.cpu_insns;
-        record.declared_insns = valid.data.resources.instructions;
-        record.mem_bytes = applied.mem_bytes;
-        record.write_bytes = applied.write_bytes;
-        record.declared_write_bytes = valid.data.resources.write_bytes;
-        record.entries_written = applied.entries_written;
-        record.restored = applied.restored;
-        record.events = applied.events;
-        record.diagnostics = applied.diagnostics;
-        record.signers = valid.signers;
-        record.replayable = valid.replayable;
-        record.status = match applied.result {
-            Ok(value) => TxStatus::Applied { value },
-            Err(reason) => TxStatus::Failed { reason: format!("{reason}{}", diagnostics_tail(&record.diagnostics)) },
-        };
-        self.log.push(record.clone());
-        self.close_ledger();
-        Ok(record)
+        let mut records = self.submit_ledger(&[(label, envelope)])?;
+        records.pop().ok_or_else(|| anyhow!("no record for {label}"))
     }
 }
 
@@ -620,8 +666,8 @@ fn with_fetch_error(e: anyhow::Error, ledger: &ForkedLedger) -> anyhow::Error {
     }
 }
 
-/// A deterministic per-transaction PRNG seed. (stellar-core derives its seed
-/// differently, so contracts that use the PRNG see other values on chain.)
+/// A deterministic PRNG seed for simulation. (Applied transactions get
+/// core's seed from their ledger's transaction set: [`core_prng_seed`].)
 pub(crate) fn prng_seed(domain: &[u8], ledger: u32, index: u32) -> [u8; 32] {
     Sha256::digest([b"soroban-sim session:".as_slice(), domain, &ledger.to_be_bytes(), &index.to_be_bytes()].concat()).into()
 }

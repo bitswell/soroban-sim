@@ -218,3 +218,79 @@ fn the_report_prefix_keeps_its_name_and_never_overwrites_the_plan() {
     run(&["--report", "run.v1"]);
     assert!(dir.join("run.v1.json").is_file() && dir.join("run.v1.md").is_file());
 }
+
+#[test]
+fn classic_steps_and_ledger_blocks() {
+    let dir = scratch("classic");
+    let plan = dir.join("plan.yaml");
+    std::fs::write(
+        &plan,
+        r#"
+options: { source: "${alice}" }
+keys: { alice: ed25519, carol: ed25519, dave: ed25519, issuer: ed25519, backup: ed25519 }
+vars:
+  usd: "USD:${key.issuer}"
+signers:
+  "${alice}": { classic: [alice] }
+setup:
+  - substitute_master_key: { account: "${alice}", key: alice }
+steps:
+  - name: create carol
+    create_account: { destination: "${key.carol}", starting_balance: 50 }
+  - name: one ledger for three transactions
+    ledger:
+      - name: create dave
+        create_account: { destination: "${key.dave}", starting_balance: "20.5" }
+      - name: create the issuer (alice's second transaction)
+        create_account: { destination: "${key.issuer}", starting_balance: 10 }
+      - name: carol adds a co-signer
+        source: "${key.carol}"
+        set_options: { signer: { key: backup, weight: 1 }, low_threshold: 1, med_threshold: 2, high_threshold: 2, home_domain: carol.invalid }
+  - name: "negative: carol's master key alone"
+    payment: { destination: "${alice}", amount: 1 }
+    source: "${key.carol}"
+    expect: { fails: opBAD_AUTH }
+  - name: carol and her co-signer pay
+    payment: { destination: "${alice}", amount: "0.5" }
+    source: "${key.carol}"
+    sign_with: [carol, backup]
+  - name: dave trusts USD, the issuer mints
+    source: "${key.dave}"
+    sign_with: [dave, issuer]
+    operations:
+      - change_trust: { asset: "${usd}", limit: 1000 }
+      - payment: { destination: "${key.dave}", asset: "${usd}", amount: 250 }
+        source: "${key.issuer}"
+  - name: "negative: a payment to nobody"
+    payment: { destination: GAMPJROHOAW662FINQ4XQOY2ULX5IEGYXCI4SMZYE75EHQBR6PSTJG3M, amount: 1 }
+    expect: { fails: PAYMENT_NO_DESTINATION }
+"#,
+    )
+    .unwrap();
+    let mut cfg = config(snapshot(&dir));
+    cfg.plan_path = plan;
+    let report = Runner::new(cfg).unwrap().run(None).unwrap();
+    let rows: Vec<String> = report.steps.iter().map(|s| format!("{} {} [{}] {}: {}", s.index, s.name, s.ledger, s.outcome, s.detail)).collect();
+    assert!(report.passed, "{:#?}\n{rows:#?}", report.failures);
+
+    let step = |name: &str| report.steps.iter().find(|s| s.name == name).unwrap_or_else(|| panic!("no step {name}: {rows:#?}"));
+    let (dave, issuer, cosign) = (step("create dave"), step("create the issuer (alice's second transaction)"), step("carol adds a co-signer"));
+    // dave's and carol's share a ledger; alice's second waits for the next.
+    assert_eq!(dave.ledger, cosign.ledger);
+    assert_eq!(issuer.ledger, dave.ledger + 1);
+    assert!(issuer.tx.as_ref().unwrap().deferred.as_deref().unwrap().contains("one per account"));
+    assert_eq!(dave.tx.as_ref().unwrap().operations, vec!["CREATE_ACCOUNT_SUCCESS"]);
+    assert_eq!(step("dave trusts USD, the issuer mints").tx.as_ref().unwrap().operations, vec!["CHANGE_TRUST_SUCCESS", "PAYMENT_SUCCESS"]);
+
+    // Every account is a real transaction's: one override, alice's key.
+    assert_eq!(report.overrides.len(), 1);
+    let carol = Ed25519Key::throwaway("carol").strkey();
+    let c = report.accounts.iter().find(|a| a.account == carol).unwrap();
+    assert!(!c.overridden && c.balance_before.is_none());
+    assert!(c.changes.iter().any(|x| x.starts_with("signer") && x.ends_with("added (weight 1)")), "{:?}", c.changes);
+    assert!(c.changes.iter().any(|x| x == "home domain \"\" → \"carol.invalid\""), "{:?}", c.changes);
+    let line = &report.trustlines[0];
+    assert_eq!((line.balance_after, line.limit_after, line.authorized), (Some(250 * 10_000_000), Some(1000 * 10_000_000), Some(true)));
+    let md = report.to_markdown();
+    assert!(md.contains("## Trustlines") && md.contains("USD:"), "{md}");
+}

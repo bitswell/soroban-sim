@@ -5,23 +5,25 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use soroban_env_host::xdr::{
-    AccountId, Asset, ContractExecutable, ContractId, ContractIdPreimage, ContractIdPreimageFromAddress,
-    CreateContractArgs, CreateContractArgsV2, Hash, HashIdPreimage, HashIdPreimageContractId, HostFunction,
-    InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerHeader, LedgerKey, LedgerKeyContractCode, Limits, Memo,
-    Preconditions, ReadXdr, ScAddress, ScString, ScSymbol, ScVal, TransactionEnvelope, Uint256, WriteXdr,
+    AccountEntry, AccountId, Asset, ChangeTrustAsset, ChangeTrustOp, ContractExecutable, ContractId, ContractIdPreimage,
+    ContractIdPreimageFromAddress, CreateAccountOp, CreateContractArgs, CreateContractArgsV2, Hash, HashIdPreimage,
+    HashIdPreimageContractId, HostFunction, InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerHeader, LedgerKey,
+    LedgerKeyContractCode, Limits, Memo, MuxedAccount, Operation, OperationBody, PaymentOp, Preconditions, PublicKey,
+    ReadXdr, ScAddress, ScString, ScSymbol, ScVal, SetOptionsOp, Signer, SignerKey, String32, Thresholds,
+    TransactionEnvelope, TransactionV1Envelope, Uint256, WriteXdr,
 };
 use soroban_sim_core::session::{
-    account_key, host_protocol, show_scval, AuthSigner, AuthSignerSource, Ed25519Key, EntryState,
-    ExternalKey, ForkPoint, LedgerSource, OzDigest, OzSigner, PrepareRequest, Secp256r1Key, Session,
-    SessionOptions, StoredEntry, TxRecord, TxStatus, ADDR_OZ_V1_DOMAIN,
+    account_key, host_protocol, muxed_account_id, new_account, op_result_name, show_scval, transaction_hash, AuthSigner,
+    AuthSignerSource, ClassicRequest, Ed25519Key, EntryState, ExternalKey, ForkPoint, LedgerSource, OzDigest, OzSigner,
+    PrepareRequest, Secp256r1Key, Session, SessionOptions, StoredEntry, TxRecord, TxStatus, ADDR_OZ_V1_DOMAIN,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::plan::{
-    interpolate, CallSpec, ClassicSpec, Computed, Expect, Fails, KeySpec, NetworkSpec, OverrideSpec, OzSignerSpec,
-    Plan, RuleSpec, SignerSpec, Step, ValueExpr,
+    interpolate, CallSpec, ClassicSpec, Computed, Expect, Fails, KeySpec, NetworkSpec, OperationSpec, OverrideSpec,
+    OzSignerSpec, Plan, RuleSpec, SignerSpec, Step, ValueExpr,
 };
 use crate::report::*;
 use crate::rpc::{RpcClient, RpcSource};
@@ -100,6 +102,80 @@ impl Outcome {
     fn ok(detail: impl Into<String>) -> Self {
         let detail = detail.into();
         Self { outcome: "ok", text: detail.clone(), detail, value: None, tx: None, succeeded: true }
+    }
+}
+
+/// What building a transaction step produced.
+enum Built {
+    /// A signed envelope, and the value its simulation returned (Soroban).
+    Ready { envelope: TransactionEnvelope, value: Option<ScVal> },
+    /// The step ended before submission.
+    Done(Outcome),
+}
+
+/// A preparation that failed: the step was never submitted.
+fn refused(e: anyhow::Error) -> Outcome {
+    let detail = format!("{e:#}");
+    Outcome { outcome: "refused", text: detail.clone(), detail, value: None, tx: None, succeeded: false }
+}
+
+/// A submitted transaction's outcome. A classic transaction's text names
+/// every operation result, so `expect.fails` can match a code such as
+/// `PAYMENT_UNDERFUNDED`.
+fn outcome_of(record: TxRecord) -> Outcome {
+    let ops: Vec<String> = record.op_results.iter().map(op_result_name).collect();
+    let text = if ops.is_empty() { record.status.summary() } else { format!("{} [{}]", record.status.summary(), ops.join(", ")) };
+    match &record.status {
+        TxStatus::Applied { value } => {
+            let (detail, value) = if ops.is_empty() { (show_scval(value), Some(value.clone())) } else { (ops.join(", "), None) };
+            Outcome { outcome: "applied", detail, text, value, succeeded: true, tx: Some(record) }
+        }
+        TxStatus::Failed { reason } => Outcome { outcome: "failed", detail: reason.clone(), text, value: None, succeeded: false, tx: Some(record) },
+        TxStatus::Rejected { code, detail } => {
+            Outcome { outcome: "rejected", detail: format!("{}: {detail}", code.as_str()), text, value: None, succeeded: false, tx: Some(record) }
+        }
+    }
+}
+
+fn envelope_sequence(env: &TransactionEnvelope) -> i64 {
+    match env {
+        TransactionEnvelope::Tx(e) => e.tx.seq_num.0,
+        TransactionEnvelope::TxV0(e) => e.tx.seq_num.0,
+        TransactionEnvelope::TxFeeBump(_) => 0,
+    }
+}
+
+/// The envelope with another sequence number, signed again by `signers`.
+fn resequence(env: &TransactionEnvelope, seq: i64, signers: &[Ed25519Key], network_id: [u8; 32]) -> Result<TransactionEnvelope> {
+    let TransactionEnvelope::Tx(e) = env else { bail!("only v1 envelopes can be re-sequenced") };
+    let mut tx = e.tx.clone();
+    tx.seq_num.0 = seq;
+    let hash = transaction_hash(&tx, network_id)?;
+    let signatures: Vec<_> = signers.iter().map(|k| k.sign_decorated(&hash)).collect();
+    Ok(TransactionEnvelope::Tx(TransactionV1Envelope { tx, signatures: signatures.try_into()? }))
+}
+
+fn muxed(id: &AccountId) -> MuxedAccount {
+    let PublicKey::PublicKeyTypeEd25519(k) = &id.0;
+    MuxedAccount::Ed25519(k.clone())
+}
+
+/// The report row of a step that errored.
+fn error_row(index: usize, label: &str, step: &Step, ledger: u32, time: u64, e: &anyhow::Error) -> StepReport {
+    StepReport {
+        index,
+        name: label.to_string(),
+        kind: step.kind().into(),
+        ledger,
+        close_time: time,
+        outcome: "error".into(),
+        detail: format!("{e:#}"),
+        expected: expected_text(step.expect.as_ref()),
+        passed: false,
+        value: None,
+        value_scval: None,
+        saved: None,
+        tx: None,
     }
 }
 
@@ -214,37 +290,21 @@ impl Runner {
                 continue;
             }
             let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
-            let result = self.step(step, &label);
-            let (report, ok) = match result {
-                Ok(outcome) => self.judge(i + 1, &label, step, ledger, time, outcome)?,
-                Err(e) => {
-                    let detail = format!("{e:#}");
-                    let report = StepReport {
-                        index: i + 1,
-                        name: label.clone(),
-                        kind: step.kind().into(),
-                        ledger,
-                        close_time: time,
-                        outcome: "error".into(),
-                        detail: detail.clone(),
-                        expected: expected_text(step.expect.as_ref()),
-                        passed: false,
-                        value: None,
-                        value_scval: None,
-                        saved: None,
-                        tx: None,
-                    };
-                    (report, false)
-                }
+            let result = match &step.ledger {
+                Some(nested) => self.ledger_block(i + 1, &label, nested),
+                None => self.step(step, &label).and_then(|outcome| Ok(vec![self.judge(i + 1, &label, step, ledger, time, outcome)?])),
             };
-            if self.progress {
-                eprintln!("{}", progress_line(&report));
+            let rows = result.unwrap_or_else(|e| vec![(error_row(i + 1, &label, step, ledger, time, &e), false)]);
+            for (report, ok) in rows {
+                if self.progress {
+                    eprintln!("{}", progress_line(&report));
+                }
+                if !ok {
+                    self.failures.push(format!("step {} ({}): {} {}", report.index, report.name, report.outcome, report.detail));
+                    stopped = !self.keep_going;
+                }
+                self.steps.push(report);
             }
-            if !ok {
-                self.failures.push(format!("step {} ({label}): {} {}", i + 1, report.outcome, report.detail));
-                stopped = !self.keep_going;
-            }
-            self.steps.push(report);
         }
         if let Some(path) = save_snapshot {
             let snap = SnapshotFile::new(&self.passphrase, self.session.fork_point(), &self.session.ledger().base_entries())?;
@@ -314,15 +374,112 @@ impl Runner {
             let details: Vec<String> = self.session.ledger().overrides()[before..].iter().map(|o| o.detail.clone()).collect();
             return Ok(Outcome::ok(details.join("; ")));
         }
+        self.transaction_step(step, label)
+    }
+
+    fn transaction_step(&mut self, step: &Step, label: &str) -> Result<Outcome> {
         if let Some(xdr) = &step.envelope {
             let xdr = self.interp(xdr)?;
             let env = TransactionEnvelope::from_xdr_base64(xdr.trim(), Limits::none()).context("decoding the envelope")?;
             return self.submit(label, &env, step);
         }
-        self.transaction_step(step, label)
+        let (envelope, value) = match self.build(step, label, &mut BTreeMap::new())? {
+            Built::Ready { envelope, value } => (envelope, value),
+            Built::Done(outcome) => return Ok(outcome),
+        };
+        if step.hold {
+            let detail = format!("prepared and signed, not submitted (saved as {})", step.save_envelope.as_deref().unwrap_or(""));
+            return Ok(Outcome { outcome: "held", text: detail.clone(), detail, value, tx: None, succeeded: true });
+        }
+        self.submit(label, &envelope, step)
     }
 
-    fn transaction_step(&mut self, step: &Step, label: &str) -> Result<Outcome> {
+    /// Several transaction steps for the same ledger: each prepared against
+    /// the state before the ledger (as a real client would), chained on
+    /// sequence numbers per source, then submitted together. One report row
+    /// per transaction.
+    fn ledger_block(&mut self, index: usize, block: &str, nested: &[Step]) -> Result<Vec<(StepReport, bool)>> {
+        let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
+        let mut next_seq = BTreeMap::new();
+        let mut built = vec![];
+        for (j, inner) in nested.iter().enumerate() {
+            let label = inner.name.clone().unwrap_or_else(|| format!("{block}: {} #{}", inner.kind(), j + 1));
+            let b = match &inner.envelope {
+                Some(xdr) => {
+                    let xdr = self.interp(xdr)?;
+                    Built::Ready { envelope: TransactionEnvelope::from_xdr_base64(xdr.trim(), Limits::none()).context("decoding the envelope")?, value: None }
+                }
+                None => self.build(inner, &label, &mut next_seq)?,
+            };
+            built.push((label, b));
+        }
+        let ready: Vec<(&str, &TransactionEnvelope)> = built
+            .iter()
+            .filter_map(|(label, b)| match b {
+                Built::Ready { envelope, .. } => Some((label.as_str(), envelope)),
+                Built::Done(_) => None,
+            })
+            .collect();
+        let mut records = self.session.submit_ledger(&ready)?.into_iter();
+        let mut rows = vec![];
+        for ((label, b), inner) in built.into_iter().zip(nested) {
+            let (outcome, at) = match b {
+                Built::Done(o) => (o, (ledger, time)),
+                Built::Ready { envelope, .. } => {
+                    let record = records.next().ok_or_else(|| anyhow!("{label}: no record"))?;
+                    if let Some(name) = &inner.save_envelope {
+                        self.values.insert(name.clone(), envelope.to_xdr_base64(Limits::none())?);
+                    }
+                    let at = (record.ledger, record.close_time);
+                    (outcome_of(record), at)
+                }
+            };
+            rows.push(self.judge(index, &label, inner, at.0, at.1, outcome)?);
+        }
+        Ok(rows)
+    }
+
+    /// Build and sign the envelope a transaction step describes. A step that
+    /// ends before submission (an upload already on the ledger, a refused
+    /// preparation) is `Done`. `next_seq` chains sequence numbers for sources
+    /// that already have a transaction in the same ledger block.
+    fn build(&mut self, step: &Step, label: &str, next_seq: &mut BTreeMap<AccountId, i64>) -> Result<Built> {
+        let source_text = step.source.clone().or_else(|| self.plan.options.source.clone()).ok_or_else(|| anyhow!("no `source` for this step and no options.source"))?;
+        let source_text = self.interp(&source_text)?;
+        let source: AccountId = source_text.parse().map_err(|_| anyhow!("source {source_text} is not a G address"))?;
+        if step.is_classic() {
+            let operations = self.classic_operations(step)?;
+            let mut envelope_signers = self.envelope_signers(step, &source)?;
+            for op in &operations {
+                if let Some(s) = &op.source_account {
+                    let id = muxed_account_id(s);
+                    for k in self.envelope_signers(step, &id)? {
+                        if !envelope_signers.iter().any(|e| e.public_key() == k.public_key()) {
+                            envelope_signers.push(k);
+                        }
+                    }
+                }
+            }
+            let sequence = next_seq.get(&source).copied();
+            let prepared = self.session.prepare_classic(&ClassicRequest {
+                source: source.clone(),
+                operations,
+                envelope_signers: &envelope_signers,
+                memo: Memo::None,
+                preconditions: Preconditions::None,
+                sequence,
+            });
+            let prepared = match prepared {
+                Ok(p) => p,
+                Err(e) => return Ok(Built::Done(refused(e))),
+            };
+            next_seq.insert(source, envelope_sequence(&prepared.envelope) + 1);
+            if let Some(name) = &step.save_envelope {
+                self.values.insert(name.clone(), prepared.envelope.to_xdr_base64(Limits::none())?);
+            }
+            return Ok(Built::Ready { envelope: prepared.envelope, value: None });
+        }
+
         let host_function = if let Some(call) = &step.invoke {
             self.host_call(call)?
         } else if let Some(u) = &step.upload {
@@ -332,7 +489,7 @@ impl Runner {
                 if let Some(e) = self.session.ledger().get(&key)? {
                     let state = EntryState::of(Some(&e), self.session.ledger_info().sequence_number);
                     let detail = format!("code {} is already on the ledger ({}{})", hex(&hash), state.as_str(), if state == EntryState::Archived { "; the first transaction that uses it restores it" } else { "" });
-                    return Ok(Outcome { outcome: "skipped", text: detail.clone(), detail, value: None, tx: None, succeeded: true });
+                    return Ok(Built::Done(Outcome { outcome: "skipped", text: detail.clone(), detail, value: None, tx: None, succeeded: true }));
                 }
             }
             HostFunction::UploadContractWasm(bytes.try_into()?)
@@ -354,13 +511,10 @@ impl Runner {
             bail!("unsupported step");
         };
 
-        let source_text = step.source.clone().or_else(|| self.plan.options.source.clone()).ok_or_else(|| anyhow!("no `source` for this step and no options.source"))?;
-        let source_text = self.interp(&source_text)?;
-        let source: AccountId = source_text.parse().map_err(|_| anyhow!("source {source_text} is not a G address"))?;
         let envelope_signers = self.envelope_signers(step, &source)?;
         let signers = self.signer_specs(step)?;
         let prepared = self.session.prepare(&PrepareRequest {
-            source,
+            source: source.clone(),
             host_function,
             auth_signers: &signers,
             envelope_signers: &envelope_signers,
@@ -370,23 +524,23 @@ impl Runner {
         });
         let prepared = match prepared {
             Ok(p) => p,
-            Err(e) => {
-                let detail = format!("{e:#}");
-                return Ok(Outcome { outcome: "refused", text: detail.clone(), detail, value: None, tx: None, succeeded: false });
-            }
+            Err(e) => return Ok(Built::Done(refused(e))),
         };
         if self.differential {
             let rpc = self.rpc.clone().expect("differential needs RPC");
             self.differentials.push(differential::compare(&rpc, &self.session, label, &prepared));
         }
+        // A second transaction from the same source in a ledger block takes
+        // the next sequence number; the envelope is signed again for it.
+        let envelope = match next_seq.get(&source) {
+            Some(seq) => resequence(&prepared.envelope, *seq, &envelope_signers, self.session.network_id())?,
+            None => prepared.envelope,
+        };
+        next_seq.insert(source, envelope_sequence(&envelope) + 1);
         if let Some(name) = &step.save_envelope {
-            self.values.insert(name.clone(), prepared.envelope.to_xdr_base64(Limits::none())?);
+            self.values.insert(name.clone(), envelope.to_xdr_base64(Limits::none())?);
         }
-        if step.hold {
-            let detail = format!("prepared and signed, not submitted (saved as {})", step.save_envelope.as_deref().unwrap_or(""));
-            return Ok(Outcome { outcome: "held", text: detail.clone(), detail, value: Some(prepared.value), tx: None, succeeded: true });
-        }
-        self.submit(label, &prepared.envelope, step)
+        Ok(Built::Ready { envelope, value: Some(prepared.value) })
     }
 
     fn submit(&mut self, label: &str, env: &TransactionEnvelope, step: &Step) -> Result<Outcome> {
@@ -394,14 +548,7 @@ impl Runner {
         if let Some(name) = &step.save_envelope {
             self.values.entry(name.clone()).or_insert(env.to_xdr_base64(Limits::none())?);
         }
-        let text = record.status.summary();
-        Ok(match &record.status {
-            TxStatus::Applied { value } => Outcome { outcome: "applied", detail: show_scval(value), text, value: Some(value.clone()), succeeded: true, tx: Some(record) },
-            TxStatus::Failed { reason } => Outcome { outcome: "failed", detail: reason.clone(), text, value: None, succeeded: false, tx: Some(record) },
-            TxStatus::Rejected { code, detail } => {
-                Outcome { outcome: "rejected", detail: format!("{}: {detail}", code.as_str()), text, value: None, succeeded: false, tx: Some(record) }
-            }
-        })
+        Ok(outcome_of(record))
     }
 
     fn view_step(&mut self, call: &CallSpec, fresh: bool) -> Result<Outcome> {
@@ -582,6 +729,89 @@ impl Runner {
             Value::Object(m) => Value::Object(m.iter().map(|(k, v)| Ok((k.clone(), self.expand(v)?))).collect::<Result<_>>()?),
             other => other.clone(),
         })
+    }
+
+    // --- classic operations ---
+
+    fn classic_operations(&mut self, step: &Step) -> Result<Vec<Operation>> {
+        let specs = match &step.operations {
+            Some(ops) => ops.clone(),
+            None => vec![OperationSpec {
+                source: None,
+                create_account: step.create_account.clone(),
+                payment: step.payment.clone(),
+                set_options: step.set_options.clone(),
+                change_trust: step.change_trust.clone(),
+            }],
+        };
+        specs.iter().map(|o| self.classic_operation(o)).collect()
+    }
+
+    fn classic_operation(&mut self, o: &OperationSpec) -> Result<Operation> {
+        let source_account = match &o.source {
+            Some(s) => Some(muxed(&self.account_id(s)?)),
+            None => None,
+        };
+        let body = if let Some(c) = &o.create_account {
+            let destination = self.account_id(&c.destination)?;
+            let starting_balance = crate::classic::amount(&self.eval(&c.starting_balance)?).context("create_account starting_balance")?;
+            OperationBody::CreateAccount(CreateAccountOp { destination, starting_balance })
+        } else if let Some(p) = &o.payment {
+            let destination = muxed(&self.account_id(&p.destination)?);
+            let asset = match &p.asset {
+                Some(a) => crate::classic::asset(&self.interp(a)?)?,
+                None => Asset::Native,
+            };
+            let amount = crate::classic::amount(&self.eval(&p.amount)?).context("payment amount")?;
+            OperationBody::Payment(PaymentOp { destination, asset, amount })
+        } else if let Some(so) = &o.set_options {
+            let signer = match &so.signer {
+                Some(sw) => Some(Signer { key: SignerKey::Ed25519(Uint256(self.signer_key(&sw.key)?)), weight: sw.weight }),
+                None => None,
+            };
+            let home_domain = match &so.home_domain {
+                Some(d) => {
+                    let d = self.interp(d)?;
+                    Some(String32(d.as_bytes().to_vec().try_into().map_err(|_| anyhow!("home_domain {d:?} is longer than 32 bytes"))?))
+                }
+                None => None,
+            };
+            OperationBody::SetOptions(SetOptionsOp {
+                inflation_dest: so.inflation_dest.as_ref().map(|d| self.account_id(d)).transpose()?,
+                clear_flags: so.clear_flags.as_ref().map(crate::classic::flags).transpose()?,
+                set_flags: so.set_flags.as_ref().map(crate::classic::flags).transpose()?,
+                master_weight: so.master_weight,
+                low_threshold: so.low_threshold,
+                med_threshold: so.med_threshold,
+                high_threshold: so.high_threshold,
+                home_domain,
+                signer,
+            })
+        } else if let Some(ct) = &o.change_trust {
+            let line = match crate::classic::asset(&self.interp(&ct.asset)?)? {
+                Asset::CreditAlphanum4(a) => ChangeTrustAsset::CreditAlphanum4(a),
+                Asset::CreditAlphanum12(a) => ChangeTrustAsset::CreditAlphanum12(a),
+                Asset::Native => bail!("change_trust needs an issued asset, CODE:ISSUER"),
+            };
+            let limit = match &ct.limit {
+                Some(l) => crate::classic::amount(&self.eval(l)?).context("change_trust limit")?,
+                None => i64::MAX,
+            };
+            OperationBody::ChangeTrust(ChangeTrustOp { line, limit })
+        } else {
+            bail!("an operation needs one of create_account, payment, set_options, change_trust");
+        };
+        Ok(Operation { source_account, body })
+    }
+
+    /// A signer's ed25519 public key: a plan key's, or a G address's.
+    fn signer_key(&mut self, text: &str) -> Result<[u8; 32]> {
+        if let Some(KeyMaterial::Ed25519(k)) = self.keys.get(text) {
+            return Ok(k.public_key());
+        }
+        let id = self.account_id(text)?;
+        let PublicKey::PublicKeyTypeEd25519(Uint256(pk)) = id.0;
+        Ok(pk)
     }
 
     // --- keys and signers ---
@@ -797,7 +1027,8 @@ pub fn session_fidelity() -> Vec<String> {
     vec![
         "Host-exact: contracts run in the same soroban-env-host as the network's protocol, in enforcing mode, with a module cache, and every auth signature is verified.".into(),
         "Envelope-approximate: the transaction layer (sequence numbers, preconditions, signature weights and thresholds, fee bid, resource fee and limits, balance above reserve, fee charged before apply, rent and refund) is a port of stellar-core's checks, not core itself.".into(),
-        "Not modelled: classic operations (funding is an override), fee-bump and muxed fee sources, surge pricing, several transactions per ledger, per-ledger limits, and core's PRNG seed.".into(),
+        "Classic operations: CreateAccount, Payment (XLM and issued assets), SetOptions and ChangeTrust, ported from stellar-core v29 with its result codes and reserves. Several transactions share a ledger in core's order (one per source account, within the per-ledger limits, classic phase first, each phase shuffled by the transaction-set hash, every fee charged before any applies, the checks core repeats at apply, refunds last), and each gets core's PRNG seed for the session's own transaction set.".into(),
+        "Not modelled: fee-bump and muxed fee sources, surge pricing (the inclusion fee charged is the base fee per operation), core's parallel Soroban clusters (a ledger's Soroban phase is one cluster), and the other classic operations (path payments, offers, liquidity pools, claimable balances, clawback, creating sponsorships).".into(),
         "The fork reads RPC's latest ledger lazily; drift below lists any entry that changed after the fork ledger.".into(),
     ]
 }
@@ -840,6 +1071,7 @@ pub fn build_report(s: &Session, ctx: ReportContext<'_>) -> Report {
     let mut by_type = BTreeMap::new();
     let mut entries = vec![];
     let mut accounts = vec![];
+    let mut trustlines = vec![];
     for d in &diff {
         *by_type.entry(d.key.name().to_string()).or_insert(0) += 1;
         entries.push(DiffReport {
@@ -852,16 +1084,34 @@ pub fn build_report(s: &Session, ctx: ReportContext<'_>) -> Report {
         });
         if let LedgerKey::Account(a) = &d.key {
             let acct = |e: &Option<StoredEntry>| match e {
-                Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::Account(a), .. }, .. }) => Some((a.balance, a.seq_num.0)),
+                Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::Account(a), .. }, .. }) => Some(a.clone()),
                 _ => None,
             };
             let (b, a2) = (acct(&d.before), acct(&d.after));
             accounts.push(AccountChange {
                 account: a.account_id.to_string(),
-                balance_before: b.map(|x| x.0),
-                balance_after: a2.map(|x| x.0),
-                seq_before: b.map(|x| x.1),
-                seq_after: a2.map(|x| x.1),
+                balance_before: b.as_ref().map(|x| x.balance),
+                balance_after: a2.as_ref().map(|x| x.balance),
+                seq_before: b.as_ref().map(|x| x.seq_num.0),
+                seq_after: a2.as_ref().map(|x| x.seq_num.0),
+                changes: account_changes(b.as_ref(), a2.as_ref()),
+                overridden: d.overridden,
+            });
+        }
+        if let LedgerKey::Trustline(t) = &d.key {
+            let line = |e: &Option<StoredEntry>| match e {
+                Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::Trustline(l), .. }, .. }) => Some(l.clone()),
+                _ => None,
+            };
+            let (b, a2) = (line(&d.before), line(&d.after));
+            trustlines.push(TrustlineChange {
+                account: t.account_id.to_string(),
+                asset: crate::classic::trustline_asset_text(&t.asset),
+                balance_before: b.as_ref().map(|l| l.balance),
+                balance_after: a2.as_ref().map(|l| l.balance),
+                limit_before: b.as_ref().map(|l| l.limit),
+                limit_after: a2.as_ref().map(|l| l.limit),
+                authorized: a2.as_ref().map(|l| l.flags & 1 != 0),
                 overridden: d.overridden,
             });
         }
@@ -901,6 +1151,7 @@ pub fn build_report(s: &Session, ctx: ReportContext<'_>) -> Report {
             by_payer: by_payer.into_values().collect(),
         },
         accounts,
+        trustlines,
         diff: DiffSummary { total: diff.len(), by_type, entries },
         drift: DriftReport {
             fork_ledger: fork.ledger_seq,
@@ -1091,7 +1342,54 @@ pub(crate) fn tx_report(t: &TxRecord) -> TxReport {
         contract_errors: t.contract_errors(),
         signers: t.signers.iter().map(|m| format!("{} for {} (weight {})", m.key, m.account, m.weight)).collect(),
         replayable: t.replayable.clone(),
+        operations: t.op_results.iter().map(op_result_name).collect(),
+        application_order: t.application_order,
+        deferred: t.deferred.clone(),
+        failed_at_apply: t.failed_code.map(|c| c.as_str().to_string()),
     }
+}
+
+/// What changed on an account besides its balance and sequence number. A
+/// new account is compared with the one core's CreateAccount makes.
+fn account_changes(before: Option<&AccountEntry>, after: Option<&AccountEntry>) -> Vec<String> {
+    let Some(after) = after else { return vec![] };
+    let fresh;
+    let before = match before {
+        Some(b) => b,
+        None => {
+            fresh = new_account(after.account_id.clone(), 0, 0);
+            &fresh
+        }
+    };
+    let mut out = vec![];
+    let t = |x: &Thresholds| x.0.iter().map(u8::to_string).collect::<Vec<_>>().join("/");
+    if before.thresholds != after.thresholds {
+        out.push(format!("thresholds (master/low/medium/high) {} → {}", t(&before.thresholds), t(&after.thresholds)));
+    }
+    let weight = |a: &AccountEntry, k: &SignerKey| a.signers.iter().find(|s| s.key == *k).map(|s| s.weight);
+    for s in after.signers.iter() {
+        match weight(before, &s.key) {
+            None => out.push(format!("signer {} added (weight {})", s.key, s.weight)),
+            Some(w) if w != s.weight => out.push(format!("signer {} weight {w} → {}", s.key, s.weight)),
+            Some(_) => {}
+        }
+    }
+    for s in before.signers.iter().filter(|s| weight(after, &s.key).is_none()) {
+        out.push(format!("signer {} removed", s.key));
+    }
+    if before.home_domain != after.home_domain {
+        out.push(format!("home domain {:?} → {:?}", before.home_domain.to_string(), after.home_domain.to_string()));
+    }
+    if before.flags != after.flags {
+        out.push(format!("flags {:#x} → {:#x}", before.flags, after.flags));
+    }
+    if before.inflation_dest != after.inflation_dest {
+        out.push(format!("inflation destination {} → {}", before.inflation_dest.as_ref().map_or("none".into(), |d| d.to_string()), after.inflation_dest.as_ref().map_or("none".into(), |d| d.to_string())));
+    }
+    if before.num_sub_entries != after.num_sub_entries {
+        out.push(format!("sub-entries {} → {}", before.num_sub_entries, after.num_sub_entries));
+    }
+    out
 }
 
 fn not_run(index: usize, label: &str, step: &Step) -> StepReport {

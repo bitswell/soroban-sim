@@ -25,6 +25,7 @@ pub struct Report {
     pub overrides: Vec<OverrideReport>,
     pub fees: FeeSummary,
     pub accounts: Vec<AccountChange>,
+    pub trustlines: Vec<TrustlineChange>,
     pub diff: DiffSummary,
     pub drift: DriftReport,
     pub fetch: FetchStats,
@@ -112,6 +113,14 @@ pub struct TxReport {
     pub contract_errors: Vec<u32>,
     pub signers: Vec<String>,
     pub replayable: Vec<String>,
+    /// A classic transaction's operation results, in core's codes.
+    pub operations: Vec<String>,
+    /// Its position (from 1) in its ledger's apply order.
+    pub application_order: Option<u32>,
+    /// Why it waited for a later ledger than the one it was sent for.
+    pub deferred: Option<String>,
+    /// Included, then refused by the checks core repeats at apply: the code.
+    pub failed_at_apply: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,6 +161,23 @@ pub struct AccountChange {
     pub balance_after: Option<i64>,
     pub seq_before: Option<i64>,
     pub seq_after: Option<i64>,
+    /// Everything else that changed: signers, thresholds, home domain,
+    /// flags, sub-entries (a new account counts from core's defaults).
+    pub changes: Vec<String>,
+    pub overridden: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrustlineChange {
+    pub account: String,
+    /// `CODE:ISSUER`.
+    pub asset: String,
+    pub balance_before: Option<i64>,
+    pub balance_after: Option<i64>,
+    pub limit_before: Option<i64>,
+    pub limit_after: Option<i64>,
+    /// Whether the issuer authorized the line, after the session.
+    pub authorized: Option<bool>,
     pub overridden: bool,
 }
 
@@ -227,7 +253,7 @@ pub struct FieldComparison {
 pub fn describe_key(key: &LedgerKey) -> String {
     match key {
         LedgerKey::Account(a) => a.account_id.to_string(),
-        LedgerKey::Trustline(t) => format!("{} / {:?}", t.account_id, t.asset),
+        LedgerKey::Trustline(t) => format!("{} / {}", t.account_id, crate::classic::trustline_asset_text(&t.asset)),
         LedgerKey::ContractData(d) => {
             let durability = match d.durability {
                 ContractDataDurability::Persistent => "persistent",
@@ -364,13 +390,42 @@ impl Report {
         let _ = writeln!(m);
 
         let _ = writeln!(m, "## Accounts\n");
-        let _ = writeln!(m, "| Account | Balance before, XLM | Balance after, XLM | Sequence before → after | Overridden |\n|---|---|---|---|---|");
+        let _ = writeln!(m, "| Account | Balance before, XLM | Balance after, XLM | Sequence before → after | Other changes | Overridden |\n|---|---|---|---|---|---|");
+        let b = |v: Option<i64>| v.map(xlm).unwrap_or_else(|| "—".into());
+        let q = |v: Option<i64>| v.map(|n| n.to_string()).unwrap_or_else(|| "—".into());
         for a in &self.accounts {
-            let b = |v: Option<i64>| v.map(xlm).unwrap_or_else(|| "—".into());
-            let q = |v: Option<i64>| v.map(|n| n.to_string()).unwrap_or_else(|| "—".into());
-            let _ = writeln!(m, "| `{}` | {} | {} | {} → {} | {} |", a.account, b(a.balance_before), b(a.balance_after), q(a.seq_before), q(a.seq_after), if a.overridden { "yes" } else { "" });
+            let _ = writeln!(
+                m,
+                "| `{}` | {} | {} | {} → {} | {} | {} |",
+                a.account,
+                b(a.balance_before),
+                b(a.balance_after),
+                q(a.seq_before),
+                q(a.seq_after),
+                cell(&a.changes.join("; ")),
+                if a.overridden { "yes" } else { "" }
+            );
         }
         let _ = writeln!(m);
+        if !self.trustlines.is_empty() {
+            let _ = writeln!(m, "## Trustlines\n");
+            let _ = writeln!(m, "| Account | Asset | Balance before → after | Limit before → after | Authorized | Overridden |\n|---|---|---|---|---|---|");
+            for t in &self.trustlines {
+                let _ = writeln!(
+                    m,
+                    "| `{}` | `{}` | {} → {} | {} → {} | {} | {} |",
+                    t.account,
+                    cell(&t.asset),
+                    b(t.balance_before),
+                    b(t.balance_after),
+                    b(t.limit_before),
+                    b(t.limit_after),
+                    t.authorized.map_or("—", |x| if x { "yes" } else { "no" }),
+                    if t.overridden { "yes" } else { "" }
+                );
+            }
+            let _ = writeln!(m);
+        }
 
         let by_type: Vec<String> = self.diff.by_type.iter().map(|(k, v)| format!("{v} {k}")).collect();
         let _ = writeln!(m, "## Final diff vs the fork point ({} entries: {})\n", self.diff.total, by_type.join(", "));

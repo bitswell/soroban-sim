@@ -4,6 +4,7 @@
 //! tools and the scripts built on them rehearse unchanged. Nothing is ever
 //! submitted to the network.
 
+pub mod classic;
 pub mod differential;
 pub mod plan;
 pub mod report;

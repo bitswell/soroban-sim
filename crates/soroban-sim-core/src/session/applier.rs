@@ -1,7 +1,9 @@
-//! Applying a validated transaction the way stellar-core does: charge the fee
-//! and consume the sequence number, run the host in enforcing mode over the
-//! declared footprint and budget with a module cache, then charge rent and
-//! events against the refundable fee, commit, and refund the rest.
+//! Applying a validated Soroban transaction the way stellar-core does: run
+//! the host in enforcing mode over the declared footprint and budget with a
+//! module cache, then charge rent and events against the refundable fee and
+//! commit. The ledger close around it charges the fee and consumes the
+//! sequence number before, and credits the refund after every transaction of
+//! the ledger.
 
 use anyhow::{anyhow, Result};
 use soroban_env_host::budget::Budget;
@@ -16,7 +18,7 @@ use soroban_simulation::NetworkConfig;
 use std::collections::BTreeSet;
 
 use super::ledger::{is_temporary, ForkedLedger, StoredEntry};
-use super::validator::{bump_sequence, TxLimits, ValidTx};
+use super::validator::{TxLimits, ValidTx};
 
 /// What applying one valid transaction did.
 #[derive(Clone, Debug)]
@@ -24,6 +26,8 @@ pub struct Applied {
     pub result: std::result::Result<ScVal, String>,
     /// Fee kept after the refund.
     pub fee_charged: i64,
+    /// The unused refundable fee, credited when the ledger's transactions
+    /// have all applied.
     pub refund: i64,
     /// Rent and events: the refundable fee actually consumed.
     pub rent_fee: i64,
@@ -45,8 +49,6 @@ pub struct Applier {
     module_cache: ModuleCache,
     compile_host: Host,
     cached: BTreeSet<Hash>,
-    /// Transactions applied so far: part of each one's PRNG seed.
-    pub(super) tx_index: u32,
 }
 
 impl Applier {
@@ -56,7 +58,7 @@ impl Applier {
             Budget::try_from_configs(u64::MAX, u64::MAX, config.cpu_cost_params.clone(), config.memory_cost_params.clone())?,
         );
         let module_cache = ModuleCache::new(&compile_host)?;
-        Ok(Self { module_cache, compile_host, cached: BTreeSet::new(), tx_index: 0 })
+        Ok(Self { module_cache, compile_host, cached: BTreeSet::new() })
     }
 
     /// Wasm hashes in the module cache.
@@ -68,19 +70,20 @@ impl Applier {
         self.module_cache.clone()
     }
 
-    /// Parse every live contract code entry in `keys` into the cache. Code
-    /// uploaded in ledger N is only seen here by a later transaction, which in
-    /// a one-transaction-per-ledger session matches core adding it when N closes.
+    /// Parse every live contract code entry in `keys` into the cache, except
+    /// code written in the ledger being applied: core adds code uploaded in
+    /// ledger N to its cache only when N closes, so a later transaction of N
+    /// pays to parse it.
     pub fn cache_code(&mut self, ledger: &ForkedLedger, keys: &[LedgerKey], info: &LedgerInfo) -> Result<()> {
         for k in keys {
             let LedgerKey::ContractCode(c) = k else { continue };
             if self.cached.contains(&c.hash) {
                 continue;
             }
-            let Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::ContractCode(code), .. }, live_until }) = ledger.get(k)? else {
+            let Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::ContractCode(code), last_modified_ledger_seq, .. }, live_until }) = ledger.get(k)? else {
                 continue;
             };
-            if live_until.is_some_and(|l| l >= info.sequence_number) {
+            if last_modified_ledger_seq < info.sequence_number && live_until.is_some_and(|l| l >= info.sequence_number) {
                 self.module_cache.parse_and_cache_module_simple(&self.compile_host, info.protocol_version, code.code.as_slice())?;
                 self.cached.insert(c.hash.clone());
             }
@@ -88,6 +91,9 @@ impl Applier {
         Ok(())
     }
 
+    /// Apply `tx`, whose fee is charged and sequence number consumed. `seed` is
+    /// the host's PRNG seed. The refund is computed, not credited.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply(
         &mut self,
         ledger: &ForkedLedger,
@@ -96,15 +102,10 @@ impl Applier {
         limits: &TxLimits,
         tx: &ValidTx,
         enable_diagnostics: bool,
+        seed: [u8; 32],
     ) -> Result<Applied> {
         let seq = info.sequence_number;
-        // Fee and sequence number are consumed from here on, success or not.
-        let mut account = ledger.account(&tx.source)?.ok_or_else(|| anyhow!("source account vanished"))?;
         let fee = tx.fees.charged_up_front();
-        account.balance -= fee;
-        bump_sequence(&mut account, tx.seq_num, seq, info.timestamp);
-        ledger.put_account(account, seq)?;
-
         let r = &tx.data.resources;
         let mut applied = Applied {
             result: Err(String::new()),
@@ -172,8 +173,6 @@ impl Applier {
         applied.restored = restore.len() as u32;
 
         let auth: Vec<Vec<u8>> = tx.op.auth.iter().map(|a| a.to_xdr(DEFAULT_XDR_RW_LIMITS)).collect::<Result<_, _>>()?;
-        let seed = super::prng_seed(b"apply", seq, self.tx_index);
-        self.tx_index += 1;
         let mut diagnostics = vec![];
         let res = e2e_invoke::invoke_host_function(
             &budget,
@@ -262,12 +261,7 @@ impl Applier {
             .iter()
             .map(|e| ContractEvent::from_xdr(e, Limits::none()))
             .collect::<Result<_, _>>()?;
-        // The source account may itself be in the footprint, so the refund
-        // goes onto its latest value.
         let refund = tx.fees.refundable - consumed;
-        let mut account = ledger.account(&tx.source)?.ok_or_else(|| anyhow!("source account vanished"))?;
-        account.balance += refund;
-        ledger.put_account(account, seq)?;
         applied.refund = refund;
         applied.fee_charged = fee - refund;
         applied.result = Ok(value);
@@ -276,10 +270,7 @@ impl Applier {
 
     /// A failed operation consumes no refundable resources: the whole
     /// refundable fee comes back, and the rest stays charged.
-    fn fail(&self, ledger: &ForkedLedger, tx: &ValidTx, mut applied: Applied, seq: u32, why: String) -> Result<Applied> {
-        let mut account = ledger.account(&tx.source)?.ok_or_else(|| anyhow!("source account vanished"))?;
-        account.balance += tx.fees.refundable;
-        ledger.put_account(account, seq)?;
+    fn fail(&self, _ledger: &ForkedLedger, tx: &ValidTx, mut applied: Applied, _seq: u32, why: String) -> Result<Applied> {
         applied.refund = tx.fees.refundable;
         applied.fee_charged = tx.fees.charged_up_front() - tx.fees.refundable;
         applied.rent_fee = 0;

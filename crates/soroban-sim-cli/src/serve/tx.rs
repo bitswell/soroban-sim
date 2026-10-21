@@ -1,6 +1,7 @@
 //! What the facade answers about a transaction it applied: its hash, the
-//! `TransactionResult` core would report, and a `TransactionMeta` (V4, the
-//! shape protocol-23+ RPC serves) rebuilt from the session's record and the
+//! `TransactionResult` core would report (with every operation's result for
+//! a classic transaction), and a `TransactionMeta` (V4, the shape
+//! protocol-23+ RPC serves) rebuilt from the session's record and the
 //! entries it touched, before and after.
 
 use anyhow::Result;
@@ -61,8 +62,11 @@ pub fn inner_transaction(envelope: &TransactionEnvelope) -> Transaction {
 
 /// A one-line description of what a transaction does, for logs and reports.
 pub fn describe(tx: &Transaction, network_id: [u8; 32]) -> String {
-    let [op] = tx.operations.as_slice() else { return format!("transaction with {} operations", tx.operations.len()) };
-    let OperationBody::InvokeHostFunction(ihf) = &op.body else { return format!("{} operation", op.body.name()) };
+    let [op] = tx.operations.as_slice() else {
+        let ops: Vec<String> = tx.operations.iter().map(describe_classic).collect();
+        return format!("{} operations: {}", tx.operations.len(), ops.join("; "));
+    };
+    let OperationBody::InvokeHostFunction(ihf) = &op.body else { return describe_classic(op) };
     match &ihf.host_function {
         HostFunction::InvokeContract(a) => format!("{}.{}", a.contract_address, a.function_name.to_utf8_string_lossy()),
         HostFunction::UploadContractWasm(code) => {
@@ -71,6 +75,41 @@ pub fn describe(tx: &Transaction, network_id: [u8; 32]) -> String {
         }
         HostFunction::CreateContract(a) => create_description(&a.contract_id_preimage, network_id),
         HostFunction::CreateContractV2(a) => create_description(&a.contract_id_preimage, network_id),
+    }
+}
+
+/// A classic operation in a few words.
+fn describe_classic(op: &soroban_env_host::xdr::Operation) -> String {
+    use soroban_env_host::xdr::Asset;
+    let asset = |a: &Asset| match a {
+        Asset::Native => "XLM".to_string(),
+        Asset::CreditAlphanum4(x) => format!("{}:{}", String::from_utf8_lossy(&x.asset_code.0).trim_end_matches('\0'), x.issuer),
+        Asset::CreditAlphanum12(x) => format!("{}:{}", String::from_utf8_lossy(&x.asset_code.0).trim_end_matches('\0'), x.issuer),
+    };
+    let what = match &op.body {
+        OperationBody::CreateAccount(o) => format!("create account {} with {} XLM", o.destination, soroban_sim_core::session::xlm(o.starting_balance)),
+        OperationBody::Payment(o) => format!("pay {} {} to {}", soroban_sim_core::session::xlm(o.amount), asset(&o.asset), soroban_sim_core::session::muxed_account_id(&o.destination)),
+        OperationBody::SetOptions(o) => {
+            let mut parts = vec![];
+            if let Some(s) = &o.signer {
+                parts.push(format!("signer {} weight {}", s.key, s.weight));
+            }
+            for (name, v) in [("master weight", o.master_weight), ("low", o.low_threshold), ("medium", o.med_threshold), ("high", o.high_threshold)] {
+                if let Some(v) = v {
+                    parts.push(format!("{name} {v}"));
+                }
+            }
+            if let Some(d) = &o.home_domain {
+                parts.push(format!("home domain {:?}", d.to_string()));
+            }
+            format!("set options ({})", parts.join(", "))
+        }
+        OperationBody::ChangeTrust(o) => format!("change trust (limit {})", soroban_sim_core::session::xlm(o.limit)),
+        other => format!("{} operation", other.name()),
+    };
+    match &op.source_account {
+        Some(s) => format!("{what} [from {}]", soroban_sim_core::session::muxed_account_id(s)),
+        None => what,
     }
 }
 
@@ -86,17 +125,26 @@ fn create_description(preimage: &soroban_env_host::xdr::ContractIdPreimage, netw
 }
 
 /// The `TransactionResult` core reports for `record`. A rejected envelope
-/// gets the result code `sendTransaction` returns as `errorResultXdr`.
+/// gets the result code `sendTransaction` returns as `errorResultXdr`; a
+/// classic transaction carries every operation's result.
 pub fn result(record: &TxRecord, fee_bid: i64) -> Result<TransactionResult> {
     let ihf = |r: InvokeHostFunctionResult| OperationResult::OpInner(OperationResultTr::InvokeHostFunction(r));
+    let classic = !record.op_results.is_empty();
+    let ops = || -> Result<_> { Ok(record.op_results.clone().try_into()?) };
     let (fee_charged, result) = match &record.status {
+        TxStatus::Applied { .. } if classic => (record.fee_charged, TransactionResultResult::TxSuccess(ops()?)),
         TxStatus::Applied { value } => {
             let preimage = InvokeHostFunctionSuccessPreImage { return_value: value.clone(), events: record.events.clone().try_into()? };
             let hash: [u8; 32] = Sha256::digest(preimage.to_xdr(Limits::none())?).into();
             (record.fee_charged, TransactionResultResult::TxSuccess(vec![ihf(InvokeHostFunctionResult::Success(Hash(hash)))].try_into()?))
         }
-        TxStatus::Failed { reason } => (record.fee_charged, TransactionResultResult::TxFailed(vec![ihf(failure(reason))].try_into()?)),
-        TxStatus::Rejected { code, .. } => (fee_bid, rejection(*code)?),
+        TxStatus::Failed { reason } => match record.failed_code {
+            // Included, then refused by the checks core repeats at apply.
+            Some(code) => (record.fee_charged, rejection(code, &record.op_results)?),
+            None if classic => (record.fee_charged, TransactionResultResult::TxFailed(ops()?)),
+            None => (record.fee_charged, TransactionResultResult::TxFailed(vec![ihf(failure(reason))].try_into()?)),
+        },
+        TxStatus::Rejected { code, .. } => (fee_bid, rejection(*code, &record.op_results)?),
     };
     Ok(TransactionResult { fee_charged, result, ext: TransactionResultExt::V0 })
 }
@@ -114,10 +162,11 @@ fn failure(reason: &str) -> InvokeHostFunctionResult {
     }
 }
 
-fn rejection(code: TxCode) -> Result<TransactionResultResult> {
+fn rejection(code: TxCode, op_results: &[OperationResult]) -> Result<TransactionResultResult> {
     use TransactionResultResult as R;
     Ok(match code {
         TxCode::Malformed => R::TxMalformed,
+        TxCode::MissingOperation => R::TxMissingOperation,
         TxCode::NotSupported => R::TxNotSupported,
         TxCode::TooEarly => R::TxTooEarly,
         TxCode::TooLate => R::TxTooLate,
@@ -125,11 +174,14 @@ fn rejection(code: TxCode) -> Result<TransactionResultResult> {
         TxCode::NoAccount => R::TxNoAccount,
         TxCode::BadSeq => R::TxBadSeq,
         TxCode::BadAuth => R::TxBadAuth,
+        TxCode::OpBadAuth | TxCode::OpFailed if !op_results.is_empty() => R::TxFailed(op_results.to_vec().try_into()?),
         TxCode::OpBadAuth => R::TxFailed(vec![OperationResult::OpBadAuth].try_into()?),
+        TxCode::OpFailed => R::TxFailed(Default::default()),
         TxCode::BadAuthExtra => R::TxBadAuthExtra,
         TxCode::InsufficientFee => R::TxInsufficientFee,
         TxCode::InsufficientBalance => R::TxInsufficientBalance,
         TxCode::SorobanInvalid => R::TxSorobanInvalid,
+        TxCode::FrozenKeyAccessed => R::TxFrozenKeyAccessed,
     })
 }
 
@@ -141,10 +193,13 @@ pub struct Touched {
 }
 
 /// A `TransactionMeta` V4 for an applied (or failed) transaction. The source
-/// account's fee, sequence number and refund are `tx_changes_before`; the
-/// operation's footprint changes, data and TTL entries alike, are the
-/// operation's changes. This is a reconstruction from before and after
-/// values, not core's exact change list.
+/// account's fee, sequence number and refund are `tx_changes_before`. A
+/// Soroban operation's changes are its footprint's, data and TTL entries
+/// alike; a classic transaction's operations each get the changes the
+/// session recorded for them (the source account's aside). This is a
+/// reconstruction from before and after values, not core's exact change
+/// list, and in a ledger of several transactions "before" is the ledger's
+/// start.
 pub fn meta(record: &TxRecord, source: &Touched, footprint: &[Touched], apply_ledger: u32) -> Result<TransactionMeta> {
     let applied = record.status.is_applied();
     let mut op_changes = vec![];
@@ -153,6 +208,22 @@ pub fn meta(record: &TxRecord, source: &Touched, footprint: &[Touched], apply_le
             op_changes.extend(changes(t, apply_ledger)?);
         }
     }
+    let operations: Vec<OperationMetaV2> = if !applied {
+        vec![]
+    } else if !record.op_results.is_empty() {
+        let mut ops = vec![];
+        for changed in &record.op_changes {
+            let mut list = vec![];
+            for c in changed.iter().filter(|c| c.key != source.key) {
+                list.extend(changes(&Touched { key: c.key.clone(), before: c.before.clone(), after: c.after.clone() }, apply_ledger)?);
+            }
+            ops.push(OperationMetaV2 { ext: ExtensionPoint::V0, changes: LedgerEntryChanges(list.try_into()?), events: Default::default() });
+        }
+        ops
+    } else {
+        vec![OperationMetaV2 { ext: ExtensionPoint::V0, changes: LedgerEntryChanges(op_changes.try_into()?), events: record.events.clone().try_into()? }]
+    };
+    let soroban = record.op_results.is_empty();
     let return_value = match &record.status {
         TxStatus::Applied { value } => Some(value.clone()),
         _ => None,
@@ -161,18 +232,9 @@ pub fn meta(record: &TxRecord, source: &Touched, footprint: &[Touched], apply_le
     Ok(TransactionMeta::V4(TransactionMetaV4 {
         ext: ExtensionPoint::V0,
         tx_changes_before: LedgerEntryChanges(changes(source, apply_ledger)?.try_into()?),
-        operations: if applied {
-            vec![OperationMetaV2 {
-                ext: ExtensionPoint::V0,
-                changes: LedgerEntryChanges(op_changes.try_into()?),
-                events: record.events.clone().try_into()?,
-            }]
-            .try_into()?
-        } else {
-            Default::default()
-        },
+        operations: operations.try_into()?,
         tx_changes_after: LedgerEntryChanges(Default::default()),
-        soroban_meta: Some(SorobanTransactionMetaV2 {
+        soroban_meta: soroban.then_some(SorobanTransactionMetaV2 {
             ext: SorobanTransactionMetaExt::V1(SorobanTransactionMetaExtV1 {
                 ext: ExtensionPoint::V0,
                 total_non_refundable_resource_fee_charged: record.fees.non_refundable,
