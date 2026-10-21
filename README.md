@@ -88,6 +88,7 @@ pnpm run build:fixture-contract
 pnpm run test:native
 pnpm run build:component
 pnpm run build:jco
+pnpm run test:ts
 pnpm run test:wasmtime
 pnpm run check:ts
 pnpm run test:browser
@@ -187,12 +188,23 @@ cargo run --release -p soroban-sim-cli -- replay fetch --network mainnet --min-l
 cargo run --release -p soroban-sim-cli -- replay run fixtures/replay/*.json.gz --report fidelity
 ```
 
+The web demo runs the same session in the browser. The component exports it as
+the WIT `network-session` resource, and its log and fork cache live in
+IndexedDB, so a reload resumes it. A service worker serves it at a virtual RPC
+URL, so stellar-sdk and the demo's wallet pre-submit flow submit into the fork
+unchanged. The panel shows a step timeline with each step's fees, auth and
+ledger changes, opens any step in the time-travel debugger, and ends with the
+report. Signing defaults to throwaway keys, and a real wallet signing into a
+session gets a replay warning. `soroban-sim serve` and the browser share one
+request handler, `crates/soroban-sim-facade`. See `docs/browser-session.md`.
+
 ## Docs
 
 - `docs/architecture.md` — design and state-loading plan.
 - `docs/session.md` — network sessions: engine, plan format, CLI, report.
 - `docs/rpc-facade.md` — `soroban-sim serve`: the RPC facade, its `fork_*` methods, and rehearsing existing scripts.
 - `docs/replay.md` — `soroban-sim replay`: replaying real network transactions to check the session's fidelity.
+- `docs/browser-session.md` — network sessions in the browser: the WIT resource, the IndexedDB log, the virtual RPC, the timeline and replay safety.
 - `docs/feasibility.md` — Milestone 0 proof and blocker inventory.
 - `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.
 - `docs/upstream.md` — upstream pins and contribution notes.

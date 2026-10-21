@@ -21,6 +21,8 @@ use std::collections::BTreeSet;
 // exactly as stellar-core's; without it, the shared recording-mode build.
 #[cfg(feature = "exact-apply")]
 use soroban_env_host_apply as host;
+/// Whether transactions apply with the exact-metering host build.
+pub const EXACT_APPLY: bool = cfg!(feature = "exact-apply");
 #[cfg(not(feature = "exact-apply"))]
 use soroban_env_host as host;
 use host::budget::Budget;

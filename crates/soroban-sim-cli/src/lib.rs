@@ -9,11 +9,12 @@ pub mod differential;
 pub mod meta;
 pub mod plan;
 pub mod replay;
-pub mod report;
 pub mod rpc;
 pub mod run;
 pub mod serve;
 pub mod snapshot;
 
+/// The session report, shared with the RPC facade and the browser session.
+pub use soroban_sim_facade::report;
 /// The soroban-env-host release this build links (see the workspace pin).
-pub const ENV_HOST_VERSION: &str = "29.0.2";
+pub use soroban_sim_facade::ENV_HOST_VERSION;

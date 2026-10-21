@@ -3,6 +3,8 @@ wit_bindgen::generate!({
     world: "simulator",
 });
 
+mod session;
+
 use soroban_env_host::xdr::{
     AccountId, HostFunction, LedgerEntry as XdrLedgerEntry, LedgerKey, Limits, ReadXdr,
     TransactionEnvelope, WriteXdr,
@@ -179,6 +181,14 @@ fn fixed_32(bytes: Vec<u8>, name: &str) -> anyhow::Result<[u8; 32]> {
         .map_err(|v: Vec<u8>| anyhow::anyhow!("{name} must be 32 bytes, got {}", v.len()))
 }
 
+impl exports::theahaco::soroban_sim::network_session::Guest for Component {
+    type Session = session::NetworkSession;
+}
+
+// Wasm only: interface exports have `#` in their symbol names, which the
+// macOS linker's exported-symbols list reads as a comment, so a native cdylib
+// (built for `cargo test`) cannot export them. Native tests call the impls.
+#[cfg(target_arch = "wasm32")]
 export!(Component);
 
 #[cfg(test)]

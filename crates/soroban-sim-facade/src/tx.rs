@@ -6,15 +6,53 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use soroban_env_host::xdr::{
-    ExtensionPoint, Hash, HostFunction, LedgerEntry, LedgerEntryChange, LedgerEntryChanges, LedgerEntryData,
-    LedgerEntryExt, LedgerKey, LedgerKeyTtl, Limits, OperationBody, OperationMetaV2, SorobanTransactionMetaExt,
-    SorobanTransactionMetaExtV1, SorobanTransactionMetaV2, Transaction, TransactionEnvelope, TransactionMeta,
-    TransactionMetaV4, TransactionResult, TtlEntry, WriteXdr,
+    ContractId, ContractIdPreimage, ContractIdPreimageFromAddress, DecoratedSignature, ExtensionPoint, Hash, HashIdPreimage,
+    HashIdPreimageContractId, HostFunction, LedgerEntry, LedgerEntryChange, LedgerEntryChanges, LedgerEntryData,
+    LedgerEntryExt, LedgerKey, LedgerKeyTtl, Limits, OperationBody, OperationMetaV2, ScAddress, SorobanCredentials,
+    SorobanTransactionMetaExt, SorobanTransactionMetaExtV1, SorobanTransactionMetaV2, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionMeta, TransactionMetaV4, TransactionResult, TtlEntry, Uint256, WriteXdr,
 };
-use soroban_sim_core::session::{v0_as_v1, StoredEntry, TxRecord, TxStatus};
+use soroban_sim_core::session::{account_key, muxed_account_id, v0_as_v1, StoredEntry, TxRecord, TxStatus};
 
 use crate::report::hex;
-use crate::run::contract_id;
+
+/// The contract id `deployer` gets for `salt` on the network `network_id`.
+pub fn contract_id(network_id: [u8; 32], deployer: ScAddress, salt: [u8; 32]) -> Result<ScAddress> {
+    let pre = HashIdPreimage::ContractId(HashIdPreimageContractId {
+        network_id: Hash(network_id),
+        contract_id_preimage: ContractIdPreimage::Address(ContractIdPreimageFromAddress { address: deployer, salt: Uint256(salt) }),
+    });
+    Ok(ScAddress::Contract(ContractId(Hash(Sha256::digest(pre.to_xdr(Limits::none())?).into()))))
+}
+
+/// Every ledger key a transaction names up front: its source and operation
+/// sources, the accounts of its authorization entries, and its footprint. A
+/// session reads them before validating, in one base fetch.
+pub fn envelope_keys(tx: &Transaction) -> Vec<LedgerKey> {
+    let mut keys = vec![account_key(&muxed_account_id(&tx.source_account))];
+    for op in tx.operations.iter() {
+        if let Some(s) = &op.source_account {
+            keys.push(account_key(&muxed_account_id(s)));
+        }
+        if let OperationBody::InvokeHostFunction(ihf) = &op.body {
+            for a in ihf.auth.iter() {
+                let address = match &a.credentials {
+                    SorobanCredentials::SourceAccount => continue,
+                    SorobanCredentials::Address(c) | SorobanCredentials::AddressV2(c) => &c.address,
+                    SorobanCredentials::AddressWithDelegates(c) => &c.address_credentials.address,
+                };
+                if let ScAddress::Account(id) = address {
+                    keys.push(account_key(id));
+                }
+            }
+        }
+    }
+    if let TransactionExt::V1(data) = &tx.ext {
+        keys.extend(data.resources.footprint.read_only.iter().cloned());
+        keys.extend(data.resources.footprint.read_write.iter().cloned());
+    }
+    keys
+}
 
 /// The transaction an envelope carries (the inner one of a fee bump).
 pub fn inner_transaction(envelope: &TransactionEnvelope) -> Transaction {
@@ -23,6 +61,17 @@ pub fn inner_transaction(envelope: &TransactionEnvelope) -> Transaction {
         TransactionEnvelope::TxV0(e) => v0_as_v1(&e.tx),
         TransactionEnvelope::TxFeeBump(e) => match &e.tx.inner_tx {
             soroban_env_host::xdr::FeeBumpTransactionInnerTx::Tx(i) => i.tx.clone(),
+        },
+    }
+}
+
+/// The signatures over [`inner_transaction`] (the inner ones of a fee bump).
+pub fn inner_signatures(envelope: &TransactionEnvelope) -> &[DecoratedSignature] {
+    match envelope {
+        TransactionEnvelope::Tx(e) => &e.signatures,
+        TransactionEnvelope::TxV0(e) => &e.signatures,
+        TransactionEnvelope::TxFeeBump(e) => match &e.tx.inner_tx {
+            soroban_env_host::xdr::FeeBumpTransactionInnerTx::Tx(i) => &i.signatures,
         },
     }
 }

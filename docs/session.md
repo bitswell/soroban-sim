@@ -275,5 +275,7 @@ bumps; a session cannot.
 
 The same session also runs behind an RPC facade, `soroban-sim serve --fork …`,
 so existing scripts and stock tools rehearse themselves unchanged
-([`docs/rpc-facade.md`](rpc-facade.md)). Later phases (see #23): a browser
-session resource and classic operations.
+([`docs/rpc-facade.md`](rpc-facade.md)), and in the browser, where the web
+demo serves it to stellar-sdk at a virtual RPC URL
+([`docs/browser-session.md`](browser-session.md)). Later phases (see #23):
+classic operations.

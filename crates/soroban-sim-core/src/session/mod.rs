@@ -24,7 +24,7 @@ mod ledger;
 mod signers;
 mod validator;
 
-pub use applier::{Applied, Applier, Failure, Metrics, OpFailure};
+pub use applier::{Applied, Applier, Failure, Metrics, OpFailure, EXACT_APPLY};
 pub use ledger::{
     account_key, ed25519_account_id, new_account, strkey_ed25519, Change, DiffEntry, EntryState,
     FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerCheckpoint, LedgerSource, LedgerStats,

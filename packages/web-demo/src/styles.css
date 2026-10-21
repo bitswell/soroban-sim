@@ -2521,3 +2521,294 @@ body {
   color: var(--ink-faint);
   padding: 8px 0;
 }
+
+/* ---- network session ---------------------------------------------------- */
+.session {
+  order: 6;
+  margin-top: 14px;
+}
+.session-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr);
+  gap: 14px;
+}
+@media (max-width: 1080px) {
+  .session-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.session-rpc-url {
+  margin-top: 6px;
+}
+.session-saved {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.session-saved:empty {
+  display: none;
+}
+.session-saved-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--grid);
+  background: var(--panel-2);
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.session-saved-row span {
+  margin-right: auto;
+  color: var(--ink-dim);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.session-saved-row button,
+.session-actions button,
+.session-report-actions button,
+.session-step-actions button {
+  appearance: none;
+  border: 1px solid var(--grid);
+  background: var(--panel-2);
+  color: var(--ink);
+  font: 12px var(--mono);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.session-saved-row button:hover,
+.session-actions button:hover:not(:disabled),
+.session-report-actions button:hover,
+.session-step-actions button:hover {
+  border-color: var(--known);
+}
+.session-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.session-progress {
+  margin-top: 10px;
+  color: var(--pending);
+  font-size: 12px;
+}
+.session-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+.session-facts div {
+  display: contents;
+}
+.session-facts dt {
+  color: var(--ink-faint);
+}
+.session-facts dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.session-facts code {
+  font-size: 11.5px;
+}
+.session-mainnet-warning,
+.replay-warning,
+.session-replayable {
+  border: 1px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, var(--panel-2));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--danger) 70%, transparent);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 9px 12px;
+  margin: 0 0 12px;
+}
+.session-mainnet-warning b,
+.replay-warning b,
+.session-replayable b {
+  color: var(--danger);
+}
+.replay-warning label {
+  display: block;
+  margin-top: 6px;
+}
+.session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.session-inline {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.session-inline input,
+.session-inline select {
+  border: 1px solid var(--grid);
+  background: var(--panel-2);
+  color: var(--ink);
+  font: 12px var(--mono);
+  padding: 4px 6px;
+}
+.session-inline input {
+  width: 72px;
+}
+.session-envelope {
+  border-top: 1px solid var(--grid);
+  padding-top: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--known);
+}
+.session-envelope .xdr-input {
+  min-height: 90px;
+  margin-top: 8px;
+}
+.session-plan {
+  border-top: 1px solid var(--grid);
+  padding-top: 4px;
+}
+.session-plan label.load-contract {
+  display: block;
+  text-align: center;
+}
+.submit-target {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+.session-timeline,
+.session-report {
+  margin-top: 14px;
+}
+.session-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.session-step {
+  border: 1px solid var(--grid);
+  background: var(--panel-2);
+}
+.session-step.reverted {
+  opacity: 0.55;
+}
+.session-step-head {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  display: grid;
+  grid-template-columns: 2.4em 7.5em minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: baseline;
+  text-align: left;
+  font: 12px var(--mono);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.session-step-head .idx {
+  color: var(--ink-faint);
+}
+.session-step-head .kind {
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10.5px;
+}
+.session-step-head .name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.session-step-head .ledger {
+  color: var(--ink-faint);
+}
+.session-outcome {
+  border: 1px solid var(--grid);
+  padding: 1px 6px;
+  font-size: 11px;
+}
+.session-outcome.applied,
+.session-outcome.ok {
+  color: var(--verify);
+  border-color: color-mix(in srgb, var(--verify) 55%, var(--grid));
+}
+.session-outcome.failed,
+.session-outcome.rejected,
+.session-outcome.refused {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--grid));
+}
+.session-step-body {
+  border-top: 1px solid var(--grid);
+  padding: 10px;
+  display: grid;
+  gap: 10px;
+  font-size: 12px;
+}
+.session-step-body h4 {
+  margin: 0 0 4px;
+  font: 500 11px var(--display);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.session-kv {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px 12px;
+}
+.session-kv div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px dotted var(--grid);
+}
+.session-kv span {
+  color: var(--ink-faint);
+}
+.session-list {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--ink-dim);
+}
+.session-list li {
+  overflow-wrap: anywhere;
+  margin-bottom: 2px;
+}
+.session-list b {
+  color: var(--ink);
+  font-weight: 500;
+}
+.session-step-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.session-report-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.session-report-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  font-size: 12px;
+}
+.session-report-body section {
+  border: 1px solid var(--grid);
+  background: var(--panel-2);
+  padding: 10px;
+  min-width: 0;
+}
