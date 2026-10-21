@@ -133,7 +133,9 @@ operation's result, the fee charged and every entry's after-image.
 1. **The set.** Each envelope is validated against the ledger as it was
    before; a refused one gets its result code. Core's queue holds one
    transaction per source account, so a second one waits for the next ledger.
-   The per-ledger limits come from the ledger: the header's `maxTxSetSize`
+   As core's queue does, the fee bids are totalled per fee source in submission
+   order, and the transaction that takes its fee source past its balance above
+   the reserve is refused with `txINSUFFICIENT_BALANCE`. The per-ledger limits come from the ledger: the header's `maxTxSetSize`
    (classic operations; a snapshot saved from an RPC fork keeps it, and one
    without it has no classic limit) and the `ConfigSetting` entries for the Soroban phase
    (transactions, instructions, transaction bytes, disk reads and writes). The
