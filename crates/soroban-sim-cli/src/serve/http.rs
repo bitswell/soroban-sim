@@ -1,12 +1,14 @@
 //! The facade's HTTP side: JSON-RPC 2.0 over HTTP POST (single calls and
 //! batches), answered one request at a time on the thread that owns the
 //! session. A session is one ordered history, so serving calls in arrival
-//! order is the model, not a limitation.
+//! order is the model, not a limitation. Only `application/json` POSTs are
+//! answered, and any request with an `Origin` header is refused, so a web
+//! page cannot reach the session.
 
 use anyhow::{anyhow, Result};
 use std::io::Read;
 use std::net::{SocketAddr, ToSocketAddrs};
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server};
 
 use super::Facade;
 
@@ -26,6 +28,8 @@ pub fn bind(host: &str, port: u16) -> Result<(Server, SocketAddr)> {
 pub fn serve(facade: &mut Facade, server: &Server) {
     for mut request in server.incoming_requests() {
         let response = match request.method() {
+            _ if has_header(&request, "Origin") => text(403, "browser requests are refused: the facade serves command-line and SDK clients"),
+            Method::Post if !is_json(&request) => text(415, "POST JSON-RPC 2.0 requests with Content-Type: application/json"),
             Method::Post => {
                 let mut body = vec![];
                 match request.as_reader().take(MAX_BODY + 1).read_to_end(&mut body) {
@@ -51,6 +55,16 @@ pub fn serve(facade: &mut Facade, server: &Server) {
             eprintln!("warning: answering a request: {e}");
         }
     }
+}
+
+fn has_header(request: &Request, name: &'static str) -> bool {
+    request.headers().iter().any(|h| h.field.equiv(name))
+}
+
+fn is_json(request: &Request) -> bool {
+    request.headers().iter().any(|h| {
+        h.field.equiv("Content-Type") && h.value.as_str().split(';').next().is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"))
+    })
 }
 
 fn header(name: &str, value: &str) -> Header {

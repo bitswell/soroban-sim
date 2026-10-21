@@ -657,7 +657,7 @@ impl Facade {
         }
         let mut m = self.ledger_window();
         m.insert("events".into(), json!(events));
-        m.insert("cursor".into(), json!(last.unwrap_or_else(|| event_id(self.closed.0.min(end.saturating_sub(1)) + 1, 0))));
+        m.insert("cursor".into(), json!(last.unwrap_or_else(|| ledger_cursor(self.closed.0.min(end.saturating_sub(1)) + 1))));
         Ok(Value::Object(m))
     }
 
@@ -979,6 +979,12 @@ fn event_id(ledger: u32, index: u32) -> String {
     format!("{toid:019}-{index:010}")
 }
 
+/// stellar-rpc's cursor for the start of a ledger: the TOID of (ledger,
+/// transaction 0, operation 0), below every event id the ledger can hold.
+fn ledger_cursor(ledger: u32) -> String {
+    format!("{:019}-{:010}", (ledger as i64) << 32, 0)
+}
+
 fn event_json(e: &ContractEvent, t: &StoredTx, hash: &[u8; 32], id: &str) -> Result<Value> {
     let ContractEventBody::V0(body) = &e.body;
     Ok(json!({
@@ -1240,5 +1246,7 @@ mod tests {
         assert!(event_id(10, 9) < event_id(11, 0));
         assert!(event_id(10, 1) < event_id(10, 2));
         assert_eq!(event_id(1, 0), "0000000004294971392-0000000000");
+        assert!(ledger_cursor(11) > event_id(10, 9));
+        assert!(ledger_cursor(11) < event_id(11, 0));
     }
 }

@@ -432,6 +432,20 @@ fn events_are_served_by_filter_and_cursor() {
     assert_eq!(rest["events"].as_array().unwrap().len(), 1);
     assert_ne!(rest["events"][0]["id"], page["events"][0]["id"]);
     assert!(f.call("getEvents", json!({ "filters": [] })).is_err(), "a start ledger or cursor is required");
+
+    // An empty page's cursor picks up the next transaction's events.
+    let latest = ok(&mut f, "getLatestLedger", json!({}))["sequence"].as_u64().unwrap();
+    let empty = ok(&mut f, "getEvents", json!({ "startLedger": latest + 1, "filters": [{ "type": "contract" }] }));
+    assert!(empty["events"].as_array().unwrap().is_empty(), "{empty}");
+    let bounded = ok(&mut f, "getEvents", json!({ "startLedger": FORK_LEDGER, "endLedger": latest + 1, "filters": [{ "type": "contract", "topics": [[symbol("nope"), "**"]] }] }));
+    assert!(bounded["events"].as_array().unwrap().is_empty(), "{bounded}");
+    let next = run(&mut f, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), transfer(9));
+    for cursor in [&empty["cursor"], &bounded["cursor"]] {
+        let after = ok(&mut f, "getEvents", json!({ "filters": [{ "type": "contract" }], "pagination": { "cursor": cursor } }));
+        let after = after["events"].as_array().unwrap();
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after[0]["ledger"], next["ledger"]);
+    }
 }
 
 #[test]
@@ -462,4 +476,15 @@ fn json_rpc_over_http() {
     assert_eq!(parse["error"]["code"], RpcError::PARSE);
     let about = ureq::get(&url).call().unwrap().into_string().unwrap();
     assert!(about.contains("soroban-sim RPC facade"), "{about}");
+    let status = |r: std::result::Result<ureq::Response, ureq::Error>| match r {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("{e}"),
+    };
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"fork_setBalance","params":{}}"#;
+    assert_eq!(status(ureq::post(&url).set("content-type", "text/plain").send_string(body)), 415, "a simple cross-origin POST is refused");
+    assert_eq!(status(ureq::post(&url).send_string(body)), 415, "no Content-Type is refused");
+    assert_eq!(status(ureq::post(&url).set("content-type", "application/json; charset=utf-8").set("origin", "http://evil.example").send_string(body)), 403);
+    assert_eq!(status(ureq::get(&url).set("origin", "http://evil.example").call()), 403);
+    assert_eq!(status(ureq::post(&url).set("content-type", "Application/JSON; charset=utf-8").send_string(r#"{"jsonrpc":"2.0","id":1,"method":"getHealth"}"#)), 200);
 }

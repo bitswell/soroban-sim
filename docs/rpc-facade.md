@@ -63,6 +63,11 @@ transaction and per `fork_*` call.
 - **Raw JSON-RPC clients** (for example `perch-deploy --rpc-url`). They get
   stellar-rpc's request and response shapes, with base64 XDR.
 
+Browsers are not clients. A POST must carry `Content-Type: application/json`
+(otherwise `415`), and any request with an `Origin` header gets `403`. A web
+page open while the facade runs therefore cannot call `fork_*` or
+`sendTransaction`, even through DNS rebinding. `GET /` describes the fork.
+
 ## Methods
 
 The stellar-rpc methods:
