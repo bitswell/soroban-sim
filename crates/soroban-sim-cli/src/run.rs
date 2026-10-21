@@ -1206,6 +1206,7 @@ pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> 
             };
             let mut options = options.clone();
             options.network_passphrase = actual.clone();
+            options.max_tx_set_size = Some(latest.header.max_tx_set_size);
             let source = rpc.clone();
             Ok(Forked {
                 network_name: name,

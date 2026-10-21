@@ -243,7 +243,17 @@ impl Session {
 
     /// Close one ledger with `selected`: core's apply order, fees first,
     /// apply-time validation, refunds last. Returns (submission index, record).
+    /// An error leaves the session as it was before the ledger.
     fn close_with(&mut self, selected: Vec<Candidate<'_>>) -> Result<Vec<(usize, TxRecord)>> {
+        let checkpoint = self.checkpoint();
+        let closed = self.apply_set(selected);
+        if closed.is_err() {
+            self.restore(&checkpoint);
+        }
+        closed
+    }
+
+    fn apply_set(&mut self, selected: Vec<Candidate<'_>>) -> Result<Vec<(usize, TxRecord)>> {
         let seq = self.info.sequence_number;
         let set_hash = self.tx_set_hash(&selected)?;
         let (mut order, soroban): (Vec<_>, Vec<_>) = selected.into_iter().partition(|c| !c.valid.is_soroban());
