@@ -12,12 +12,13 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22.1"
+serde_json = "1.0"
 soroban-env-host = { workspace = true, features = ["recording_mode"] }
 soroban-sim-core = { path = "../soroban-sim-core" }
+soroban-sim-facade = { path = "../soroban-sim-facade" }
 wit-bindgen.workspace = true
 
 [dev-dependencies]
-# Native-test-only: parse the committed parity fixture JSON to drive the WIT
-# request mapping end-to-end. Both are already in the lockfile transitively.
-base64 = "0.22.1"
-serde_json = "1.0"
+ed25519-dalek.workspace = true
+sha2.workspace = true
