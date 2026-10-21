@@ -157,10 +157,25 @@ See `docs/session.md` for the design, the plan format, the signer adapters
 (classic, OZ `oz_rule_ids`/`addr_oz_v1`, CAP-71 delegates, secp256r1, WebAuthn)
 and what the rehearsal does and does not model.
 
+`soroban-sim serve` puts the same session behind a Stellar RPC facade, so stock
+`stellar`, stellar-sdk and the scripts built on them rehearse against a fork
+unchanged, with `fork_*` methods for signer substitution, balances, the clock,
+snapshots and the report:
+
+```sh
+cargo run -p soroban-sim-cli -- serve --fork mainnet --report rehearsal
+export STELLAR_RPC_URL=http://127.0.0.1:8000
+export STELLAR_NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015"
+STELLAR_SIGN_WITH_KEY=<throwaway> ./your-deploy-script.sh
+```
+
+See `docs/rpc-facade.md`.
+
 ## Docs
 
 - `docs/architecture.md` — design and state-loading plan.
 - `docs/session.md` — network sessions: engine, plan format, CLI, report.
+- `docs/rpc-facade.md` — `soroban-sim serve`: the RPC facade, its `fork_*` methods, and rehearsing existing scripts.
 - `docs/feasibility.md` — Milestone 0 proof and blocker inventory.
 - `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.
 - `docs/upstream.md` — upstream pins and contribution notes.

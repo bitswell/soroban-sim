@@ -5,9 +5,9 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use soroban_env_host::xdr::{
-    AccountId, Asset, ContractExecutable, ContractId, ContractIdPreimage, ContractIdPreimageFromAddress,
-    CreateContractArgs, CreateContractArgsV2, Hash, HashIdPreimage, HashIdPreimageContractId, HostFunction,
-    InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerKey, LedgerKeyContractCode, Limits, Memo,
+    AccountId, Asset, ContractExecutable, ContractIdPreimage, ContractIdPreimageFromAddress,
+    CreateContractArgs, CreateContractArgsV2, Hash, HostFunction,
+    InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerHeader, LedgerKey, LedgerKeyContractCode, Limits, Memo,
     Preconditions, ReadXdr, ScAddress, ScString, ScSymbol, ScVal, TransactionEnvelope, Uint256, WriteXdr,
 };
 use soroban_sim_core::session::{
@@ -26,12 +26,13 @@ use crate::plan::{
 use crate::report::*;
 use crate::rpc::{RpcClient, RpcSource};
 use crate::snapshot::SnapshotFile;
-use crate::{differential, ENV_HOST_VERSION};
+use crate::differential;
 
 pub const MAINNET_RPC: &str = "https://mainnet.sorobanrpc.com";
 pub const TESTNET_RPC: &str = "https://soroban-testnet.stellar.org";
-pub const MAINNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
-pub const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
+pub use soroban_sim_facade::report::{build_report, session_fidelity, ReportContext, SAFETY_NOTE};
+pub use soroban_sim_facade::tx::contract_id;
+pub use soroban_sim_facade::{MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
 
 /// Where the fork comes from.
 pub enum Base {
@@ -141,7 +142,7 @@ impl Runner {
         if let Some(a) = plan.options.auth_expiration_ledgers {
             options.auth_expiration_ledgers = a;
         }
-        let Forked { network_name, passphrase, rpc, description: base_description, fresh } = fork_base(base, &options)?;
+        let Forked { network_name, passphrase, rpc, description: base_description, fresh, .. } = fork_base(base, &options)?;
         let session = fresh().context("forking the network")?;
 
         let mut keys = BTreeMap::new();
@@ -774,126 +775,37 @@ impl Runner {
     // --- report ---
 
     fn report(&self) -> Report {
-        let s = &self.session;
-        let fork = s.fork_point();
-        let log = s.log();
-        let mut by_payer: BTreeMap<String, PayerFees> = BTreeMap::new();
-        for t in log {
-            let Some(src) = &t.source else { continue };
-            if matches!(t.status, TxStatus::Rejected { .. }) {
-                continue;
-            }
-            let p = by_payer.entry(src.to_string()).or_insert_with(|| PayerFees { account: src.to_string(), transactions: 0, charged: 0, refunded: 0, max_fee_bid: 0 });
-            p.transactions += 1;
-            p.charged += t.fee_charged;
-            p.refunded += t.refund;
-            p.max_fee_bid = p.max_fee_bid.max(t.fees.bid);
-        }
-        let diff = s.ledger().diff();
-        let mut by_type = BTreeMap::new();
-        let mut entries = vec![];
-        let mut accounts = vec![];
-        for d in &diff {
-            *by_type.entry(d.key.name().to_string()).or_insert(0) += 1;
-            entries.push(DiffReport {
-                key_type: d.key.name().into(),
-                key: describe_key(&d.key),
-                change: d.change().as_str().into(),
-                overridden: d.overridden,
-                live_until_before: d.before.as_ref().and_then(|e| e.live_until),
-                live_until_after: d.after.as_ref().and_then(|e| e.live_until),
-            });
-            if let LedgerKey::Account(a) = &d.key {
-                let acct = |e: &Option<StoredEntry>| match e {
-                    Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::Account(a), .. }, .. }) => Some((a.balance, a.seq_num.0)),
-                    _ => None,
-                };
-                let (b, a2) = (acct(&d.before), acct(&d.after));
-                accounts.push(AccountChange {
-                    account: a.account_id.to_string(),
-                    balance_before: b.map(|x| x.0),
-                    balance_after: a2.map(|x| x.0),
-                    seq_before: b.map(|x| x.1),
-                    seq_after: a2.map(|x| x.1),
-                    overridden: d.overridden,
-                });
-            }
-        }
-        let fetches = s.ledger().fetches();
-        let stats = s.ledger().stats();
-        let drift = s.ledger().drift();
-        let replayable: Vec<String> = log.iter().flat_map(|t| t.replayable.iter().map(move |r| format!("{}: {r}", t.label))).collect();
-        let mut failures = self.failures.clone();
-        if !replayable.is_empty() && self.passphrase == MAINNET_PASSPHRASE {
-            failures.push(format!("{} signature(s) are valid on mainnet (see Safety)", replayable.len()));
-        }
-        let info = s.ledger_info();
-        Report {
-            format: REPORT_FORMAT,
-            plan: PlanInfo { path: self.plan_path.display().to_string(), name: self.plan.name.clone(), description: self.plan.description.clone() },
-            network: NetworkInfo { name: self.network_name.clone(), passphrase: self.passphrase.clone(), base: self.base_description.clone() },
-            fork: ForkInfo { ledger: fork.ledger_seq, close_time: fork.close_time, protocol_version: fork.protocol_version, base_fee: fork.base_fee, base_reserve: fork.base_reserve },
-            host: HostInfo { protocol_version: host_protocol(), soroban_env_host: ENV_HOST_VERSION },
-            fidelity: vec![
-                "Host-exact: contracts run in the same soroban-env-host as the network's protocol, in enforcing mode, with a module cache, and every auth signature is verified.".into(),
-                "Envelope-approximate: the transaction layer (sequence numbers, preconditions, signature weights and thresholds, fee bid, resource fee and limits, balance above reserve, fee charged before apply, rent and refund) is a port of stellar-core's checks, not core itself.".into(),
-                "Not modelled: classic operations (funding is an override), fee-bump and muxed fee sources, surge pricing, several transactions per ledger, per-ledger limits, and core's PRNG seed.".into(),
-                "The fork reads RPC's latest ledger lazily; drift below lists any entry that changed after the fork ledger.".into(),
-            ],
-            end: LedgerPoint { ledger: info.sequence_number, close_time: info.timestamp },
-            passed: failures.is_empty(),
-            failures,
-            steps: self.steps.clone(),
-            overrides: s
-                .ledger()
-                .overrides()
-                .iter()
-                .map(|o| OverrideReport { kind: o.kind.as_str().into(), entry: describe_key(&o.key), label: o.label.clone(), detail: o.detail.clone(), at_ledger: o.at_ledger })
-                .collect(),
-            fees: FeeSummary {
-                transactions: log.len(),
-                applied: log.iter().filter(|t| matches!(t.status, TxStatus::Applied { .. })).count(),
-                failed: log.iter().filter(|t| matches!(t.status, TxStatus::Failed { .. })).count(),
-                rejected: log.iter().filter(|t| matches!(t.status, TxStatus::Rejected { .. })).count(),
-                total_charged: log.iter().map(|t| t.fee_charged).sum(),
-                total_refunded: log.iter().map(|t| t.refund).sum(),
-                by_payer: by_payer.into_values().collect(),
-            },
-            accounts,
-            diff: DiffSummary { total: diff.len(), by_type, entries },
-            drift: DriftReport {
-                fork_ledger: fork.ledger_seq,
-                served_at_min: fetches.iter().map(|f| f.served_at_ledger).min(),
-                served_at_max: fetches.iter().map(|f| f.served_at_ledger).max(),
-                modified_after_fork: drift.iter().map(|f| DriftEntry { key: describe_key(&f.key), last_modified: f.last_modified, served_at: f.served_at_ledger }).collect(),
-            },
-            fetch: FetchStats {
+        let replayable = self.session.log().iter().flat_map(|t| t.replayable.iter().map(move |r| format!("{}: {r}", t.label))).collect();
+        build_report(
+            &self.session,
+            ReportContext {
+                plan: PlanInfo { path: self.plan_path.display().to_string(), name: self.plan.name.clone(), description: self.plan.description.clone() },
+                network: NetworkInfo { name: self.network_name.clone(), passphrase: self.passphrase.clone(), base: self.base_description.clone() },
+                fidelity: session_fidelity(),
+                steps: self.steps.clone(),
+                failures: self.failures.clone(),
+                replayable,
+                safety_note: SAFETY_NOTE.into(),
+                differential: self.differentials.clone(),
                 rpc_calls: self.rpc.as_ref().map_or(0, |r| r.calls()),
                 throttled_retries: self.rpc.as_ref().map_or(0, |r| r.throttled()),
-                base_fetch_calls: stats.fetch_calls,
-                keys_fetched: stats.keys_fetched,
-                keys_present: fetches.iter().filter(|f| f.found).count() as u32,
-                local_answers: stats.local_answers,
             },
-            safety: Safety {
-                replayable,
-                note: "The session never submits anything, and rehearsal envelopes keep the real network id. Throwaway keys stand in for every real signer, so these envelopes are not valid on the real network unless a signer the network already has signed them.".into(),
-            },
-            differential: self.differentials.clone(),
-        }
+        )
     }
 }
 
 /// A forked base: how to open a session on it (again, for `fresh_fork` views).
-struct Forked {
-    network_name: String,
-    passphrase: String,
-    rpc: Option<Rc<RpcClient>>,
-    description: String,
-    fresh: Box<dyn Fn() -> Result<Session>>,
+pub(crate) struct Forked {
+    pub(crate) network_name: String,
+    pub(crate) passphrase: String,
+    pub(crate) rpc: Option<Rc<RpcClient>>,
+    pub(crate) description: String,
+    /// The base's latest ledger header when it forked (RPC bases only).
+    pub(crate) header: Option<LedgerHeader>,
+    pub(crate) fresh: Box<dyn Fn() -> Result<Session>>,
 }
 
-fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> {
+pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> {
     match base {
         Base::Rpc { name, url, passphrase } => {
             let rpc = Rc::new(RpcClient::new(&url));
@@ -922,6 +834,7 @@ fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> {
                 passphrase: actual,
                 description: RpcSource(rpc.clone()).describe(),
                 rpc: Some(rpc),
+                header: Some(latest.header),
                 fresh: Box::new(move || Session::new(Box::new(RpcSource(source.clone())), fork.clone(), options.clone())),
             })
         }
@@ -934,6 +847,7 @@ fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> {
                 passphrase: snap.network_passphrase.clone(),
                 description: format!("snapshot {} ({} entries)", path.display(), snap.entries.len()),
                 rpc: None,
+                header: None,
                 fresh: Box::new(move || Session::new(Box::new(snap.source()?), snap.fork_point(), options.clone())),
             })
         }
@@ -998,14 +912,6 @@ fn key_material(name: &str, spec: &KeySpec) -> Result<KeyMaterial> {
     })
 }
 
-pub fn contract_id(network_id: [u8; 32], deployer: ScAddress, salt: [u8; 32]) -> Result<ScAddress> {
-    let pre = HashIdPreimage::ContractId(HashIdPreimageContractId {
-        network_id: Hash(network_id),
-        contract_id_preimage: ContractIdPreimage::Address(ContractIdPreimageFromAddress { address: deployer, salt: Uint256(salt) }),
-    });
-    Ok(ScAddress::Contract(ContractId(Hash(Sha256::digest(pre.to_xdr(Limits::none())?).into()))))
-}
-
 /// The text a saved value or `expect.equals` compares: an address's strkey, a
 /// string's or symbol's text, a number, hex bytes, or ScVal JSON.
 pub fn render(v: &ScVal) -> String {
@@ -1023,33 +929,6 @@ pub fn render(v: &ScVal) -> String {
         | ScVal::Bytes(_) => show_scval(v),
         ScVal::Void => String::new(),
         other => serde_json::to_string(other).unwrap_or_else(|_| show_scval(other)),
-    }
-}
-
-fn tx_report(t: &TxRecord) -> TxReport {
-    TxReport {
-        hash: hex(&t.hash),
-        source: t.source.as_ref().map(|s| s.to_string()).unwrap_or_default(),
-        fee_bid: t.fees.bid,
-        resource_fee: t.fees.resource_fee,
-        non_refundable_fee: t.fees.non_refundable,
-        refundable_fee: t.fees.refundable,
-        inclusion_fee: t.fees.inclusion,
-        fee_charged: t.fee_charged,
-        refunded: t.refund,
-        rent_fee: t.rent_fee,
-        events_fee: t.events_fee,
-        cpu_insns: t.cpu_insns,
-        declared_cpu_insns: t.declared_insns,
-        mem_bytes: t.mem_bytes,
-        write_bytes: t.write_bytes,
-        declared_write_bytes: t.declared_write_bytes,
-        entries_written: t.entries_written,
-        restored: t.restored,
-        events: t.events.len(),
-        contract_errors: t.contract_errors(),
-        signers: t.signers.iter().map(|m| format!("{} for {} (weight {})", m.key, m.account, m.weight)).collect(),
-        replayable: t.replayable.clone(),
     }
 }
 
@@ -1088,7 +967,7 @@ fn expected_text(e: Option<&Expect>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-fn progress_line(r: &StepReport) -> String {
+pub(crate) fn progress_line(r: &StepReport) -> String {
     let mark = if r.passed { "✓" } else { "✗" };
     let fee = r.tx.as_ref().filter(|_| r.outcome != "rejected").map(|t| format!(" | fee {} XLM (refund {}) | cpu {}/{}", soroban_sim_core::session::xlm(t.fee_charged), soroban_sim_core::session::xlm(t.refunded), t.cpu_insns, t.declared_cpu_insns)).unwrap_or_default();
     let detail = soroban_sim_core::session::clip(&r.detail, 200);

@@ -16,8 +16,14 @@ use crate::exports::theahaco::soroban_sim::network_session::{
 
 enum State {
     /// Not opened yet: opening reads the network's settings from the base.
-    Pending { fork: ForkPoint, options: SessionOptions, config: FacadeConfig },
+    Pending(Box<Pending>),
     Open(Box<Facade>),
+}
+
+struct Pending {
+    fork: ForkPoint,
+    options: SessionOptions,
+    config: FacadeConfig,
 }
 
 pub struct NetworkSession {
@@ -53,7 +59,7 @@ impl GuestSession for NetworkSession {
         };
         Self {
             base: DeferredBase::new(&config.base_description),
-            state: RefCell::new(State::Pending { fork, options, config: facade }),
+            state: RefCell::new(State::Pending(Box::new(Pending { fork, options, config: facade }))),
             counters: RefCell::new((0, 0)),
         }
     }
@@ -150,8 +156,8 @@ impl NetworkSession {
     /// may need base entries; a call that does is undone.
     fn answer(&self, body: &[u8]) -> Result<Reply, String> {
         let mut state = self.state.borrow_mut();
-        if let State::Pending { fork, options, config } = &*state {
-            match open(&self.base, fork.clone(), options.clone(), config.clone()).map_err(|e| format!("{e:#}"))? {
+        if let State::Pending(p) = &*state {
+            match open(&self.base, p.fork.clone(), p.options.clone(), p.config.clone()).map_err(|e| format!("{e:#}"))? {
                 Opened::Ready(mut facade) => {
                     let (calls, throttled) = *self.counters.borrow();
                     facade.set_rpc_counters(calls, throttled);
