@@ -122,7 +122,9 @@ the report. `--allow-real-signers` applies it anyway, and the report still
 fails. On other networks the envelope is applied and listed. The check covers
 envelope signatures and G-account authorization-entry signatures, including
 CAP-71 delegates, against the signers on the base ledger (the
-[session's safety check](session.md#safety)).
+[session's safety check](session.md#safety)). It runs whatever the verdict,
+so it also covers envelopes the session rejects, v0 and fee-bump envelopes
+included.
 
 ## Fidelity and limits
 
