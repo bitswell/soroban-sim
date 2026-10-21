@@ -40,6 +40,7 @@ transaction and per `fork_*` call.
 | Option | Meaning |
 |---|---|
 | `--fork mainnet\|testnet\|URL` | The network to fork. |
+| `--fork-mode head\|checkpoint`, `--fork-ledger N` | Read the network lazily at its latest ledger (default), or pin one ledger and roll every read back to it ([`session.md`, "Fork modes"](session.md#fork-modes)). |
 | `--network-passphrase P` | Checked against the RPC's `getNetwork`. |
 | `--snapshot FILE` | Fork a snapshot file instead (offline). |
 | `--host H`, `--port N` | Where to listen (default `127.0.0.1:8000`). Off loopback, anyone who can reach it can read the fork and call `fork_*`. |
@@ -118,7 +119,8 @@ CAP-71 delegates, against the signers on the base ledger (the
 
 ## Fidelity and limits
 
-The session's fidelity applies: host-exact, envelope-approximate. On top of it:
+The session's fidelity applies (see [`session.md`](session.md#fidelity-and-limits)
+and [`replay.md`](replay.md)). On top of it:
 
 - Simulation runs in the next ledger, the one a transaction sent now applies
   in. stellar-rpc simulates in its latest closed ledger.
@@ -127,8 +129,8 @@ The session's fidelity applies: host-exact, envelope-approximate. On top of it:
   list. Fee events are not emitted.
 - Not served: `getLedgers`, `getTransactions`, `xdrFormat: json`,
   `ExtendFootprintTtl` and `RestoreFootprint` (archived entries in an
-  `InvokeHostFunction` footprint restore automatically), fee-bump and v0
-  envelopes, classic operations, and friendbot (use `fork_setBalance`).
+  `InvokeHostFunction` footprint restore automatically), v0 envelopes,
+  classic operations, and friendbot (use `fork_setBalance`).
 - History before the fork is not there. `getTransaction` knows only session
   transactions, and `getEvents` starts at the fork.
 - The facade answers one request at a time. A session is one ordered history.

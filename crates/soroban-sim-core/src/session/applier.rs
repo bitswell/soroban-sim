@@ -424,9 +424,11 @@ impl Applier {
             let key = LedgerKey::from_xdr(&change.encoded_key, Limits::none())?;
             let new_ttl = change.ttl_change.as_ref().map(|t| t.new_live_until_ledger);
             if change.read_only {
-                if let (Some(ttl), Some(e)) = (new_ttl, ledger.get(&key)?) {
-                    if Some(ttl) != e.live_until {
-                        ledger.put(key, Some(StoredEntry { live_until: Some(ttl), ..e }));
+                // Like core, a read-only entry's TTL only ever grows (an
+                // expired temporary entry reads as absent and reports 0).
+                if let (Some(t), Some(e)) = (&change.ttl_change, ledger.get(&key)?) {
+                    if t.new_live_until_ledger > t.old_live_until_ledger && Some(t.new_live_until_ledger) != e.live_until {
+                        ledger.put(key, Some(StoredEntry { live_until: Some(t.new_live_until_ledger), ..e }));
                     }
                 }
                 continue;

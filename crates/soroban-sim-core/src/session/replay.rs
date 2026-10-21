@@ -224,6 +224,13 @@ pub fn replay(tx: &ReplayTx) -> Result<ReplayOutcome> {
         }
         let (kind, e, o) = match (&want, &got) {
             (Some(w), Some(g)) if w.entry == g.entry => ("ttl", format!("{:?}", w.live_until), format!("{:?}", g.live_until)),
+            (Some(w), Some(g)) if later_sequence_bump(&w.entry, &g.entry, &tx.envelope) => {
+                ("later sequence bump", account_seq(&w.entry).to_string(), account_seq(&g.entry).to_string())
+            }
+            (Some(w), Some(g)) => {
+                let (e, o) = first_difference(&format!("{:?}", w.entry), &format!("{:?}", g.entry));
+                ("entry", e, o)
+            }
             _ => ("entry", stored_text(&want), stored_text(&got)),
         };
         mismatch(kind, Some(key_text(&key)), e, o);
@@ -506,6 +513,61 @@ fn first_event_diff(real: &[ContractEvent], ours: &[ContractEvent]) -> String {
 
 fn clip_dbg(v: &impl std::fmt::Debug) -> String {
     super::clip(&format!("{v:?}"), 300)
+}
+
+/// Whether the network's after-image of the source account differs from the
+/// session's only in a sequence number ABOVE this transaction's: in a
+/// parallel phase core bumps every Soroban transaction's sequence before any
+/// executes, so a transaction whose footprint holds its own source sees the
+/// bumps of later same-source transactions in its ledger. A session applies
+/// one transaction per ledger and cannot show that.
+fn later_sequence_bump(want: &LedgerEntry, got: &LedgerEntry, envelope: &TransactionEnvelope) -> bool {
+    use soroban_env_host::xdr::{AccountEntryExt, AccountEntryExtensionV1Ext, AccountEntryExtensionV2Ext};
+    let (LedgerEntryData::Account(w), LedgerEntryData::Account(g)) = (&want.data, &got.data) else { return false };
+    let tx_seq = match envelope {
+        TransactionEnvelope::Tx(e) => e.tx.seq_num.0,
+        TransactionEnvelope::TxFeeBump(e) => {
+            let FeeBumpTransactionInnerTx::Tx(inner) = &e.tx.inner_tx;
+            inner.tx.seq_num.0
+        }
+        TransactionEnvelope::TxV0(e) => e.tx.seq_num.0,
+    };
+    if super::envelope_source(envelope).as_ref() != Some(&w.account_id) || w.seq_num.0 <= tx_seq {
+        return false;
+    }
+    let strip = |a: &soroban_env_host::xdr::AccountEntry| {
+        let mut a = a.clone();
+        a.seq_num.0 = 0;
+        if let AccountEntryExt::V1(v1) = &mut a.ext {
+            if let AccountEntryExtensionV1Ext::V2(v2) = &mut v1.ext {
+                if let AccountEntryExtensionV2Ext::V3(v3) = &mut v2.ext {
+                    v3.seq_ledger = 0;
+                    v3.seq_time.0 = 0;
+                }
+            }
+        }
+        a
+    };
+    strip(w) == strip(g) && want.ext == got.ext
+}
+
+fn account_seq(e: &LedgerEntry) -> i64 {
+    match &e.data {
+        LedgerEntryData::Account(a) => a.seq_num.0,
+        _ => 0,
+    }
+}
+
+/// Both renderings around where they first differ.
+fn first_difference(a: &str, b: &str) -> (String, String) {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+    let window = |s: &[char]| {
+        let start = at.saturating_sub(120).min(s.len());
+        let end = (at + 200).min(s.len());
+        format!("…{}…", s[start..end].iter().collect::<String>())
+    };
+    (window(&a), window(&b))
 }
 
 fn opt_scval(v: &Option<ScVal>) -> String {

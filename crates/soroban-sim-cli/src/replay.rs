@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::path::Path;
 
-use crate::meta::{is_soroban, prng_seed, tx_set_members, v2, ChangeIndex, Pos};
+use crate::meta::{is_soroban, parallel_soroban_phase, prng_seed, ttl_key, tx_set_members, v2, ChangeIndex, ParallelLayout, Phase, Pos};
 use crate::rpc::RpcClient;
 
 pub const FIXTURE_FORMAT: &str = "soroban-sim-replay/1";
@@ -35,14 +35,22 @@ pub struct ReplayFixture {
     pub network_passphrase: String,
     /// The RPC it was read from.
     pub source: String,
-    /// The first and last ledger the sample comes from.
-    pub ledgers: [u32; 2],
-    /// Soroban transactions in those ledgers, of which `transactions` is a
-    /// stratified sample.
-    pub soroban_transactions_seen: usize,
+    /// The ledger windows sampled, one per `fetch`.
+    pub segments: Vec<Segment>,
     /// Every distinct ledger entry the pre-states use (`LedgerEntry` XDR).
     pub entries: Vec<String>,
     pub transactions: Vec<FixtureTx>,
+}
+
+/// One fetched window of ledgers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Segment {
+    /// The first and last ledger.
+    pub ledgers: [u32; 2],
+    /// Soroban transactions in those ledgers.
+    pub soroban_transactions_seen: usize,
+    /// How many of them the fixture keeps (a stratified sample).
+    pub sampled: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +107,31 @@ impl ReplayFixture {
         std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
     }
 
+    /// Add another fixture's segments and transactions (same network),
+    /// sharing ledger entries and skipping transactions already here.
+    pub fn merge(&mut self, other: ReplayFixture) -> Result<()> {
+        if other.network_passphrase != self.network_passphrase {
+            bail!("cannot merge a {:?} fixture into a {:?} one", other.network_passphrase, self.network_passphrase);
+        }
+        let mut pooled: HashMap<String, usize> = self.entries.iter().cloned().enumerate().map(|(i, e)| (e, i)).collect();
+        let have: BTreeSet<String> = self.transactions.iter().map(|t| t.hash.clone()).collect();
+        for mut t in other.transactions {
+            if have.contains(&t.hash) {
+                continue;
+            }
+            for (i, _) in t.pre_state.iter_mut() {
+                let e = other.entries.get(*i).ok_or_else(|| anyhow!("{}: entry {i} out of range", t.hash))?;
+                *i = *pooled.entry(e.clone()).or_insert_with(|| {
+                    self.entries.push(e.clone());
+                    self.entries.len() - 1
+                });
+            }
+            self.transactions.push(t);
+        }
+        self.segments.extend(other.segments);
+        Ok(())
+    }
+
     /// The fixture's transactions as core replay inputs.
     pub fn replay_txs(&self) -> Result<Vec<ReplayTx>> {
         let entries: Vec<LedgerEntry> =
@@ -138,6 +171,10 @@ impl ReplayFixture {
 pub struct FetchOptions {
     /// How many ledgers to sample from, ending at the latest.
     pub ledgers: u32,
+    /// Wait until at least this many ledgers have closed since the
+    /// state-size window last changed (it changes every 64 on mainnet and
+    /// testnet), so a fetch right after a change still gets a full sample.
+    pub min_ledgers: u32,
     pub max_transactions: usize,
     /// At most this many transactions per (call, outcome, auth kind) group;
     /// rare kinds (smart-account auth, SAC calls, restores, uploads) get four
@@ -150,6 +187,8 @@ pub struct FetchOptions {
 struct Candidate {
     ledger: u32,
     index: u32,
+    /// Whether its ledger ran the Soroban phase in parallel stages.
+    parallel: bool,
     hash: [u8; 32],
     group: String,
     rare: bool,
@@ -179,10 +218,17 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
     // sample period at ledger close and is in no transaction's meta. RPC only
     // serves its latest value, so the sample stays inside the current period.
     let window_key = config_key(ConfigSettingId::LiveSorobanStateSizeWindow);
-    let head = rpc.ledger_entries(std::slice::from_ref(&window_key))?;
-    let window = head.entries.first().cloned().ok_or_else(|| anyhow!("the network has no state-size window config entry"))?;
+    let (window, latest) = loop {
+        let head = rpc.ledger_entries(std::slice::from_ref(&window_key))?;
+        let window = head.entries.first().cloned().ok_or_else(|| anyhow!("the network has no state-size window config entry"))?;
+        let since = head.served_at_ledger.saturating_sub(window.entry.last_modified_ledger_seq);
+        if since >= opts.min_ledgers.min(63) {
+            break (window, head.served_at_ledger);
+        }
+        say(format!("{since} ledgers since the state-size window changed; waiting for {}", opts.min_ledgers));
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    };
     let window_changed = window.entry.last_modified_ledger_seq;
-    let latest = head.served_at_ledger;
     let start = (window_changed + 1).max(latest.saturating_sub(opts.ledgers.max(1) - 1));
     if start > latest {
         bail!("no ledger closed since the state-size window last changed at {window_changed}; try again in a few seconds");
@@ -195,6 +241,7 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
     // later than any transaction that needs it.
     let mut interest: BTreeSet<LedgerKey> = config_keys().into_iter().collect();
     let mut index = ChangeIndex::default();
+    let mut layouts: HashMap<u32, ParallelLayout> = HashMap::new();
     let mut candidates = vec![];
     let mut seen = 0usize;
     let mut next = start;
@@ -210,6 +257,8 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
             if contents_hash != header.scp_value.tx_set_hash.0 {
                 bail!("ledger {}: the transaction set does not hash to the header's", l.sequence);
             }
+            let parallel = parallel_soroban_phase(&m.tx_set);
+            layouts.insert(l.sequence, ParallelLayout::of(m, network_id)?);
             for (i, t) in m.tx_processing.iter().enumerate() {
                 let hash = t.result.transaction_hash.0;
                 let member = members.get(&hash).ok_or_else(|| anyhow!("ledger {}: transaction {} is not in the set", l.sequence, hex(&hash)))?;
@@ -228,6 +277,7 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
                 candidates.push(Candidate {
                     ledger: l.sequence,
                     index: i as u32,
+                    parallel,
                     hash,
                     group,
                     rare,
@@ -258,11 +308,11 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
     // change after the window then supplies the before-image instead.
     let mut need_head: BTreeSet<LedgerKey> = BTreeSet::new();
     for c in &chosen {
-        let pos = Pos::apply(c.ledger, c.index);
+        let pos = Pos::executing(c.ledger, c.index, c.parallel);
         for k in c.keys.iter().chain(config_keys().iter()) {
             let contract = matches!(k, LedgerKey::ContractData(_) | LedgerKey::ContractCode(_));
             // A contract entry needs its TTL too, which the window may not decide.
-            if index.value_before(k, pos).is_none() || (contract && index.live_until_before(k, pos)?.is_none()) {
+            if index.value_before(k, pos).is_none() || (contract && ttl_seen(&index, &layouts, k, c)?.is_none()) {
                 need_head.insert(k.clone());
             }
         }
@@ -299,7 +349,8 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
     let mut pooled: HashMap<String, usize> = HashMap::new();
     let mut transactions = vec![];
     for c in &chosen {
-        let pos = Pos::apply(c.ledger, c.index);
+        let pos = Pos::executing(c.ledger, c.index, c.parallel);
+        let source = envelope_source(&c.envelope).map(|s| account_key(&s));
         let mut pre_state = vec![];
         let mut keys: BTreeSet<&LedgerKey> = c.keys.iter().collect();
         let configs = config_keys();
@@ -318,9 +369,16 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
                     h.map(|e| e.entry.clone())
                 }
             };
-            let Some(entry) = entry else { continue };
+            let Some(mut entry) = entry else { continue };
+            // In a parallel phase every sequence bump precedes every
+            // execution, this transaction's own included; the session bumps
+            // the source itself, so it starts from the source as the bump
+            // found it.
+            if c.parallel && Some(k) == source.as_ref() {
+                unbump_sequence(&mut entry, &c.meta, k)?;
+            }
             let live_until = if matches!(k, LedgerKey::ContractData(_) | LedgerKey::ContractCode(_)) {
-                match index.live_until_before(k, pos)? {
+                match ttl_seen(&index, &layouts, k, c)? {
                     Some(t) => t,
                     None => head.get(k).and_then(|e| e.live_until),
                 }
@@ -358,8 +416,7 @@ pub fn fetch(rpc: &RpcClient, passphrase: &str, opts: &FetchOptions) -> Result<R
         format: FIXTURE_FORMAT.into(),
         network_passphrase: passphrase.into(),
         source: rpc.url.clone(),
-        ledgers: [start, latest],
-        soroban_transactions_seen: seen,
+        segments: vec![Segment { ledgers: [start, latest], soroban_transactions_seen: seen, sampled: transactions.len() }],
         entries: pool,
         transactions,
     })
@@ -385,7 +442,23 @@ fn filtered(m: &soroban_env_host::xdr::LedgerCloseMetaV2, interest: &BTreeSet<Le
         Ok(kept.try_into()?)
     };
     let mut out = m.clone();
-    out.tx_set = Default::default();
+    // Keep only the phases' shape: whether the Soroban phase is parallel.
+    let soroban_env_host::xdr::GeneralizedTransactionSet::V1(set) = &m.tx_set;
+    let phases: Vec<soroban_env_host::xdr::TransactionPhase> = set
+        .phases
+        .iter()
+        .map(|p| match p {
+            soroban_env_host::xdr::TransactionPhase::V0(_) => soroban_env_host::xdr::TransactionPhase::V0(Default::default()),
+            soroban_env_host::xdr::TransactionPhase::V1(c) => soroban_env_host::xdr::TransactionPhase::V1(soroban_env_host::xdr::ParallelTxsComponent {
+                base_fee: c.base_fee,
+                execution_stages: Default::default(),
+            }),
+        })
+        .collect();
+    out.tx_set = soroban_env_host::xdr::GeneralizedTransactionSet::V1(soroban_env_host::xdr::TransactionSetV1 {
+        previous_ledger_hash: set.previous_ledger_hash.clone(),
+        phases: phases.try_into()?,
+    });
     out.scp_info = Default::default();
     out.evicted_keys = Default::default();
     let mut txs = vec![];
@@ -559,6 +632,70 @@ fn sample(candidates: Vec<Candidate>, opts: &FetchOptions) -> Vec<Candidate> {
     out
 }
 
+/// The TTL of contract entry `data_key` as candidate `c` saw it, if the
+/// window decides it. In a parallel phase a read-only TTL bump by an earlier
+/// transaction of the same stage is deferred (CAP-63): the candidate only
+/// sees it once a transaction of their shared cluster, after the bump and up
+/// to the candidate, writes the entry; and a stage's read-only bumps merge by
+/// maximum.
+fn ttl_seen(index: &ChangeIndex, layouts: &HashMap<u32, ParallelLayout>, data_key: &LedgerKey, c: &Candidate) -> Result<Option<Option<u32>>> {
+    let changes = index.changes_of(&ttl_key(data_key)?);
+    let ttl = |e: &Option<LedgerEntry>| match e.as_ref().map(|e| &e.data) {
+        Some(soroban_env_host::xdr::LedgerEntryData::Ttl(t)) => Some(t.live_until_ledger_seq),
+        _ => None,
+    };
+    let target = Pos::executing(c.ledger, c.index, c.parallel);
+    let mut seen: Option<Option<u32>> = None;
+    for ch in changes {
+        if seen.is_none() {
+            seen = Some(ttl(&ch.before));
+        }
+        if ch.pos >= target {
+            break;
+        }
+        let read_only_bump = ch.pos.phase == Phase::SorobanApply && layouts.get(&ch.pos.ledger).is_some_and(|l| l.is_read_only_bump(ch.pos.index, data_key));
+        if ch.pos.ledger == c.ledger && ch.pos.phase == Phase::SorobanApply {
+            if let Some(l) = layouts.get(&c.ledger) {
+                if !l.ttl_change_visible(ch.pos.index, c.index, data_key) {
+                    continue;
+                }
+            }
+        }
+        let after = ttl(&ch.after);
+        seen = Some(if read_only_bump { seen.flatten().max(after) } else { after });
+    }
+    Ok(seen)
+}
+
+/// The source account with the sequence number (and the ledger and time of
+/// it) from before this transaction's own bump in its `tx_changes_before`.
+fn unbump_sequence(entry: &mut LedgerEntry, meta: &TransactionMeta, key: &LedgerKey) -> Result<()> {
+    use soroban_env_host::xdr::{AccountEntryExt, AccountEntryExtensionV1Ext, AccountEntryExtensionV2Ext, LedgerEntryChange, LedgerEntryData};
+    let TransactionMeta::V4(m) = meta else { return Ok(()) };
+    let own = m.tx_changes_before.iter().find_map(|c| match c {
+        LedgerEntryChange::State(e) if soroban_sim_core::ledger_entry_to_ledger_key(e).ok().as_ref() == Some(key) => Some(e.clone()),
+        _ => None,
+    });
+    let (Some(LedgerEntry { data: LedgerEntryData::Account(own), .. }), LedgerEntryData::Account(a)) = (own, &mut entry.data) else { return Ok(()) };
+    a.seq_num = own.seq_num;
+    let v3 = |a: &AccountEntryExt| match a {
+        AccountEntryExt::V1(v1) => match &v1.ext {
+            AccountEntryExtensionV1Ext::V2(v2) => match &v2.ext {
+                AccountEntryExtensionV2Ext::V3(v3) => Some(v3.clone()),
+                AccountEntryExtensionV2Ext::V0 => None,
+            },
+            AccountEntryExtensionV1Ext::V0 => None,
+        },
+        AccountEntryExt::V0 => None,
+    };
+    if let (Some(own_v3), AccountEntryExt::V1(v1)) = (v3(&own.ext), &mut a.ext) {
+        if let AccountEntryExtensionV1Ext::V2(v2) = &mut v1.ext {
+            v2.ext = AccountEntryExtensionV2Ext::V3(own_v3);
+        }
+    }
+    Ok(())
+}
+
 fn config_key(id: ConfigSettingId) -> LedgerKey {
     LedgerKey::ConfigSetting(LedgerKeyConfigSetting { config_setting_id: id })
 }
@@ -603,7 +740,11 @@ pub struct KnownDivergence {
 }
 
 /// The documented divergences (see docs/replay.md).
-pub const KNOWN_DIVERGENCES: &[KnownDivergence] = &[];
+pub const KNOWN_DIVERGENCES: &[KnownDivergence] = &[KnownDivergence {
+    id: "later-sequence-bump",
+    cause: "In a parallel Soroban phase stellar-core bumps every transaction's sequence number before any executes, so a transaction whose footprint holds its own source account writes back a sequence number a later same-source transaction of the ledger set. The session applies one transaction per ledger: everything else matches, the source's sequence number is this transaction's own.",
+    applies: |_, m| m.kind == "later sequence bump",
+}];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FidelityReport {
@@ -633,9 +774,8 @@ pub struct FidelityReport {
 pub struct FixtureInfo {
     pub path: String,
     pub source: String,
-    pub ledgers: [u32; 2],
-    pub soroban_transactions_seen: usize,
-    pub sampled: usize,
+    pub network_passphrase: String,
+    pub segments: Vec<Segment>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -775,10 +915,12 @@ impl FidelityReport {
             self.explained,
             self.unexplained
         );
-        let _ = writeln!(s, "Host: {}. Compared per transaction: result (code, fee charged, success hash), return value, events, every after-image and TTL, the fee charged up front, the refund, the non-refundable, refundable and rent fees, and core's `core_metrics` (CPU, memory, read and write bytes, events).\n", self.host);
-        let _ = writeln!(s, "## Sample\n\n| Fixture | Source | Ledgers | Soroban txs seen | Sampled |\n|---|---|---|---:|---:|");
+        let _ = writeln!(s, "Host: {}. Compared per transaction: result (code, fee charged, success hash), return value, events, the host's diagnostic events, every after-image and TTL, the fee charged up front, the refund, the non-refundable, refundable and rent fees, and core's `core_metrics` (CPU, memory, read and write bytes, events).\n", self.host);
+        let _ = writeln!(s, "## Sample\n\n| Fixture | Network | Ledgers | Soroban txs seen | Sampled |\n|---|---|---|---:|---:|");
         for f in &self.fixtures {
-            let _ = writeln!(s, "| `{}` | {} | {}–{} | {} | {} |", f.path, f.source, f.ledgers[0], f.ledgers[1], f.soroban_transactions_seen, f.sampled);
+            for g in &f.segments {
+                let _ = writeln!(s, "| `{}` | {} | {}–{} | {} | {} |", f.path, f.network_passphrase, g.ledgers[0], g.ledgers[1], g.soroban_transactions_seen, g.sampled);
+            }
         }
         let _ = writeln!(s, "\n## Coverage\n\n| Tag | Transactions |\n|---|---:|");
         for (t, n) in &self.coverage {

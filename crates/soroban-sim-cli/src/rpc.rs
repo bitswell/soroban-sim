@@ -105,12 +105,14 @@ impl RpcClient {
         let mut entries = vec![];
         for e in r["entries"].as_array().into_iter().flatten() {
             let data = LedgerEntryData::from_xdr(B64.decode(e["xdr"].as_str().unwrap_or_default())?, Limits::none())?;
+            // `extXdr` carries the entry's sponsorship; RPCs that predate it
+            // only serve unsponsored entries correctly.
+            let ext = match e["extXdr"].as_str() {
+                Some(x) => LedgerEntryExt::from_xdr(B64.decode(x)?, Limits::none())?,
+                None => LedgerEntryExt::V0,
+            };
             entries.push(StoredEntry {
-                entry: LedgerEntry {
-                    last_modified_ledger_seq: e["lastModifiedLedgerSeq"].as_u64().unwrap_or(0) as u32,
-                    data,
-                    ext: LedgerEntryExt::V0,
-                },
+                entry: LedgerEntry { last_modified_ledger_seq: e["lastModifiedLedgerSeq"].as_u64().unwrap_or(0) as u32, data, ext },
                 live_until: e["liveUntilLedgerSeq"].as_u64().map(|v| v as u32),
             });
         }

@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use soroban_sim_cli::plan::Plan;
 use soroban_sim_cli::replay::{self, ReplayFixture};
 use soroban_sim_cli::rpc::RpcClient;
-use soroban_sim_cli::run::{base_from_name, Base, RunConfig, Runner};
+use soroban_sim_cli::run::{base_from_name, Base, ForkMode, RunConfig, Runner};
 use soroban_sim_cli::serve::{self, Facade, ServeConfig};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -51,6 +51,10 @@ struct FetchArgs {
     /// state-size window period).
     #[arg(long, default_value_t = 60)]
     ledgers: u32,
+    /// Wait until this many ledgers have closed since the state-size window
+    /// last changed (only those can be replayed exactly; it changes every 64).
+    #[arg(long, default_value_t = 0)]
+    min_ledgers: u32,
     #[arg(long, default_value_t = 400)]
     max_transactions: usize,
     /// Transactions per (call, outcome, auth kind) group; rare kinds get 4x.
@@ -59,6 +63,9 @@ struct FetchArgs {
     /// The fixture to write (gzipped when it ends in .gz).
     #[arg(long)]
     out: PathBuf,
+    /// Add the new sample to the fixture at --out instead of replacing it.
+    #[arg(long)]
+    append: bool,
     /// Replay the fixture right away and write PREFIX.json and PREFIX.md.
     #[arg(long)]
     report: Option<PathBuf>,
@@ -84,6 +91,14 @@ struct ServeArgs {
     /// The network to fork: mainnet, testnet, or an RPC URL.
     #[arg(long, conflicts_with = "snapshot", required_unless_present = "snapshot")]
     fork: Option<String>,
+    /// head: read the network lazily at its latest ledger. checkpoint: pin
+    /// one ledger and roll every read back to it through the ledgers' close
+    /// meta (exact and consistent; RPC must still serve the ledgers since).
+    #[arg(long, value_name = "head|checkpoint")]
+    fork_mode: Option<String>,
+    /// The ledger a checkpoint fork pins (default: the latest when it opens).
+    #[arg(long, value_name = "LEDGER")]
+    fork_ledger: Option<u32>,
     /// The network passphrase, checked against the RPC.
     #[arg(long)]
     network_passphrase: Option<String>,
@@ -131,6 +146,14 @@ struct RunArgs {
     /// The network to fork: mainnet, testnet, or an RPC URL. Default: the plan's.
     #[arg(long, conflicts_with = "snapshot")]
     fork: Option<String>,
+    /// head: read the network lazily at its latest ledger. checkpoint: pin
+    /// one ledger and roll every read back to it through the ledgers' close
+    /// meta (exact and consistent; RPC must still serve the ledgers since).
+    #[arg(long, value_name = "head|checkpoint")]
+    fork_mode: Option<String>,
+    /// The ledger a checkpoint fork pins (default: the latest when it opens).
+    #[arg(long, value_name = "LEDGER")]
+    fork_ledger: Option<u32>,
     /// The network passphrase, checked against the RPC (needed for a custom URL
     /// only if you want it checked).
     #[arg(long)]
@@ -186,9 +209,8 @@ fn replay_report(fixtures: Vec<(PathBuf, ReplayFixture)>, prefix: &std::path::Pa
         .map(|(p, f)| replay::FixtureInfo {
             path: p.display().to_string(),
             source: f.source.clone(),
-            ledgers: f.ledgers,
-            soroban_transactions_seen: f.soroban_transactions_seen,
-            sampled: f.transactions.len(),
+            network_passphrase: f.network_passphrase.clone(),
+            segments: f.segments.clone(),
         })
         .collect();
     let report = replay::FidelityReport::build(info, &outcomes);
@@ -225,15 +247,24 @@ fn run() -> Result<bool> {
             let fixture = replay::fetch(
                 &rpc,
                 &actual,
-                &replay::FetchOptions { ledgers: args.ledgers, max_transactions: args.max_transactions, per_group: args.per_group, progress: !args.quiet },
+                &replay::FetchOptions { ledgers: args.ledgers, min_ledgers: args.min_ledgers, max_transactions: args.max_transactions, per_group: args.per_group, progress: !args.quiet },
             )?;
+            let segment = fixture.segments[0].clone();
+            let fixture = if args.append && args.out.exists() {
+                let mut existing = ReplayFixture::load(&args.out)?;
+                existing.merge(fixture)?;
+                existing
+            } else {
+                fixture
+            };
             fixture.save(&args.out)?;
             eprintln!(
-                "wrote {}: {} transactions from ledgers {}..={} ({} entries, {} RPC calls)",
+                "wrote {}: {} transactions from ledgers {}..={} ({} in the fixture, {} entries; {} RPC calls)",
                 args.out.display(),
+                segment.sampled,
+                segment.ledgers[0],
+                segment.ledgers[1],
                 fixture.transactions.len(),
-                fixture.ledgers[0],
-                fixture.ledgers[1],
                 fixture.entries.len(),
                 rpc.calls()
             );
@@ -251,7 +282,8 @@ fn run() -> Result<bool> {
                 (Some(f), _) => base_from_name(f, args.network_passphrase.clone())?,
                 (None, Some(s)) => Base::Snapshot(s.clone()),
                 (None, None) => bail!("pass --fork mainnet|testnet|URL or --snapshot FILE"),
-            };
+            }
+            .with_mode(ForkMode::parse(args.fork_mode.as_deref(), args.fork_ledger)?)?;
             let (server, addr) = serve::http::bind(&args.host, args.port)?;
             let mut facade = Facade::open(ServeConfig {
                 base,
@@ -287,6 +319,7 @@ fn run() -> Result<bool> {
                 (None, Some(s)) => Some(Base::Snapshot(s.clone())),
                 (None, None) => None,
             };
+            let fork_mode = ForkMode::parse(args.fork_mode.as_deref(), args.fork_ledger)?;
             let prefix = match &args.report {
                 Some(p) => p.clone(),
                 None => {
@@ -297,6 +330,7 @@ fn run() -> Result<bool> {
             let runner = Runner::new(RunConfig {
                 plan_path: args.plan.clone(),
                 base,
+                fork_mode,
                 wasm_dirs: args.wasm_dirs,
                 differential: args.differential,
                 keep_going: args.keep_going,
