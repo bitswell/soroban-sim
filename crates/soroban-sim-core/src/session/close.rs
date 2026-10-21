@@ -5,7 +5,9 @@
 //! submit_ledger(envelopes)
 //!   build the set   each envelope validated against the last closed ledger;
 //!                   one transaction per source account (core's queue holds
-//!                   one; the next waits a ledger); within the per-ledger
+//!                   one; the next waits a ledger); a fee source's bids
+//!                   together within its available balance (the one that
+//!                   overdraws it is txINSUFFICIENT_BALANCE); within the per-ledger
 //!                   limits, highest inclusion fee rate first (the rest wait)
 //!   apply order     classic phase, then Soroban phase, each shuffled by
 //!                   (full transaction hash XOR transaction-set hash)
@@ -31,19 +33,19 @@ use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 use soroban_env_host::storage::SnapshotSource;
 use soroban_env_host::xdr::{
-    ConfigSettingEntry, ConfigSettingId, DependentTxCluster, GeneralizedTransactionSet, Hash, LedgerEntryData,
+    AccountId, ConfigSettingEntry, ConfigSettingId, DependentTxCluster, GeneralizedTransactionSet, Hash, LedgerEntryData,
     LedgerKey, LedgerKeyConfigSetting, Limits, OperationResult, ParallelTxExecutionStage, ParallelTxsComponent, ScVal,
     TransactionEnvelope, TransactionPhase, TransactionSetV1, TxSetComponent, TxSetComponentTxsMaybeDiscountedFee,
     WriteXdr,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use super::applier::{remove_one_time_signer, Metrics};
 use super::classic::{self, OpContext};
 use super::validator::{
-    bump_sequence, declared_resources, envelope_fee_source, envelope_hash, envelope_source, transaction_hash, Rejection, TxCode, Valid,
-    ValidClassicTx,
+    available_balance, bump_sequence, declared_resources, envelope_fee_source, envelope_hash, envelope_source, transaction_hash, xlm, Rejection, TxCode,
+    Valid, ValidClassicTx,
 };
 use super::{diagnostics_tail, Fees, Session, SubmitOptions, TxRecord, TxStatus};
 
@@ -236,6 +238,7 @@ impl Session {
             let mut waiting = vec![];
             let mut candidates = vec![];
             let mut sources = BTreeSet::new();
+            let mut bids: BTreeMap<AccountId, i64> = BTreeMap::new();
             for p in pending {
                 let source = envelope_source(p.envelope);
                 if let Some(s) = source.as_ref().filter(|s| sources.contains(*s)) {
@@ -243,9 +246,17 @@ impl Session {
                     waiting.push(Pending { deferred: Some(why), ..p });
                     continue;
                 }
-                match self.validator_with(false, options.lane_base_fee).validate(p.envelope).map_err(|e| self.fetch_failure(e))? {
+                let mut verdict = self.validator_with(false, options.lane_base_fee).validate(p.envelope).map_err(|e| self.fetch_failure(e))?;
+                if let Ok(valid) = &verdict {
+                    let queued = bids.get(valid.fee_source()).copied().unwrap_or(0);
+                    if let Some(r) = self.fee_overdraw(valid.fee_source(), queued, valid.fees().bid)? {
+                        verdict = Err(r);
+                    }
+                }
+                match verdict {
                     Ok(valid) => {
                         sources.extend(source);
+                        *bids.entry(valid.fee_source().clone()).or_default() += valid.fees().bid;
                         let full_hash = Sha256::digest(p.envelope.to_xdr(Limits::none())?).into();
                         candidates.push(Candidate { pending: p, valid, full_hash });
                     }
@@ -452,6 +463,31 @@ impl Session {
         }
         record.op_results = results;
         Ok(())
+    }
+
+    /// core's queue `canAfford`: refused with txINSUFFICIENT_BALANCE when
+    /// `bid` on top of the `queued` bids `fee_source` already pays for in
+    /// this ledger is more than its balance above the reserve.
+    pub fn fee_overdraw(&self, fee_source: &AccountId, queued: i64, bid: i64) -> Result<Option<Rejection>> {
+        let account = self.ledger.account(fee_source)?.ok_or_else(|| anyhow!("fee source {fee_source} vanished"))?;
+        let available = available_balance(&account, self.info.base_reserve);
+        let total = queued.saturating_add(bid);
+        if total <= available {
+            return Ok(None);
+        }
+        let detail = format!(
+            "fee source {fee_source} would pay {} XLM in fee bids this ledger ({} XLM already queued + {} XLM), available {} XLM above the reserve",
+            xlm(total),
+            xlm(queued),
+            xlm(bid),
+            xlm(available)
+        );
+        Ok(Some(Rejection { code: TxCode::InsufficientBalance, detail, fee_bump_inner: false, op_results: vec![] }))
+    }
+
+    /// Record `envelope` as refused before it reached a ledger.
+    pub fn refuse(&mut self, label: &str, envelope: &TransactionEnvelope, r: Rejection) -> TxRecord {
+        self.rejected(&Pending { index: 0, label, envelope, deferred: None }, r)
     }
 
     /// The record of an envelope refused before it reached a ledger.

@@ -482,3 +482,71 @@ fn a_classic_transaction_names_its_keys_in_one_round() {
     assert_eq!(got["status"], "SUCCESS");
     assert_eq!(c.sequence(&carol.account_id()), ((FORK_LEDGER + 1) as i64) << 32);
 }
+
+/// A held ledger turns away a fee bump whose fee source cannot pay its bid
+/// on top of the bids it already pays for there, as core's queue does.
+#[test]
+fn a_held_ledger_refuses_bids_a_fee_source_cannot_cover() {
+    use soroban_env_host::xdr::{PaymentOp, TransactionResult, TransactionResultResult};
+    let mut c = Client::open(PASSPHRASE);
+    let frank = Ed25519Key::throwaway("frank");
+    let erin = Ed25519Key::throwaway("erin");
+    let carol = Ed25519Key::throwaway("carol");
+    let dave = Ed25519Key::throwaway("dave");
+    // One XLM is the two base reserves: each has 250 stroops to bid.
+    c.call("fork_setBalance", json!({ "account": g(&frank), "xlm": "1.0000250", "label": "frank" }));
+    c.call("fork_setBalance", json!({ "account": g(&erin), "xlm": "1.0000250", "label": "erin" }));
+    c.call("fork_setBalance", json!({ "account": g(&carol), "xlm": "100", "label": "carol" }));
+    c.call("fork_setBalance", json!({ "account": g(&dave), "xlm": "100", "label": "dave" }));
+    let network_id: [u8; 32] = Sha256::digest(PASSPHRASE.as_bytes()).into();
+    let classic = |c: &mut Client, from: &Ed25519Key, fee: u32| -> TransactionV1Envelope {
+        let seq = c.sequence(&from.account_id());
+        let PublicKey::PublicKeyTypeEd25519(k) = from.account_id().0;
+        let PublicKey::PublicKeyTypeEd25519(to) = alice().0;
+        let tx = Transaction {
+            source_account: MuxedAccount::Ed25519(k),
+            fee,
+            seq_num: SequenceNumber(seq + 1),
+            cond: Preconditions::None,
+            memo: Memo::None,
+            operations: vec![Operation { source_account: None, body: OperationBody::Payment(PaymentOp { destination: MuxedAccount::Ed25519(to), asset: soroban_env_host::xdr::Asset::Native, amount: 1 }) }]
+                .try_into()
+                .unwrap(),
+            ext: TransactionExt::V0,
+        };
+        let hash = transaction_hash(&tx, network_id).unwrap();
+        TransactionV1Envelope { tx, signatures: vec![from.sign_decorated(&hash)].try_into().unwrap() }
+    };
+    let bump = |inner: TransactionV1Envelope, payer: &Ed25519Key, fee: i64| -> String {
+        let PublicKey::PublicKeyTypeEd25519(k) = payer.account_id().0;
+        let tx = FeeBumpTransaction { fee_source: MuxedAccount::Ed25519(k), fee, inner_tx: FeeBumpTransactionInnerTx::Tx(inner), ext: FeeBumpTransactionExt::V0 };
+        let hash = fee_bump_hash(&tx, network_id).unwrap();
+        TransactionEnvelope::TxFeeBump(FeeBumpTransactionEnvelope { tx, signatures: vec![payer.sign_decorated(&hash)].try_into().unwrap() }).to_xdr_base64(Limits::none()).unwrap()
+    };
+    let insufficient = |sent: &Value| {
+        assert_eq!(sent["status"], "ERROR", "{sent}");
+        let result = TransactionResult::from_xdr_base64(sent["errorResultXdr"].as_str().unwrap(), Limits::none()).unwrap();
+        assert!(matches!(result.result, TransactionResultResult::TxInsufficientBalance), "{:?}", result.result);
+    };
+
+    c.call("fork_holdLedger", json!({}));
+    // Two fee bumps frank pays 200 for: he can afford one.
+    let a = classic(&mut c, &carol, 100);
+    let a = bump(a, &frank, 200);
+    assert_eq!(c.call("sendTransaction", json!({ "transaction": a }))["status"], "PENDING");
+    let b = classic(&mut c, &dave, 100);
+    let b = bump(b, &frank, 200);
+    insufficient(&c.call("sendTransaction", json!({ "transaction": b })));
+
+    // erin's own transaction (100) and a fee bump she pays (200): 300 > 250.
+    let own = classic(&mut c, &erin, 100);
+    let own = TransactionEnvelope::Tx(own).to_xdr_base64(Limits::none()).unwrap();
+    assert_eq!(c.call("sendTransaction", json!({ "transaction": own }))["status"], "PENDING");
+    let d = classic(&mut c, &dave, 100);
+    let d = bump(d, &erin, 200);
+    insufficient(&c.call("sendTransaction", json!({ "transaction": d })));
+
+    let closed = c.call("fork_closeLedger", json!({}));
+    let statuses: Vec<&str> = closed["transactions"].as_array().unwrap().iter().map(|t| t["status"].as_str().unwrap()).collect();
+    assert_eq!(statuses, ["SUCCESS", "SUCCESS"], "{closed}");
+}

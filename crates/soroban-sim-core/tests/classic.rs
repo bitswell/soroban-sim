@@ -828,3 +828,45 @@ fn fee_bumps_share_a_ledger_and_count_one_more_operation() {
     assert!(records[1].deferred.as_deref().unwrap().contains("classic phase was full (4 operations > 2)"), "{:?}", records[1].deferred);
     assert_eq!(balance(&s, &alice()), alice_before - 400 + 2 * XLM);
 }
+
+/// A fresh account holding `spare` stroops above its reserve, created by alice.
+fn barely_funded(s: &mut Session, alice_key: &Ed25519Key, name: &str, spare: i64) -> Ed25519Key {
+    let k = Ed25519Key::throwaway(name);
+    let start = 2 * s.ledger_info().base_reserve as i64 + spare;
+    applied(&submit(s, &format!("create {name}"), &alice(), std::slice::from_ref(alice_key), vec![op(create_account(&k.account_id(), start))]));
+    k
+}
+
+#[test]
+fn a_fee_source_cannot_bid_more_than_it_has_across_a_ledger() {
+    let mut s = session();
+    let key = rehearse_alice(&s);
+    let carol = funded(&mut s, &key, "carol", 10);
+    let dave = funded(&mut s, &key, "dave", 10);
+    let frank = barely_funded(&mut s, &key, "frank", 250);
+    let (c, d, f) = (carol.account_id(), dave.account_id(), frank.account_id());
+    let (frank_before, dave_seq) = (balance(&s, &f), seq(&s, &d));
+    // frank can afford one 200-stroop bid, not two: the second in
+    // submission order is refused, as core's queue refuses it.
+    let a = fee_bump(&envelope(&s, &c, std::slice::from_ref(&carol), vec![op(pay(&alice(), Asset::Native, XLM))]), &f, &frank, 200);
+    let b = fee_bump(&envelope(&s, &d, std::slice::from_ref(&dave), vec![op(pay(&alice(), Asset::Native, XLM))]), &f, &frank, 200);
+    let records = s.submit_ledger(&[("carol, paid by frank", &a), ("dave, paid by frank", &b)]).unwrap();
+    applied(&records[0]);
+    expect_rejected(&records[1], TxCode::InsufficientBalance);
+    assert!(records[1].status.summary().contains(&format!("fee source {f}")), "{}", records[1].status.summary());
+    assert_eq!(balance(&s, &f), frank_before - 200);
+    assert_eq!(seq(&s, &d), dave_seq, "dave's transaction never applied");
+
+    // erin's own transaction (100) and a fee bump erin pays (200) are 300
+    // against her 250: the fee bump, sent second, is refused.
+    let erin = barely_funded(&mut s, &key, "erin", 250);
+    let e = erin.account_id();
+    let (erin_before, dave_seq) = (balance(&s, &e), seq(&s, &d));
+    let own = envelope(&s, &e, std::slice::from_ref(&erin), vec![op(set_options(|o| o.home_domain = Some(domain("e.invalid"))))]);
+    let bumped = fee_bump(&envelope(&s, &d, std::slice::from_ref(&dave), vec![op(pay(&alice(), Asset::Native, XLM))]), &e, &erin, 200);
+    let records = s.submit_ledger(&[("erin's own", &own), ("dave, paid by erin", &bumped)]).unwrap();
+    applied(&records[0]);
+    expect_rejected(&records[1], TxCode::InsufficientBalance);
+    assert_eq!(seq(&s, &d), dave_seq);
+    assert_eq!(balance(&s, &e), erin_before - 100);
+}

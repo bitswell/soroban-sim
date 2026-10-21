@@ -55,7 +55,8 @@ Session (soroban-sim-core::session)
                      (enforcing, so signature checks are metered) -> signed envelope
   prepare_classic(): classic operations -> signed envelope
   submit_ledger():   the transaction set (TxValidator; one per source account,
-                     per-ledger limits) -> every fee -> each transaction validated
+                     each fee source's bids within its balance, per-ledger
+                     limits) -> every fee -> each transaction validated
                      again and applied in core's order -> refunds -> close
   submit():          submit_ledger() with one envelope
   ForkedLedger:      overlay + logged overrides over a lazily fetched base

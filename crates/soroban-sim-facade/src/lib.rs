@@ -45,7 +45,7 @@ use soroban_env_host::xdr::{
 use soroban_env_host::{HostError, LedgerInfo};
 use soroban_simulation::simulation::SimulationAdjustmentConfig;
 use soroban_sim_core::session::{
-    account_key, envelope_hash, muxed_account_id, op_result_name, rejection_code, show_scval, EntryState, Session, SessionCheckpoint,
+    account_key, envelope_fee_source, envelope_hash, muxed_account_id, op_result_name, rejection_code, show_scval, EntryState, Session, SessionCheckpoint,
     StoredEntry, TxRecord, TxStatus,
 };
 use std::collections::BTreeMap;
@@ -649,13 +649,22 @@ impl Facade {
         // What the validator decides, before anything changes: the safety
         // check (whatever the verdict), and the keys whose before-values the
         // meta needs.
-        let (real, verdict) = {
+        let (real, mut verdict) = {
             let validator = self.session.validator(false);
             (
                 validator.base_signed(&inner, tx::inner_signatures(&envelope)).map_err(RpcError::internal)?,
                 validator.validate(&envelope).map_err(RpcError::internal)?,
             )
         };
+        // core's queue turns away a transaction whose fee source cannot pay
+        // its bid on top of the bids already waiting.
+        if let (Ok(valid), Some(queue)) = (&verdict, &self.held) {
+            let payer = Some(valid.fee_source().clone());
+            let queued = queue.iter().filter(|t| envelope_fee_source(&t.envelope) == payer).map(|t| t.fee_bid).sum();
+            if let Some(r) = self.session.fee_overdraw(valid.fee_source(), queued, valid.fees().bid).map_err(RpcError::internal)? {
+                verdict = Err(r);
+            }
+        }
         if !real.is_empty() && self.is_mainnet() && !self.allow_real_signers {
             let why = real.join("; ");
             for r in &real {
@@ -676,27 +685,30 @@ impl Facade {
                 ),
             });
         }
-        let Ok(valid) = verdict else {
-            // Refused before inclusion: never in a ledger, held or not.
-            let mut record = self.session.submit(&label, &envelope).map_err(RpcError::internal)?;
-            record.replayable = real;
-            let result = tx::result(&record, tx::fee_bid(&envelope));
-            let result_xdr = result.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?;
-            if let TxStatus::Rejected { code, detail, fee_bump_inner } = &record.status {
-                for r in &record.replayable {
-                    self.replayable.push(format!("{label} ({}, rejected): {r}", hex(&hash)));
+        let valid = match verdict {
+            Ok(valid) => valid,
+            Err(r) => {
+                // Refused before inclusion: never in a ledger, held or not.
+                let mut record = self.session.refuse(&label, &envelope, r);
+                record.replayable = real;
+                let result = tx::result(&record, tx::fee_bid(&envelope));
+                let result_xdr = result.to_xdr_base64(Limits::none()).map_err(|e| RpcError::internal(e.into()))?;
+                if let TxStatus::Rejected { code, detail, fee_bump_inner } = &record.status {
+                    for r in &record.replayable {
+                        self.replayable.push(format!("{label} ({}, rejected): {r}", hex(&hash)));
+                    }
+                    let code = rejection_code(*code, *fee_bump_inner);
+                    let detail_rc = Rc::new(StepDetail { touched: vec![], envelope: Some(envelope.clone()), applied_in: None });
+                    self.push_step(
+                        step(self.steps.len() + 1, &label, "transaction", ledger, time, "rejected", &format!("{code}: {detail}"), Some(&record), None),
+                        Some(format!("{label}: {code} {detail}")),
+                        detail_rc,
+                    );
                 }
-                let code = rejection_code(*code, *fee_bump_inner);
-                let detail_rc = Rc::new(StepDetail { touched: vec![], envelope: Some(envelope.clone()), applied_in: None });
-                self.push_step(
-                    step(self.steps.len() + 1, &label, "transaction", ledger, time, "rejected", &format!("{code}: {detail}"), Some(&record), None),
-                    Some(format!("{label}: {code} {detail}")),
-                    detail_rc,
-                );
+                reply.insert("status".into(), json!("ERROR"));
+                reply.insert("errorResultXdr".into(), json!(result_xdr));
+                return Ok(Value::Object(reply));
             }
-            reply.insert("status".into(), json!("ERROR"));
-            reply.insert("errorResultXdr".into(), json!(result_xdr));
-            return Ok(Value::Object(reply));
         };
         let accounts = if valid.fee_source() == valid.source() { 1 } else { 2 };
         let pending = Pending {
