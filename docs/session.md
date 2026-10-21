@@ -226,7 +226,8 @@ transactions per ledger and per-ledger limits, and core's PRNG seed. The `head`
 fork reads RPC's latest ledger lazily, so a long session can mix ledgers;
 the drift report shows whether it did.
 
-Later phases (see #23): an RPC facade (`soroban-sim serve --fork …`) so existing
-scripts rehearse themselves, a browser session resource, replaying real
-mainnet transactions from their meta, an exact history-archive checkpoint
-fork, and classic operations.
+The same session also runs behind an RPC facade, `soroban-sim serve --fork …`,
+so existing scripts and stock tools rehearse themselves unchanged
+([`docs/rpc-facade.md`](rpc-facade.md)). Later phases (see #23): a browser
+session resource, replaying real mainnet transactions from their meta, an exact
+history-archive checkpoint fork, and classic operations.

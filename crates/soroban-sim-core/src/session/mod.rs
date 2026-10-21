@@ -26,8 +26,8 @@ mod validator;
 pub use applier::{Applied, Applier};
 pub use ledger::{
     account_key, ed25519_account_id, new_account, strkey_ed25519, Change, DiffEntry, EntryState,
-    FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerSource, LedgerStats, Override,
-    OverrideKind, StaticSource, StoredEntry,
+    FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerCheckpoint, LedgerSource, LedgerStats,
+    Override, OverrideKind, StaticSource, StoredEntry,
 };
 pub use signers::{
     auth_payload, base64url, oz_digest, sign_auth_entry, webauthn_sig_data, AuthSigner,
@@ -219,6 +219,15 @@ pub struct PrepareRequest<'a> {
     pub preconditions: Preconditions,
 }
 
+/// Everything [`Session::restore`] needs to undo what happened since.
+#[derive(Clone)]
+pub struct SessionCheckpoint {
+    ledger: LedgerCheckpoint,
+    info: LedgerInfo,
+    log: Vec<TxRecord>,
+    tx_index: u32,
+}
+
 pub struct Session {
     ledger: Rc<ForkedLedger>,
     info: LedgerInfo,
@@ -347,6 +356,22 @@ impl Session {
         Ok(())
     }
 
+    // --- checkpoints ---
+
+    /// The session as it is now: ledger writes, overrides, clock and log.
+    pub fn checkpoint(&self) -> SessionCheckpoint {
+        SessionCheckpoint { ledger: self.ledger.checkpoint(), info: self.info.clone(), log: self.log.clone(), tx_index: self.applier.tx_index }
+    }
+
+    /// Return to `checkpoint`: every transaction, override and clock move
+    /// since is undone. Base reads and parsed modules stay cached.
+    pub fn restore(&mut self, checkpoint: &SessionCheckpoint) {
+        self.ledger.restore(&checkpoint.ledger);
+        self.info = checkpoint.info.clone();
+        self.log = checkpoint.log.clone();
+        self.applier.tx_index = checkpoint.tx_index;
+    }
+
     // --- overrides (each one is logged for the report) ---
 
     pub fn substitute_master_key(&self, id: &AccountId, throwaway: &Ed25519Key, label: &str) -> Result<()> {
@@ -373,11 +398,24 @@ impl Session {
 
     /// Simulate `host_function` against the session's current state.
     pub fn simulate(&self, source: &AccountId, host_function: &HostFunction, auth: RecordingInvocationAuthMode) -> Result<InvokeHostFunctionSimulationResult> {
+        self.simulate_adjusted(source, host_function, auth, &SimulationAdjustmentConfig::default_adjustment())
+    }
+
+    /// [`Session::simulate`] with explicit resource adjustments, for callers
+    /// that pad the way RPC's `simulateTransaction` does with a custom
+    /// instruction leeway.
+    pub fn simulate_adjusted(
+        &self,
+        source: &AccountId,
+        host_function: &HostFunction,
+        auth: RecordingInvocationAuthMode,
+        adjustment: &SimulationAdjustmentConfig,
+    ) -> Result<InvokeHostFunctionSimulationResult> {
         let seed = prng_seed(b"simulate", self.info.sequence_number, self.log.len() as u32);
         let result = simulate_invoke_host_function_op(
             Rc::new(ForkView(self.ledger.clone())),
             &self.network_config,
-            &SimulationAdjustmentConfig::default_adjustment(),
+            adjustment,
             &self.info,
             host_function.clone(),
             auth,

@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use soroban_sim_cli::plan::Plan;
 use soroban_sim_cli::run::{base_from_name, Base, RunConfig, Runner};
+use soroban_sim_cli::serve::{self, Facade, ServeConfig};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -19,6 +20,47 @@ enum Command {
     /// Network sessions: many signed transactions over a fork, nothing sent.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Serve a Stellar RPC facade over a fork, so stock tools (stellar,
+    /// stellar-sdk) and scripts rehearse against it unchanged. Nothing is sent
+    /// to the network.
+    Serve(ServeArgs),
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    /// The network to fork: mainnet, testnet, or an RPC URL.
+    #[arg(long, conflicts_with = "snapshot", required_unless_present = "snapshot")]
+    fork: Option<String>,
+    /// The network passphrase, checked against the RPC.
+    #[arg(long)]
+    network_passphrase: Option<String>,
+    /// Fork a snapshot file instead of a live network.
+    #[arg(long)]
+    snapshot: Option<PathBuf>,
+    /// The address to listen on. Anything but loopback exposes the fork and
+    /// its fork_* admin methods to the network.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// The port to listen on (0 picks a free one).
+    #[arg(long, default_value_t = 8000)]
+    port: u16,
+    /// Rewrite PREFIX.json and PREFIX.md after every state change.
+    #[arg(long, value_name = "PREFIX")]
+    report: Option<PathBuf>,
+    /// Close-time step between ledgers, in seconds.
+    #[arg(long, default_value_t = 5)]
+    seconds_per_ledger: u64,
+    /// Apply envelopes that a signer the real network already has signed.
+    /// On mainnet those are valid there as they stand, so by default the
+    /// facade refuses them.
+    #[arg(long)]
+    allow_real_signers: bool,
+    /// Log every call, reads included.
+    #[arg(long, short)]
+    verbose: bool,
+    /// No line per state change on stderr.
+    #[arg(long, short, conflicts_with = "verbose")]
+    quiet: bool,
 }
 
 #[derive(Subcommand)]
@@ -85,6 +127,36 @@ fn main() -> ExitCode {
 
 fn run() -> Result<bool> {
     match Cli::parse().command {
+        Command::Serve(args) => {
+            let base = match (&args.fork, &args.snapshot) {
+                (Some(f), _) => base_from_name(f, args.network_passphrase.clone())?,
+                (None, Some(s)) => Base::Snapshot(s.clone()),
+                (None, None) => bail!("pass --fork mainnet|testnet|URL or --snapshot FILE"),
+            };
+            let (server, addr) = serve::http::bind(&args.host, args.port)?;
+            let mut facade = Facade::open(ServeConfig {
+                base,
+                seconds_per_ledger: Some(args.seconds_per_ledger),
+                allow_real_signers: args.allow_real_signers,
+                report: args.report.clone(),
+                progress: !args.quiet,
+                verbose: args.verbose,
+            })?;
+            let url = format!("http://{addr}");
+            facade.set_url(&url);
+            let fork = facade.session().fork_point();
+            eprintln!("soroban-sim RPC facade on {url}: a fork of {} at ledger {} (protocol {})", facade.network_name(), fork.ledger_seq, fork.protocol_version);
+            eprintln!("  point tools at it: STELLAR_RPC_URL={url} STELLAR_NETWORK_PASSPHRASE={:?}", facade.passphrase());
+            eprintln!("  nothing is sent to the network; fork_addSigner substitutes throwaway signers, fork_report reports");
+            if !addr.ip().is_loopback() {
+                eprintln!("warning: {addr} is not loopback: anyone who can reach it can read the fork and call fork_* methods");
+            }
+            if let Some(p) = &args.report {
+                eprintln!("  report: {}.json and {}.md, rewritten after every state change", p.display(), p.display());
+            }
+            serve::http::serve(&mut facade, &server);
+            Ok(true)
+        }
         Command::Session(SessionCommand::Check { plan }) => {
             let p = Plan::load(&plan)?;
             println!("{}: {} steps, {} keys, {} vars, {} setup overrides", plan.display(), p.steps.len(), p.keys.len(), p.vars.len(), p.setup.len());

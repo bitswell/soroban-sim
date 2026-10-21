@@ -493,3 +493,28 @@ fn substitution_keeps_sponsorship_descriptors_aligned_with_signers() {
     }
     assert!(a.signers.windows(2).all(|w| w[0].key < w[1].key), "signers stay sorted");
 }
+
+#[test]
+fn a_checkpoint_restores_writes_overrides_clock_and_log() {
+    let mut s = session();
+    let key = rehearse_alice(&s);
+    let add = add_contract(&mut s, &key);
+    let at = s.checkpoint();
+    let (ledger, time, balance_then, overrides) =
+        (s.ledger_info().sequence_number, s.ledger_info().timestamp, balance(&s, &alice()), s.ledger().overrides().len());
+
+    let first = prepare(&s, &alice(), std::slice::from_ref(&key), invoke(&add, "add", vec![ScVal::I32(1), ScVal::I32(2)]), &no_auth());
+    s.submit("after the checkpoint", &first.envelope).unwrap();
+    s.fund(&bob(), 10_000_000, "funding after the checkpoint").unwrap();
+    s.advance(100, None);
+    s.restore(&at);
+
+    assert_eq!((s.ledger_info().sequence_number, s.ledger_info().timestamp), (ledger, time));
+    assert_eq!(balance(&s, &alice()), balance_then);
+    assert_eq!(s.ledger().overrides().len(), overrides);
+    assert_eq!(s.log().len(), 2, "the upload and the deploy");
+    // The undone transaction applies again, in the same ledger.
+    let again = s.submit("replayed after the restore", &first.envelope).unwrap();
+    assert!(again.status.is_applied(), "{}", again.status.summary());
+    assert_eq!(again.ledger, ledger);
+}

@@ -26,4 +26,7 @@ soroban-sim-core = { path = "../soroban-sim-core" }
 soroban-simulation.workspace = true
 # The XDR crate soroban-env-host links, with serde for plan-file ScVal JSON.
 stellar-xdr = { version = "=28.0.0", features = ["serde", "base64"] }
+# The RPC facade (`soroban-sim serve`): a small blocking HTTP/1.1 server, so
+# the session stays on one thread.
+tiny_http = "0.12"
 ureq = { version = "2.12", features = ["json"] }
