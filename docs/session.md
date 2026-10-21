@@ -30,6 +30,8 @@ and signer adapter.
 | Option | Meaning |
 |---|---|
 | `--fork mainnet\|testnet\|URL` | The network to fork (default: the plan's `network`). |
+| `--fork-mode head\|checkpoint` | `head` (default) reads RPC's latest ledger lazily; `checkpoint` pins one ledger and rolls every read back to it (see "Fork modes"). |
+| `--fork-ledger N` | The ledger a `checkpoint` fork pins (default: the latest when it opens). |
 | `--network-passphrase P` | Checked against the RPC's `getNetwork`. |
 | `--snapshot FILE` | Fork a snapshot file instead (offline, reproducible). |
 | `--save-snapshot FILE` | Save every base entry the run read, for offline replays. |
@@ -215,21 +217,65 @@ signature (including CAP-71 delegates), that verifies against a signer the
 base ledger already has; on mainnet such a signature fails the run.
 Smart-account `External` and passkey signatures are not checked yet.
 
+## Fork modes
+
+- **`head`** (default). Entries are fetched lazily from RPC `getLedgerEntries`,
+  which only serves its latest ledger, so a session that runs for minutes can
+  mix ledgers. The drift report lists every fetched entry modified after the
+  fork ledger.
+- **`checkpoint`**. One consistent ledger. The fork pins ledger N (`--fork-ledger`,
+  default the latest), and every read is rolled back to it: RPC answers at its
+  latest ledger S, the fork reads the close meta of ledgers N+1..S with
+  `getLedgers`, and each entry takes the before-image of its first change after
+  N (entries nothing changed are already as they were). Answers are cached, so
+  every fresh fork of the session sees the same state. Two limits: RPC must
+  still serve the ledgers since N (at most 720 behind, about an hour; each
+  mainnet ledger's meta is a few MB), and N must be no older than the last
+  change of the Soroban state-size window that sets the rent rate. Core
+  rewrites that window every 64 ledgers at ledger close, outside any
+  transaction's meta, so nothing records its older values; the fork refuses
+  an older pin and names the first ledger it accepts. An eviction records no
+  before-image either: a read of an entry (or its TTL) evicted after N, with
+  no earlier change since N recording its value, fails and names the key and
+  the eviction ledger instead of serving it as absent.
+
 ## Fidelity and limits
 
-Host-exact, envelope-approximate: contracts run in the same `soroban-env-host`
-as the network's protocol (the session refuses any other), while the
-transaction layer is a port of core's checks. Not modelled yet: classic
-operations (funding is an override), fee-bump envelopes and muxed fee
-sources, pre-auth signer removal after use, surge pricing, several
-transactions per ledger and per-ledger limits, and core's PRNG seed. The `head`
-fork reads RPC's latest ledger lazily, so a long session can mix ledgers;
-the drift report shows whether it did.
+The host is exact: contracts run in the same `soroban-env-host` release as the
+network's protocol (the session refuses any other), and transactions apply with
+a build of it that is metered exactly as stellar-core's (simulation needs the
+`recording_mode` feature, and a recording-mode build charges an extra
+storage-map lookup on every write, about 0.2% more CPU; the applier uses a
+second build of the same release without it). The transaction layer is a port
+of core's `TransactionFrame` and `FeeBumpTransactionFrame` checks, in core's
+order, and is checked against real network transactions: `soroban-sim replay`
+replays samples of recent mainnet and testnet Soroban transactions, fee bumps
+and smart-account `__check_auth` included, and compares every result, return
+value, event, after-image, fee and core resource metric
+([`docs/replay.md`](replay.md)). The committed sample matches exactly.
+
+Modelled: v1 and fee-bump envelopes (`txFEE_BUMP_INNER_FAILED` for an inner
+rejection), muxed sources, preconditions, sequence numbers, signatures and
+thresholds, pre-authorized-transaction signers removed after use, the inclusion
+fee capped at the lane base fee (`SubmitOptions::lane_base_fee`, for a
+surge-priced ledger), the resource fee and per-transaction limits, footprint key
+and entry size limits, disk-read metering of classic and restored entries,
+restores of marked archived entries only, rent and events against the
+refundable fee, and refunds to the fee source.
+
+Not modelled yet: classic operations (funding is an override), `ExtendFootprintTtl`
+and `RestoreFootprint` operations (an `InvokeHostFunction` restores marked
+entries itself), several transactions per ledger and per-ledger limits, and
+core's PRNG seed by default (`SubmitOptions::prng_seed` sets it; core seeds each
+transaction with `sha256(txSetContentsHash || applyIndex)`). One consequence of
+one transaction per ledger: in a parallel Soroban phase core bumps every
+transaction's sequence number before any executes, so a transaction whose
+footprint holds its own source account sees later same-source transactions'
+bumps; a session cannot.
 
 The same session also runs behind an RPC facade, `soroban-sim serve --fork …`,
 so existing scripts and stock tools rehearse themselves unchanged
 ([`docs/rpc-facade.md`](rpc-facade.md)), and in the browser, where the web
 demo serves it to stellar-sdk at a virtual RPC URL
 ([`docs/browser-session.md`](browser-session.md)). Later phases (see #23):
-replaying real mainnet transactions from their meta, an exact history-archive
-checkpoint fork, and classic operations.
+classic operations.

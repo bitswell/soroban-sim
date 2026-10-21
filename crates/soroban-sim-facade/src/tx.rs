@@ -7,16 +7,12 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use soroban_env_host::xdr::{
     ContractId, ContractIdPreimage, ContractIdPreimageFromAddress, DecoratedSignature, ExtensionPoint, Hash, HashIdPreimage,
-    HashIdPreimageContractId, HostFunction, InvokeHostFunctionResult, InvokeHostFunctionSuccessPreImage,
-    LedgerEntry, LedgerEntryChange, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt, LedgerKey,
-    LedgerKeyTtl, Limits, MuxedAccount, OperationBody, OperationMetaV2, OperationResult,
-    OperationResultTr, Preconditions, ScAddress, SorobanCredentials, SorobanTransactionMetaExt,
-    SorobanTransactionMetaExtV1, SorobanTransactionMetaV2, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultExt, TransactionResultResult,
-    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction, TransactionV0, TtlEntry, Uint256,
-    WriteXdr,
+    HashIdPreimageContractId, HostFunction, LedgerEntry, LedgerEntryChange, LedgerEntryChanges, LedgerEntryData,
+    LedgerEntryExt, LedgerKey, LedgerKeyTtl, Limits, OperationBody, OperationMetaV2, ScAddress, SorobanCredentials,
+    SorobanTransactionMetaExt, SorobanTransactionMetaExtV1, SorobanTransactionMetaV2, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionMeta, TransactionMetaV4, TransactionResult, TtlEntry, Uint256, WriteXdr,
 };
-use soroban_sim_core::session::{account_key, muxed_account_id, StoredEntry, TxCode, TxRecord, TxStatus};
+use soroban_sim_core::session::{account_key, muxed_account_id, v0_as_v1, StoredEntry, TxRecord, TxStatus};
 
 use crate::report::hex;
 
@@ -56,34 +52,6 @@ pub fn envelope_keys(tx: &Transaction) -> Vec<LedgerKey> {
         keys.extend(data.resources.footprint.read_write.iter().cloned());
     }
     keys
-}
-
-/// The network's transaction id for any envelope kind.
-pub fn envelope_hash(envelope: &TransactionEnvelope, network_id: [u8; 32]) -> Result<[u8; 32]> {
-    let tagged = match envelope {
-        TransactionEnvelope::Tx(e) => TransactionSignaturePayloadTaggedTransaction::Tx(e.tx.clone()),
-        TransactionEnvelope::TxV0(e) => TransactionSignaturePayloadTaggedTransaction::Tx(v0_as_v1(&e.tx)),
-        TransactionEnvelope::TxFeeBump(e) => TransactionSignaturePayloadTaggedTransaction::TxFeeBump(e.tx.clone()),
-    };
-    let payload = TransactionSignaturePayload { network_id: Hash(network_id), tagged_transaction: tagged };
-    Ok(Sha256::digest(payload.to_xdr(Limits::none())?).into())
-}
-
-/// A v0 transaction as core hashes and checks it: the same transaction with
-/// an ed25519 source and time bounds as preconditions.
-pub fn v0_as_v1(tx: &TransactionV0) -> Transaction {
-    Transaction {
-        source_account: MuxedAccount::Ed25519(tx.source_account_ed25519.clone()),
-        fee: tx.fee,
-        seq_num: tx.seq_num.clone(),
-        cond: match &tx.time_bounds {
-            Some(tb) => Preconditions::Time(tb.clone()),
-            None => Preconditions::None,
-        },
-        memo: tx.memo.clone(),
-        operations: tx.operations.clone(),
-        ext: TransactionExt::V0,
-    }
 }
 
 /// The transaction an envelope carries (the inner one of a fee bump).
@@ -134,52 +102,24 @@ fn create_description(preimage: &soroban_env_host::xdr::ContractIdPreimage, netw
     }
 }
 
-/// The `TransactionResult` core reports for `record`. A rejected envelope
-/// gets the result code `sendTransaction` returns as `errorResultXdr`.
-pub fn result(record: &TxRecord, fee_bid: i64) -> Result<TransactionResult> {
-    let ihf = |r: InvokeHostFunctionResult| OperationResult::OpInner(OperationResultTr::InvokeHostFunction(r));
-    let (fee_charged, result) = match &record.status {
-        TxStatus::Applied { value } => {
-            let preimage = InvokeHostFunctionSuccessPreImage { return_value: value.clone(), events: record.events.clone().try_into()? };
-            let hash: [u8; 32] = Sha256::digest(preimage.to_xdr(Limits::none())?).into();
-            (record.fee_charged, TransactionResultResult::TxSuccess(vec![ihf(InvokeHostFunctionResult::Success(Hash(hash)))].try_into()?))
-        }
-        TxStatus::Failed { reason } => (record.fee_charged, TransactionResultResult::TxFailed(vec![ihf(failure(reason))].try_into()?)),
-        TxStatus::Rejected { code, .. } => (fee_bid, rejection(*code)?),
-    };
-    Ok(TransactionResult { fee_charged, result, ext: TransactionResultExt::V0 })
-}
-
-/// The operation result of a failed apply, from the applier's reason prefix.
-fn failure(reason: &str) -> InvokeHostFunctionResult {
-    if reason.starts_with("RESOURCE_LIMIT_EXCEEDED") {
-        InvokeHostFunctionResult::ResourceLimitExceeded
-    } else if reason.starts_with("ENTRY_ARCHIVED") {
-        InvokeHostFunctionResult::EntryArchived
-    } else if reason.starts_with("INSUFFICIENT_REFUNDABLE_FEE") {
-        InvokeHostFunctionResult::InsufficientRefundableFee
-    } else {
-        InvokeHostFunctionResult::Trapped
+/// The full fee an envelope bids: a fee bump's outer fee.
+pub fn fee_bid(envelope: &TransactionEnvelope) -> i64 {
+    match envelope {
+        TransactionEnvelope::Tx(e) => e.tx.fee as i64,
+        TransactionEnvelope::TxV0(e) => e.tx.fee as i64,
+        TransactionEnvelope::TxFeeBump(e) => e.tx.fee,
     }
 }
 
-fn rejection(code: TxCode) -> Result<TransactionResultResult> {
-    use TransactionResultResult as R;
-    Ok(match code {
-        TxCode::Malformed => R::TxMalformed,
-        TxCode::NotSupported => R::TxNotSupported,
-        TxCode::TooEarly => R::TxTooEarly,
-        TxCode::TooLate => R::TxTooLate,
-        TxCode::BadMinSeqAgeOrGap => R::TxBadMinSeqAgeOrGap,
-        TxCode::NoAccount => R::TxNoAccount,
-        TxCode::BadSeq => R::TxBadSeq,
-        TxCode::BadAuth => R::TxBadAuth,
-        TxCode::OpBadAuth => R::TxFailed(vec![OperationResult::OpBadAuth].try_into()?),
-        TxCode::BadAuthExtra => R::TxBadAuthExtra,
-        TxCode::InsufficientFee => R::TxInsufficientFee,
-        TxCode::InsufficientBalance => R::TxInsufficientBalance,
-        TxCode::SorobanInvalid => R::TxSorobanInvalid,
-    })
+/// The `TransactionResult` core reports for `record`. A rejected envelope
+/// gets the result code `sendTransaction` returns as `errorResultXdr`, which
+/// carries the fee bid.
+pub fn result(record: &TxRecord, fee_bid: i64) -> TransactionResult {
+    let mut result = record.transaction_result();
+    if let TxStatus::Rejected { .. } = record.status {
+        result.fee_charged = fee_bid;
+    }
+    result
 }
 
 /// One ledger key a transaction could have changed, before and after it.
@@ -190,17 +130,22 @@ pub struct Touched {
 }
 
 /// A `TransactionMeta` V4 for an applied (or failed) transaction. The source
-/// account's fee, sequence number and refund are `tx_changes_before`; the
+/// account's sequence number and the fee source's fee and refund (the same
+/// account unless fee-bumped) are `tx_changes_before`; the
 /// operation's footprint changes, data and TTL entries alike, are the
 /// operation's changes. This is a reconstruction from before and after
 /// values, not core's exact change list.
-pub fn meta(record: &TxRecord, source: &Touched, footprint: &[Touched], apply_ledger: u32) -> Result<TransactionMeta> {
+pub fn meta(record: &TxRecord, accounts: &[Touched], footprint: &[Touched], apply_ledger: u32) -> Result<TransactionMeta> {
     let applied = record.status.is_applied();
     let mut op_changes = vec![];
     if applied {
-        for t in footprint.iter().filter(|t| t.key != source.key) {
+        for t in footprint.iter().filter(|t| accounts.iter().all(|a| a.key != t.key)) {
             op_changes.extend(changes(t, apply_ledger)?);
         }
+    }
+    let mut before_changes = vec![];
+    for a in accounts {
+        before_changes.extend(changes(a, apply_ledger)?);
     }
     let return_value = match &record.status {
         TxStatus::Applied { value } => Some(value.clone()),
@@ -209,7 +154,7 @@ pub fn meta(record: &TxRecord, source: &Touched, footprint: &[Touched], apply_le
     let refundable_charged = if applied { record.rent_fee + record.events_fee } else { 0 };
     Ok(TransactionMeta::V4(TransactionMetaV4 {
         ext: ExtensionPoint::V0,
-        tx_changes_before: LedgerEntryChanges(changes(source, apply_ledger)?.try_into()?),
+        tx_changes_before: LedgerEntryChanges(before_changes.try_into()?),
         operations: if applied {
             vec![OperationMetaV2 {
                 ext: ExtensionPoint::V0,

@@ -7,7 +7,7 @@ use soroban_env_host::xdr::{
     ContractCostParamEntry, ContractCostParams, ContractCostType, ContractDataDurability,
     ContractDataEntry, ContractExecutable, ContractId, ExtensionPoint, Hash, HostFunction,
     InvokeContractArgs, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerKey, LedgerKeyAccount,
-    InvokeHostFunctionOp, LedgerKeyConfigSetting, LedgerKeyContractCode, LedgerKeyContractData,
+    InvokeHostFunctionOp, LedgerKeyContractCode, LedgerKeyContractData,
     Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ReadXdr,
     ScAddress, ScContractInstance, ScMap, ScMapEntry, ScSymbol, ScVal, SequenceNumber, String32,
     Thresholds, Transaction, TransactionEnvelope, TransactionExt, TransactionV1Envelope, Uint256,
@@ -625,25 +625,7 @@ pub fn integration_request(
 }
 
 pub fn ledger_entry_to_ledger_key(entry: &LedgerEntry) -> Result<LedgerKey> {
-    match &entry.data {
-        LedgerEntryData::Account(a) => Ok(LedgerKey::Account(LedgerKeyAccount {
-            account_id: a.account_id.clone(),
-        })),
-        LedgerEntryData::ContractData(cd) => Ok(LedgerKey::ContractData(LedgerKeyContractData {
-            contract: cd.contract.clone(),
-            key: cd.key.clone(),
-            durability: cd.durability,
-        })),
-        LedgerEntryData::ContractCode(code) => Ok(LedgerKey::ContractCode(LedgerKeyContractCode {
-            hash: code.hash.clone(),
-        })),
-        LedgerEntryData::ConfigSetting(cs) => {
-            Ok(LedgerKey::ConfigSetting(LedgerKeyConfigSetting {
-                config_setting_id: cs.discriminant(),
-            }))
-        }
-        other => bail!("unsupported fixture ledger entry type: {other:?}"),
-    }
+    Ok(entry.to_key())
 }
 
 pub fn account_id(bytes: [u8; 32]) -> AccountId {

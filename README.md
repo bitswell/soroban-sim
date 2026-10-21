@@ -172,6 +172,22 @@ STELLAR_SIGN_WITH_KEY=<throwaway> ./your-deploy-script.sh
 
 See `docs/rpc-facade.md`.
 
+Both read a fork either lazily at RPC's latest ledger (`--fork-mode head`, the
+default) or pinned to one ledger with every read rolled back to it through the
+later ledgers' close meta (`--fork-mode checkpoint [--fork-ledger N]`).
+
+`soroban-sim replay` checks the session's transaction layer against the
+network: it records recent real mainnet and testnet Soroban transactions with
+the exact state each applied against, replays them through the session, and
+compares results, return values, events, after-images, fees and core's
+resource metrics. The committed sample in `fixtures/replay` replays exactly in
+CI; see `docs/replay.md`.
+
+```sh
+cargo run --release -p soroban-sim-cli -- replay fetch --network mainnet --min-ledgers 55 --out mainnet.json.gz
+cargo run --release -p soroban-sim-cli -- replay run fixtures/replay/*.json.gz --report fidelity
+```
+
 The web demo runs the same session in the browser. The component exports it as
 the WIT `network-session` resource, and its log and fork cache live in
 IndexedDB, so a reload resumes it. A service worker serves it at a virtual RPC
@@ -187,6 +203,7 @@ request handler, `crates/soroban-sim-facade`. See `docs/browser-session.md`.
 - `docs/architecture.md` — design and state-loading plan.
 - `docs/session.md` — network sessions: engine, plan format, CLI, report.
 - `docs/rpc-facade.md` — `soroban-sim serve`: the RPC facade, its `fork_*` methods, and rehearsing existing scripts.
+- `docs/replay.md` — `soroban-sim replay`: replaying real network transactions to check the session's fidelity.
 - `docs/browser-session.md` — network sessions in the browser: the WIT resource, the IndexedDB log, the virtual RPC, the timeline and replay safety.
 - `docs/feasibility.md` — Milestone 0 proof and blocker inventory.
 - `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.

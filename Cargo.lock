@@ -1780,6 +1780,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "soroban-builtin-sdk-macros"
+version = "29.0.2"
+source = "git+https://github.com/stellar/rs-soroban-env?tag=v29.0.2#3d565bda02c522dce089dc42d5e3a94a05111891"
+dependencies = [
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "soroban-env-common"
 version = "29.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1789,7 +1800,23 @@ dependencies = [
  "ethnum",
  "num-derive",
  "num-traits",
- "soroban-env-macros",
+ "soroban-env-macros 29.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "soroban-wasmi",
+ "static_assertions",
+ "stellar-xdr",
+ "wasmparser 0.116.1",
+]
+
+[[package]]
+name = "soroban-env-common"
+version = "29.0.2"
+source = "git+https://github.com/stellar/rs-soroban-env?tag=v29.0.2#3d565bda02c522dce089dc42d5e3a94a05111891"
+dependencies = [
+ "crate-git-revision 0.0.9",
+ "ethnum",
+ "num-derive",
+ "num-traits",
+ "soroban-env-macros 29.0.2 (git+https://github.com/stellar/rs-soroban-env?tag=v29.0.2)",
  "soroban-wasmi",
  "static_assertions",
  "stellar-xdr",
@@ -1825,8 +1852,44 @@ dependencies = [
  "sec1",
  "sha2",
  "sha3",
- "soroban-builtin-sdk-macros",
- "soroban-env-common",
+ "soroban-builtin-sdk-macros 29.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "soroban-env-common 29.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "soroban-wasmi",
+ "static_assertions",
+ "stellar-strkey",
+ "wasmparser 0.116.1",
+]
+
+[[package]]
+name = "soroban-env-host"
+version = "29.0.2"
+source = "git+https://github.com/stellar/rs-soroban-env?tag=v29.0.2#3d565bda02c522dce089dc42d5e3a94a05111891"
+dependencies = [
+ "ark-bls12-381",
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff",
+ "ark-serialize",
+ "curve25519-dalek",
+ "ecdsa",
+ "ed25519-dalek",
+ "elliptic-curve",
+ "generic-array",
+ "getrandom",
+ "hex-literal",
+ "hmac",
+ "k256",
+ "num-derive",
+ "num-integer",
+ "num-traits",
+ "p256",
+ "rand",
+ "rand_chacha",
+ "sec1",
+ "sha2",
+ "sha3",
+ "soroban-builtin-sdk-macros 29.0.2 (git+https://github.com/stellar/rs-soroban-env?tag=v29.0.2)",
+ "soroban-env-common 29.0.2 (git+https://github.com/stellar/rs-soroban-env?tag=v29.0.2)",
  "soroban-wasmi",
  "static_assertions",
  "stellar-strkey",
@@ -1849,18 +1912,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "soroban-env-macros"
+version = "29.0.2"
+source = "git+https://github.com/stellar/rs-soroban-env?tag=v29.0.2#3d565bda02c522dce089dc42d5e3a94a05111891"
+dependencies = [
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "stellar-xdr",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "soroban-sim-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "clap",
+ "flate2",
  "serde",
  "serde_json",
  "serde_path_to_error",
  "serde_yaml",
  "sha2",
- "soroban-env-host",
+ "soroban-env-host 29.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "soroban-sim-core",
  "soroban-sim-facade",
  "soroban-simulation",
@@ -1876,7 +1954,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "serde_json",
- "soroban-env-host",
+ "soroban-env-host 29.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "soroban-sim-core",
  "soroban-sim-facade",
  "wit-bindgen",
@@ -1893,7 +1971,8 @@ dependencies = [
  "p256",
  "serde_json",
  "sha2",
- "soroban-env-host",
+ "soroban-env-host 29.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "soroban-env-host 29.0.2 (git+https://github.com/stellar/rs-soroban-env?tag=v29.0.2)",
  "soroban-simulation",
  "stellar-strkey",
 ]
@@ -1907,7 +1986,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "soroban-env-host",
+ "soroban-env-host 29.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "soroban-sim-core",
  "soroban-simulation",
  "stellar-xdr",
@@ -1921,7 +2000,7 @@ checksum = "eec832795a230769c684f6aea29e37de839c74965f1c7c5002554ec16580bd3f"
 dependencies = [
  "anyhow",
  "rand",
- "soroban-env-host",
+ "soroban-env-host 29.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "static_assertions",
  "thiserror 1.0.69",
 ]

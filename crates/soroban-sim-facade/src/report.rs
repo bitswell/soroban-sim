@@ -441,11 +441,16 @@ pub fn shorten_addresses(s: &str) -> String {
 
 /// What the rehearsal does and does not model, for every session report.
 pub fn session_fidelity() -> Vec<String> {
+    let metering = if soroban_sim_core::session::EXACT_APPLY {
+        "metered exactly as stellar-core's host"
+    } else {
+        "metered by the recording-mode build simulation uses, which charges slightly more CPU than stellar-core's host on writes"
+    };
     vec![
-        "Host-exact: contracts run in the same soroban-env-host as the network's protocol, in enforcing mode, with a module cache, and every auth signature is verified.".into(),
-        "Envelope-approximate: the transaction layer (sequence numbers, preconditions, signature weights and thresholds, fee bid, resource fee and limits, balance above reserve, fee charged before apply, rent and refund) is a port of stellar-core's checks, not core itself.".into(),
-        "Not modelled: classic operations (funding is an override), fee-bump and muxed fee sources, surge pricing, several transactions per ledger, per-ledger limits, and core's PRNG seed.".into(),
-        "The fork reads RPC's latest ledger lazily; drift below lists any entry that changed after the fork ledger.".into(),
+        format!("Host-exact: contracts run in the same soroban-env-host release as the network's protocol, in enforcing mode, with a module cache, {metering}, and every auth signature is verified."),
+        "Transaction layer: a port of stellar-core's checks (preconditions, sequence numbers, signature weights and thresholds, v1 and fee-bump envelopes, fee bid, resource fee and limits, balance above reserve, fee charged before apply, disk-read metering, rent and refund), checked against real mainnet and testnet transactions by `soroban-sim replay` (docs/replay.md).".into(),
+        "Not modelled: classic operations (funding is an override), ExtendFootprintTtl and RestoreFootprint operations, several transactions per ledger, per-ledger limits and surge pricing (one ledger per transaction at the base fee), and core's PRNG seed.".into(),
+        "A head fork reads RPC's latest ledger lazily (drift below lists any entry that changed after the fork ledger); a checkpoint fork rolls every read back to the fork ledger.".into(),
     ]
 }
 
@@ -474,7 +479,7 @@ pub fn build_report(s: &Session, ctx: ReportContext) -> Report {
     let log = s.log();
     let mut by_payer: BTreeMap<String, PayerFees> = BTreeMap::new();
     for t in log {
-        let Some(src) = &t.source else { continue };
+        let Some(src) = t.fee_source.as_ref().or(t.source.as_ref()) else { continue };
         if matches!(t.status, TxStatus::Rejected { .. }) {
             continue;
         }

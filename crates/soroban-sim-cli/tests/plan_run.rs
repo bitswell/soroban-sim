@@ -3,7 +3,7 @@
 
 use base64::Engine;
 use soroban_env_host::xdr::{LedgerEntry, LedgerEntryData, LedgerEntryExt, Limits, ReadXdr};
-use soroban_sim_cli::run::{Base, RunConfig, Runner, TESTNET_PASSPHRASE};
+use soroban_sim_cli::run::{Base, ForkMode, RunConfig, Runner, TESTNET_PASSPHRASE};
 use soroban_sim_cli::snapshot::SnapshotFile;
 use soroban_sim_core::session::{host_protocol, new_account, Ed25519Key, ForkPoint, StoredEntry};
 use std::collections::BTreeMap;
@@ -58,6 +58,7 @@ fn config(base: PathBuf) -> RunConfig {
     RunConfig {
         plan_path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/rehearsal.yaml"),
         base: Some(Base::Snapshot(base)),
+        fork_mode: ForkMode::Head,
         wasm_dirs: vec![],
         differential: false,
         keep_going: true,
@@ -262,6 +263,7 @@ fn the_two_step_example_runs_over_the_recorded_testnet_fork() {
     let report = Runner::new(RunConfig {
         plan_path: repo().join("examples/session/two-step-add.yaml"),
         base: Some(Base::Snapshot(recorded_testnet_fork(&dir))),
+        fork_mode: ForkMode::Head,
         wasm_dirs: vec![],
         differential: false,
         keep_going: false,

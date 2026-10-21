@@ -11,7 +11,7 @@ use soroban_env_host::xdr::{
     Preconditions, ReadXdr, ScAddress, ScString, ScSymbol, ScVal, TransactionEnvelope, Uint256, WriteXdr,
 };
 use soroban_sim_core::session::{
-    account_key, host_protocol, show_scval, AuthSigner, AuthSignerSource, Ed25519Key, EntryState,
+    account_key, host_protocol, rejection_code, show_scval, AuthSigner, AuthSignerSource, Ed25519Key, EntryState,
     ExternalKey, ForkPoint, LedgerSource, OzDigest, OzSigner, PrepareRequest, Secp256r1Key, Session,
     SessionOptions, StoredEntry, TxRecord, TxStatus, ADDR_OZ_V1_DOMAIN,
 };
@@ -23,6 +23,7 @@ use crate::plan::{
     interpolate, CallSpec, ClassicSpec, Computed, Expect, Fails, KeySpec, NetworkSpec, OverrideSpec, OzSignerSpec,
     Plan, RuleSpec, SignerSpec, Step, ValueExpr,
 };
+use crate::checkpoint::{CheckpointLedger, CheckpointSource};
 use crate::report::*;
 use crate::rpc::{RpcClient, RpcSource};
 use crate::snapshot::SnapshotFile;
@@ -36,14 +37,51 @@ pub use soroban_sim_facade::{MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
 
 /// Where the fork comes from.
 pub enum Base {
-    Rpc { name: String, url: String, passphrase: Option<String> },
+    Rpc { name: String, url: String, passphrase: Option<String>, mode: ForkMode },
     Snapshot(PathBuf),
+}
+
+/// How an RPC fork reads the network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ForkMode {
+    /// Lazily at RPC's latest ledger: cheap, but a long session can mix
+    /// ledgers (the drift report shows whether it did).
+    #[default]
+    Head,
+    /// Every read rolled back to one pinned ledger through the close meta of
+    /// the ledgers since (`None`: the latest when the fork opens).
+    Checkpoint(Option<u32>),
+}
+
+impl ForkMode {
+    /// `head` or `checkpoint`, with an optional pinned ledger.
+    pub fn parse(mode: Option<&str>, ledger: Option<u32>) -> Result<Self> {
+        match (mode, ledger) {
+            (None | Some("head"), None) => Ok(Self::Head),
+            (Some("head"), Some(_)) => bail!("--fork-ledger pins a checkpoint fork; it needs --fork-mode checkpoint"),
+            (None | Some("checkpoint"), l) => Ok(Self::Checkpoint(l)),
+            (Some(other), _) => bail!("unknown fork mode {other:?}: use head or checkpoint"),
+        }
+    }
+}
+
+impl Base {
+    /// The same base read in `mode` (snapshots are already one ledger).
+    pub fn with_mode(self, mode: ForkMode) -> Result<Self> {
+        match self {
+            Base::Rpc { name, url, passphrase, .. } => Ok(Base::Rpc { name, url, passphrase, mode }),
+            Base::Snapshot(p) if mode == ForkMode::Head => Ok(Base::Snapshot(p)),
+            Base::Snapshot(_) => bail!("a snapshot is already one ledger; --fork-mode applies to RPC forks"),
+        }
+    }
 }
 
 pub struct RunConfig {
     pub plan_path: PathBuf,
     /// `None`: the plan's `network`.
     pub base: Option<Base>,
+    /// How an RPC base is read (the plan's network included).
+    pub fork_mode: ForkMode,
     pub wasm_dirs: Vec<PathBuf>,
     pub differential: bool,
     pub keep_going: bool,
@@ -63,10 +101,10 @@ pub fn network_preset(name: &str) -> Option<(&'static str, &'static str)> {
 /// `mainnet`, `testnet`, or an RPC URL.
 pub fn base_from_name(name: &str, passphrase: Option<String>) -> Result<Base> {
     if let Some((url, p)) = network_preset(name) {
-        return Ok(Base::Rpc { name: name.into(), url: url.into(), passphrase: Some(passphrase.unwrap_or_else(|| p.into())) });
+        return Ok(Base::Rpc { name: name.into(), url: url.into(), passphrase: Some(passphrase.unwrap_or_else(|| p.into())), mode: ForkMode::Head });
     }
     if name.starts_with("http://") || name.starts_with("https://") {
-        return Ok(Base::Rpc { name: name.into(), url: name.into(), passphrase });
+        return Ok(Base::Rpc { name: name.into(), url: name.into(), passphrase, mode: ForkMode::Head });
     }
     bail!("unknown network {name:?}: use mainnet, testnet or an RPC URL")
 }
@@ -74,7 +112,9 @@ pub fn base_from_name(name: &str, passphrase: Option<String>) -> Result<Base> {
 fn base_from_spec(spec: &NetworkSpec) -> Result<Base> {
     match spec {
         NetworkSpec::Named(n) => base_from_name(n, None),
-        NetworkSpec::Custom { rpc, passphrase } => Ok(Base::Rpc { name: rpc.clone(), url: rpc.clone(), passphrase: Some(passphrase.clone()) }),
+        NetworkSpec::Custom { rpc, passphrase } => {
+            Ok(Base::Rpc { name: rpc.clone(), url: rpc.clone(), passphrase: Some(passphrase.clone()), mode: ForkMode::Head })
+        }
     }
 }
 
@@ -134,7 +174,8 @@ impl Runner {
         let base = match config.base {
             Some(b) => b,
             None => base_from_spec(plan.network.as_ref().ok_or_else(|| anyhow!("the plan names no network; pass --fork or --snapshot"))?)?,
-        };
+        }
+        .with_mode(config.fork_mode)?;
         let mut options = SessionOptions::new("");
         if let Some(s) = plan.options.seconds_per_ledger {
             options.seconds_per_ledger = s;
@@ -398,10 +439,17 @@ impl Runner {
         let text = record.status.summary();
         Ok(match &record.status {
             TxStatus::Applied { value } => Outcome { outcome: "applied", detail: show_scval(value), text, value: Some(value.clone()), succeeded: true, tx: Some(record) },
-            TxStatus::Failed { reason } => Outcome { outcome: "failed", detail: reason.clone(), text, value: None, succeeded: false, tx: Some(record) },
-            TxStatus::Rejected { code, detail } => {
-                Outcome { outcome: "rejected", detail: format!("{}: {detail}", code.as_str()), text, value: None, succeeded: false, tx: Some(record) }
+            TxStatus::Failed { code, reason } => {
+                Outcome { outcome: "failed", detail: format!("{}: {reason}", code.as_str()), text, value: None, succeeded: false, tx: Some(record) }
             }
+            TxStatus::Rejected { code, detail, fee_bump_inner } => Outcome {
+                outcome: "rejected",
+                detail: format!("{}: {detail}", rejection_code(*code, *fee_bump_inner)),
+                text,
+                value: None,
+                succeeded: false,
+                tx: Some(record),
+            },
         })
     }
 
@@ -807,7 +855,7 @@ pub(crate) struct Forked {
 
 pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> {
     match base {
-        Base::Rpc { name, url, passphrase } => {
+        Base::Rpc { name, url, passphrase, mode } => {
             let rpc = Rc::new(RpcClient::new(&url));
             let actual = rpc.network_passphrase()?;
             if let Some(p) = &passphrase {
@@ -815,27 +863,38 @@ pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> 
                     bail!("{url} serves {actual:?}, not {p:?}");
                 }
             }
-            let latest = rpc.latest_ledger()?;
-            if latest.protocol_version != host_protocol() {
-                bail!("{name} is on protocol {}, this build's host implements protocol {}", latest.protocol_version, host_protocol());
+            let (header, source): (LedgerHeader, Rc<dyn Fn() -> Box<dyn LedgerSource>>) = match mode {
+                ForkMode::Head => {
+                    let latest = rpc.latest_ledger()?;
+                    let source = rpc.clone();
+                    (latest.header, Rc::new(move || Box::new(RpcSource(source.clone()))))
+                }
+                ForkMode::Checkpoint(ledger) => {
+                    let pinned = CheckpointSource::open(rpc.clone(), ledger)?;
+                    let source = pinned.source.clone();
+                    (pinned.header, Rc::new(move || Box::new(CheckpointLedger(source.clone()))))
+                }
+            };
+            if header.ledger_version != host_protocol() {
+                bail!("{name} is on protocol {}, this build's host implements protocol {}", header.ledger_version, host_protocol());
             }
             let fork = ForkPoint {
-                ledger_seq: latest.sequence,
-                close_time: latest.header.scp_value.close_time.0,
-                protocol_version: latest.protocol_version,
-                base_reserve: latest.header.base_reserve,
-                base_fee: latest.header.base_fee,
+                ledger_seq: header.ledger_seq,
+                close_time: header.scp_value.close_time.0,
+                protocol_version: header.ledger_version,
+                base_reserve: header.base_reserve,
+                base_fee: header.base_fee,
             };
             let mut options = options.clone();
             options.network_passphrase = actual.clone();
-            let source = rpc.clone();
+            let description = source().describe();
             Ok(Forked {
                 network_name: name,
                 passphrase: actual,
-                description: RpcSource(rpc.clone()).describe(),
+                description,
                 rpc: Some(rpc),
-                header: Some(latest.header),
-                fresh: Box::new(move || Session::new(Box::new(RpcSource(source.clone())), fork.clone(), options.clone())),
+                header: Some(header),
+                fresh: Box::new(move || Session::new(source(), fork.clone(), options.clone())),
             })
         }
         Base::Snapshot(path) => {

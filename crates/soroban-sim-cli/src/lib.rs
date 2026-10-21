@@ -4,8 +4,11 @@
 //! tools and the scripts built on them rehearse unchanged. Nothing is ever
 //! submitted to the network.
 
+pub mod checkpoint;
 pub mod differential;
+pub mod meta;
 pub mod plan;
+pub mod replay;
 pub mod rpc;
 pub mod run;
 pub mod serve;

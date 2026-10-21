@@ -246,7 +246,7 @@ mod tests {
         let s = NetworkSession::new(config());
         let first = s.rpc(r#"{"jsonrpc":"2.0","id":1,"method":"getNetwork"}"#.into()).unwrap();
         let Reply::NeedsState(keys) = first else { panic!("expected needs-state, got {first:?}") };
-        assert_eq!(keys.len(), 10);
+        assert_eq!(keys.len(), 13);
         let (r, rounds) = answer(&s, || s.rpc(r#"{"jsonrpc":"2.0","id":1,"method":"getNetwork"}"#.into()));
         assert_eq!(rounds, 1);
         assert_eq!(r["result"]["passphrase"], PASSPHRASE);
@@ -295,8 +295,9 @@ mod tests {
                 Err(e) => Some(e),
                 Ok(Reply::NeedsState(keys)) => {
                     let base = settings();
-                    let entries = keys.iter().filter_map(|k| base.iter().find(|(bk, _)| bk == k)).map(|(_, e)| BaseEntry { entry_xdr: e.clone(), live_until_ledger: None }).collect();
-                    s.provide(BaseBatch { served_at_ledger: FORK_LEDGER, entries, absent_keys: vec![] }).unwrap();
+                    let (present, absent): (Vec<_>, Vec<_>) = keys.into_iter().partition(|k| base.iter().any(|(bk, _)| bk == k));
+                    let entries = present.iter().filter_map(|k| base.iter().find(|(bk, _)| bk == k)).map(|(_, e)| BaseEntry { entry_xdr: e.clone(), live_until_ledger: None }).collect();
+                    s.provide(BaseBatch { served_at_ledger: FORK_LEDGER, entries, absent_keys: absent }).unwrap();
                     None
                 }
                 Ok(other) => panic!("expected an error, got {other:?}"),

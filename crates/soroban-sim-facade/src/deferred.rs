@@ -19,8 +19,9 @@ use std::rc::Rc;
 use crate::{Facade, FacadeConfig};
 
 /// The network settings a session reads when it opens: soroban-simulation's
-/// `NetworkConfig` and the validator's per-transaction limits.
-pub const OPEN_SETTINGS: [ConfigSettingId; 10] = [
+/// `NetworkConfig` and the validator's per-transaction and entry-size limits.
+pub const OPEN_SETTINGS: [ConfigSettingId; 13] = [
+    ConfigSettingId::ContractMaxSizeBytes,
     ConfigSettingId::ContractComputeV0,
     ConfigSettingId::ContractLedgerCostV0,
     ConfigSettingId::ContractLedgerCostExtV0,
@@ -30,6 +31,8 @@ pub const OPEN_SETTINGS: [ConfigSettingId; 10] = [
     ConfigSettingId::StateArchival,
     ConfigSettingId::ContractCostParamsCpuInstructions,
     ConfigSettingId::ContractCostParamsMemoryBytes,
+    ConfigSettingId::ContractDataKeySizeBytes,
+    ConfigSettingId::ContractDataEntrySizeBytes,
     ConfigSettingId::LiveSorobanStateSizeWindow,
 ];
 
