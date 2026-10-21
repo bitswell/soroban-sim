@@ -190,7 +190,7 @@ const submitErr = $("submit-err");
 const submitProgress = $("submit-progress");
 const confirmSubmitBtn = $<HTMLButtonElement>("confirm-submit");
 
-/** Per-transaction host budget caps (soroban-env-host, protocol 28). */
+/** Per-transaction host budget caps (soroban-env-host, protocol 29). */
 const CPU_CAP = 100_000_000;
 const MEM_CAP = 40 * 1024 * 1024;
 const TESTNET_RPC_URL = "https://soroban-testnet.stellar.org";

@@ -1,50 +1,31 @@
-# Local protocol-28 RPC parity runbook
+# Local protocol-29 RPC parity runbook
 
-> Historical capture runbook: the live workbench now pins protocol 28 to match
-> Testnet. Use this document only when regenerating the committed protocol-28
-> `local-add-i32` comparison fixture.
+This procedure captures the `local-add-i32` fixture from a **local Stellar RPC
+pinned to protocol 29**, the same protocol the repository's `soroban-env-host`
+29.0.2 pin (and the live workbench) runs.
 
-This procedure captured a fixture from a **local Stellar RPC pinned to protocol
-28** while the repository also pinned `soroban-env-host` 28.0.2. To repeat it
-today, use a protocol-28 local node and keep the workbench on Testnet's current
-protocol.
+## Why a local node
 
-## Why this closes the residual
+The `native-sac-*` fixtures come from public Testnet, which only hosts the
+built-in Stellar Asset Contract we can invoke without deploying anything. A local
+quickstart node lets us deploy the custom `add-i32` wasm and capture a
+**custom-wasm** parity case. The host's replay-safety guard
+(`check_ledger_protocol_supported`) rejects any ledger protocol other than 29,
+and raw CPU instruction metering differs between protocols, so the node must run
+protocol 29 for both sides to meter identically.
 
-The public-Testnet fixtures were captured at ledger protocol 27. At the time of
-this experiment, `soroban-sim-core` linked `soroban-env-host` 28.0.2, whose
-network interface protocol was **28**. The host's
-replay-safety guard (`check_ledger_protocol_supported`) rejects any ledger
-protocol != 28, so the differential harness pins the simulated ledger context to
-protocol 28 when replaying those p27 fixtures. RESULT / FOOTPRINT / AUTH / EVENT
-parity is unaffected, but **raw CPU instruction metering and the resource fee
-derived from it differ between protocol 27 and 28** — that cross-protocol delta
-is exactly the `divergent-explained` residual (resource fee within ~0.1%) the
-harness documents.
+## Actual result (`local-add-i32`, captured 2026-10-20)
 
-Capture the same transaction against a **protocol-28** RPC and both sides meter
-under the *same* protocol, removing the cross-protocol component of the residual.
+Captured against a local protocol-29 quickstart node (`stellar/quickstart:testing`,
+core 29.0.0 embedding `soroban-env-host` 29.0.0), custom add-i32 wasm. Verdicts vs
+the recorded RPC `simulateTransaction`: result (`ScVal::I32(42)`), footprint (2
+read-only, 0 read-write), auth (0), contract events (0), read/write bytes,
+instructions (295 293 RpcDefault = 245 293 raw + 50 000) and resource fee
+(12 605 stroops) all **match** exactly.
 
-## Actual result (`local-add-i32`, captured 2026-08-23)
-
-Captured against a local protocol-28 quickstart node (`stellar/quickstart:future`,
-custom add-i32 wasm). Verdicts vs the recorded RPC `simulateTransaction`:
-
-- **byte-equal / `match`:** result (`ScVal::I32(42)`), footprint (2 read-only,
-  0 read-write), auth (0), contract events (0), read/write bytes — the first
-  **custom-wasm** parity, not just the built-in SAC.
-- **residual shrank but did not fully close:** raw instructions 244 730 (ours)
-  vs 250 377 (RPC-implied) → +5 647; resource fee 50 231 vs 50 245 → **+14
-  stroops (0.028%)**, versus ~0.1% for the protocol-27 testnet fixtures.
-
-Root cause (grounded via `docker exec stellar-p28 stellar-core version`): the
-quickstart core's protocol-28 host reports **`soroban-env-host` package version
-28.0.0**, while this repo pins **`=28.0.2`**. The remaining delta is a
-patch-level CPU-metering calibration difference (28.0.0 → 28.0.2), *not* a
-protocol difference and *not* a flaw in the adjustment model (which reproduces
-`max(raw+50000, raw×1.04)` exactly). To drive it to zero, either build/point at a
-core embedding env-host 28.0.2 (try `-t nightly`, rebuilt daily) or pin this repo
-to 28.0.0 to match the deployed network.
+(The earlier protocol-28 capture, replayed by the protocol-28.0.2 host against a
+28.0.0 core, left a +5 647-instruction / +14-stroop patch-level residual; the
+29.0.0 core and the 29.0.2 pin meter this contract identically.)
 
 ## Prerequisites
 
@@ -53,13 +34,13 @@ to 28.0.0 to match the deployed network.
 - **stellar CLI** (27.x): `stellar --version`.
 - Repo deps installed: `pnpm install`.
 
-## 1. Start the local protocol-28 RPC
+## 1. Start the local protocol-29 RPC
 
 `stellar container start` runs a quickstart node (Stellar core + RPC + Horizon +
 friendbot) on port 8000. The `local` network supports `--protocol-version`:
 
 ```sh
-stellar container start local --protocol-version 28 --name p28
+stellar container start local --protocol-version 29 --name p29
 ```
 
 This exposes:
@@ -73,7 +54,7 @@ Friendbot is enabled by default in local mode. Fund any account with
 `GET http://localhost:8000/friendbot?addr=<G...>`. Watch startup / tail logs:
 
 ```sh
-stellar container logs p28
+stellar container logs p29
 ```
 
 Wait until the RPC reports healthy (the log shows core catching up and RPC
@@ -124,7 +105,7 @@ stellar contract invoke --id <C...> --source deployer --network local \
   -- add --a 7 --b 35        # → 42
 ```
 
-## 4. Capture the protocol-28 parity fixture
+## 4. Capture the protocol-29 parity fixture
 
 The capture script honors these env vars:
 
@@ -133,7 +114,7 @@ The capture script honors these env vars:
   set it to `http://localhost:8000/friendbot` (no trailing `/?addr=`).
 - `SOROBAN_ALLOW_HTTP=1` — required for plain-http `localhost` (the SDK's
   `rpc.Server` rejects non-TLS URLs otherwise).
-- `SOROBAN_NETWORK=local-p28` — tags the fixture's `network` field.
+- `SOROBAN_NETWORK=local-p29` — tags the fixture's `network` field.
 - `SOROBAN_NETWORK_PASSPHRASE` — the local standalone passphrase (governs
   signing + networkId; the `local-add-i32` contract id comes from env, so it is
   passphrase-independent).
@@ -145,7 +126,7 @@ The one command (writes `fixtures/parity/local-add-i32.json`):
 SOROBAN_RPC_URL=http://localhost:8000/rpc \
 FRIENDBOT_URL=http://localhost:8000/friendbot \
 SOROBAN_ALLOW_HTTP=1 \
-SOROBAN_NETWORK=local-p28 \
+SOROBAN_NETWORK=local-p29 \
 SOROBAN_NETWORK_PASSPHRASE="Standalone Network ; February 2017" \
 LOCAL_CONTRACT_ID=<C...> \
 pnpm run capture:parity local-add-i32
@@ -154,7 +135,7 @@ pnpm run capture:parity local-add-i32
 The script funds a throwaway source account via friendbot, simulates
 `add(7, 35) -> 42` against the local RPC, and snapshots the footprint entries +
 all `ConfigSetting` entries so the fixture replays offline with zero needs-state
-round trips. On success it logs `protocol=28`.
+round trips. On success it logs `protocol=29`.
 
 ## 5. Rerun the differential harness
 
@@ -162,19 +143,17 @@ round trips. On success it logs `protocol=28`.
 pnpm --filter @theahaco/soroban-sim test
 ```
 
-The `native-sac-*` fixtures classify their p27↔p28 metering delta as
-`divergent-explained`. The `local-add-i32` fixture is captured at protocol 28, so
-its cross-protocol component is gone; its remaining sub-0.03% residual is the
-env-host 28.0.0-vs-28.0.2 skew documented under "Actual result" above. It is
-already wired into the `FIXTURES` array in
+All three fixtures are captured at protocol 29 and match the protocol-29 host
+exactly. `local-add-i32` is already wired into the
+`FIXTURES` array in
 `packages/soroban-sim/src/differential/differential.test.ts` and passes.
 
 ## Stop the network
 
 ```sh
-stellar container stop p28
+stellar container stop p29
 ```
 
 The quickstart container is started with `--rm`, so stopping it removes it and
-its ledger state. Re-running step 1 starts a fresh protocol-28 network (you will
+its ledger state. Re-running step 1 starts a fresh protocol-29 network (you will
 need to redeploy the contract and recapture).

@@ -18,8 +18,8 @@ sha2 = "0.10.9"
 # Exact crates.io releases corresponding to the protocol currently running on
 # Testnet. A browser preflight must execute with the same host protocol as the
 # ledger snapshot it resolves; upgrade these together when the network moves.
-soroban-env-host = { version = "=28.0.0", default-features = true }
-soroban-simulation = { version = "=28.0.0" }
+soroban-env-host = { version = "=29.0.2", default-features = true }
+soroban-simulation = { version = "=29.0.2" }
 static_assertions = "1.1.0"
 wit-bindgen = "0.60.0"
 

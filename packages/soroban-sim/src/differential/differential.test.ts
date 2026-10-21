@@ -1,12 +1,13 @@
 /**
  * M3 RPC-equivalence differential test.
  *
- * Drives soroban-sim over committed parity fixtures captured from a live Stellar
- * testnet RPC `simulateTransaction`, then compares the two outputs field-by-field
- * (see `./compare.ts`). Two fixtures are exercised:
+ * Drives soroban-sim over committed parity fixtures captured from a Stellar RPC
+ * `simulateTransaction`, then compares the two outputs field-by-field
+ * (see `./compare.ts`). Three fixtures are exercised:
  *   - `native-sac-decimals`  — read-only SAC `decimals()` (result + footprint RO)
  *   - `native-sac-transfer`  — SAC `transfer()` exercising the WRITE + AUTH +
  *     contract-event surface (footprint RW, auth entry, transfer event)
+ *   - `local-add-i32`        — custom-wasm `add()` from a local quickstart node
  *
  * Each fixture is simulated with `applyRpcAdjustments = true`
  * (`AdjustmentSource::RpcDefault`) so the decoded `SorobanTransactionData`
@@ -19,12 +20,11 @@
  *
  * ── Protocol / env-host version note (real findings, not papered over) ──────
  * The two `native-sac-*` fixtures were captured against Stellar testnet at ledger
- * protocol 27 and therefore remain cross-version resource comparisons.
+ * protocol 29, matching the protocol-29 browser host used for live preflight.
  *
- * `local-add-i32` was captured against a LOCAL protocol-28 quickstart node,
- * matching the protocol-28 browser host used for live preflight. In all cases RESULT /
- * FOOTPRINT / AUTH / EVENT / bytes are byte-equal; resource residuals are
- * reported explicitly rather than force-passed.
+ * `local-add-i32` was captured against a LOCAL protocol-29 quickstart node.
+ * In all cases RESULT / FOOTPRINT / AUTH / EVENT / bytes are byte-equal; any
+ * resource residual is reported explicitly rather than force-passed.
  */
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -76,7 +76,7 @@ import { decodeSsim } from "./decode-ssim.js";
 /**
  * Ledger protocol version the linked `soroban-env-host` will run.
  */
-const HOST_PROTOCOL_VERSION = 28;
+const HOST_PROTOCOL_VERSION = 29;
 
 interface ParityFixture {
   networkPassphrase: string;
@@ -123,8 +123,7 @@ function loadFixture(name: string): ParityFixture {
 const FIXTURES = [
   { name: "native-sac-decimals", expectRw: false, expectAuth: false },
   { name: "native-sac-transfer", expectRw: true, expectAuth: true },
-  // Captured against a LOCAL protocol-28 quickstart node (custom add-i32 wasm),
-  // matching the host's pinned protocol — the residual-closing case.
+  // Captured against a LOCAL protocol-29 quickstart node (custom add-i32 wasm).
   { name: "local-add-i32", expectRw: false, expectAuth: false },
 ] as const;
 

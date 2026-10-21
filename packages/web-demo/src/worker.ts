@@ -71,8 +71,8 @@ import type {
 } from "./protocol.js";
 
 const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
-/** The linked soroban-env-host runs protocol 28; the host rejects anything else. */
-const HOST_PROTOCOL_VERSION = 28;
+/** The linked soroban-env-host runs protocol 29; the host rejects anything else. */
+const HOST_PROTOCOL_VERSION = 29;
 const DEFAULT_SIMULATION_SOURCE =
   "GALD63KYDPYZLJLY2VD722RI6HAW3RIKU5AROSPAXTL5JRDJB5NGOJIX";
 const CONFIG_SETTING_IDS = [
