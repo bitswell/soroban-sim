@@ -149,6 +149,9 @@ operation's result, the fee charged and every entry's after-image.
    `sha256(txSetHash ‖ applyIndex)`, over the session's own transaction set.
 5. **Refunds** once every transaction has applied, then the ledger closes.
 
+An error (an RPC fetch failing, say) leaves the session as it was before the
+call, even when an earlier ledger of the batch had already closed.
+
 ## Signers
 
 Keys are throwaway: `sha256("soroban-sim throwaway:" || label)` seeds the key.
