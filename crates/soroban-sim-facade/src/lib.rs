@@ -1022,17 +1022,25 @@ impl Facade {
             return Err(RpcError::invalid(format!("step {index} is not a transaction that reached a ledger")));
         };
         let (host_function, source) = invoke_of(envelope).ok_or_else(|| RpcError::invalid(format!("step {index} has no InvokeHostFunction operation")))?;
-        let entry_json = |e: &StoredEntry| -> RpcResult { Ok(json!({ "entryXdr": e.entry.b64().map_err(RpcError::internal)?, "liveUntilLedger": e.live_until })) };
+        let entry_json = |k: &LedgerKey, e: &StoredEntry| -> RpcResult {
+            Ok(json!({ "keyXdr": k.b64().map_err(RpcError::internal)?, "entryXdr": e.entry.b64().map_err(RpcError::internal)?, "liveUntilLedger": e.live_until }))
+        };
+        // The footprint as the host saw it: an archived entry the step restored
+        // has core's restored TTL, an expired temporary one is gone.
+        let restored_live_until = info.sequence_number + info.min_persistent_entry_ttl - 1;
         let mut entries = vec![];
         for t in &d.touched {
-            if let Some(e) = &t.before {
-                entries.push(entry_json(e)?);
+            let Some(e) = &t.before else { continue };
+            match EntryState::of(Some(e), info.sequence_number) {
+                EntryState::ExpiredTemporary => continue,
+                EntryState::Archived => entries.push(entry_json(&t.key, &StoredEntry { live_until: Some(restored_live_until), ..e.clone() })?),
+                _ => entries.push(entry_json(&t.key, e)?),
             }
         }
         // The network's settings, as the session read them from the base.
         for f in self.session.ledger().fetches().iter().filter(|f| f.found && matches!(f.key, LedgerKey::ConfigSetting(_))) {
             if let Some(e) = self.session.ledger().base(&f.key).map_err(RpcError::internal)? {
-                entries.push(entry_json(&e)?);
+                entries.push(entry_json(&f.key, &e)?);
             }
         }
         Ok(json!({

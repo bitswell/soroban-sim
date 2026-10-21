@@ -76,3 +76,63 @@ export type {
   CacheRecord,
   IndexedDbEntryCacheOptions,
 } from "./cache/indexeddb.js";
+
+// Network sessions (#23 phase 4): the component's network-session resource,
+// its base ledger, the IndexedDB log and the virtual RPC protocol.
+export { networkSession } from "./generated/soroban-sim-component.js";
+export {
+  base64ToBytes,
+  bytesToBase64,
+  ledgerEntryXdr,
+  RPC_KEYS_PER_CALL,
+  RpcBaseLedger,
+  StaticBaseLedger,
+} from "./session/base.js";
+export type { BaseBatch, BaseEntry, BaseLedger } from "./session/base.js";
+export {
+  forkConfigFromRpc,
+  MAINNET_PASSPHRASE,
+  MAINNET_RPC_URL,
+  parseLedgerHeader,
+  TESTNET_PASSPHRASE,
+  TESTNET_RPC_URL,
+} from "./session/fork.js";
+export type { ForkFromRpcOptions, LedgerHeaderFields } from "./session/fork.js";
+export { PersistentSession } from "./session/persistent.js";
+export type { ResumeSessionOptions, StartSessionOptions } from "./session/persistent.js";
+export { READ_ONLY_RPC_METHODS, ReadOnlyRpc, RpcRequestError } from "./session/rpc.js";
+export type { ReadOnlyRpcOptions, RpcLatestLedger, RpcLedgerEntry } from "./session/rpc.js";
+export {
+  bodyChangesSession,
+  READ_ONLY_SESSION_METHODS,
+  REFUSED_REAL_SIGNER,
+  SessionRpcError,
+  SorobanSession,
+} from "./session/session.js";
+export type {
+  ComponentBaseBatch,
+  ComponentSession,
+  ForkConfig,
+  LedgerOverride,
+  NetworkSessionModule,
+  Reply,
+  SendResult,
+  SessionClock,
+  SessionReport,
+  SessionReportResult,
+  SessionStep,
+  SessionSteps,
+  SorobanSessionOptions,
+  StepAuth,
+  StepChange,
+  StepDebugContext,
+  TxReport,
+} from "./session/session.js";
+export {
+  loadForkConfig,
+  SESSION_DB_SCHEMA_VERSION,
+  SessionStore,
+  storeForkConfig,
+} from "./session/store.js";
+export type { SessionRecord, SessionStoreOptions, StoredForkConfig } from "./session/store.js";
+export { throwawayKeypair } from "./session/throwaway.js";

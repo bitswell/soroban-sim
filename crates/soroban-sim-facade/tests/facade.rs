@@ -326,3 +326,9 @@ fn revert_undoes_transactions_and_keeps_them_listed() {
     let (status, got) = c.send(&up);
     assert_eq!((status.as_str(), got["status"].as_str()), ("PENDING", Some("SUCCESS")));
 }
+
+#[test]
+fn throwaway_addresses_match_the_browser() {
+    // packages/soroban-sim/src/session/session.test.ts asserts the same address.
+    assert_eq!(g(&Ed25519Key::throwaway("alice")), "GBEFICSBULGI6ZIMM36MCGPLBWQUKAD6JYNR6N3WQD2JOK6BLP4C7F2J");
+}
