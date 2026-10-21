@@ -143,6 +143,18 @@ export class SessionHost {
   private readonly reportBody = $("session-report-body");
 
   constructor(private readonly hooks: SessionHostHooks) {
+    // A tab without a session answers the relay at once, so the service
+    // worker moves on to the tab that has it.
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", (event: MessageEvent<SwRpcRequest>) => {
+        const msg = event.data;
+        const [port] = event.ports;
+        if (msg?.type !== "soroban-sim/rpc" || !port) return;
+        if (this.worker) this.worker.postMessage({ type: "rpc", sessionId: msg.sessionId, body: msg.body }, [port]);
+        else port.postMessage({ held: false });
+      });
+      navigator.serviceWorker.startMessages();
+    }
     this.bind();
     void this.boot();
   }
@@ -158,15 +170,6 @@ export class SessionHost {
     });
     worker.addEventListener("message", (e: MessageEvent<FromSessionWorker>) => this.onWorker(e.data));
     this.worker = worker;
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.addEventListener("message", (event: MessageEvent<SwRpcRequest>) => {
-        const msg = event.data;
-        const [port] = event.ports;
-        if (msg?.type !== "soroban-sim/rpc" || !port) return;
-        worker.postMessage({ type: "rpc", sessionId: msg.sessionId, body: msg.body }, [port]);
-      });
-      navigator.serviceWorker.startMessages();
-    }
     this.virtualRpcReady = registerVirtualRpc().catch(() => false);
     return { worker, ready: this.workerReady };
   }
@@ -177,14 +180,23 @@ export class SessionHost {
     return `${location.origin}${BASE}${VIRTUAL_RPC_PREFIX}${encodeURIComponent(summary.id)}`;
   }
 
+  /**
+   * The virtual RPC URL once the service worker serves it. On a first visit
+   * the worker takes control of the page shortly after the session opens.
+   */
+  async virtualRpc(): Promise<string> {
+    const url = this.virtualRpcUrl();
+    if (!url) throw new Error("no session is open");
+    if (!(await this.virtualRpcReady)) {
+      throw new Error("the virtual RPC needs a service worker, which this browser does not run here (use https or localhost)");
+    }
+    return url;
+  }
+
   /** The session's throwaway fee payer key (derived from its label). */
   payerKeypair(): Keypair {
     if (!this.summary) throw new Error("no session is open");
     return throwawayKeypair(this.summary.payerLabel);
-  }
-
-  isMainnet(): boolean {
-    return this.summary?.passphrase === MAINNET_PASSPHRASE;
   }
 
   async request<T extends SessionResult["type"]>(request: SessionRequest): Promise<Extract<SessionResult, { type: T }>> {
@@ -422,7 +434,7 @@ export class SessionHost {
       for (const f of files.filter((f) => /\.wasm$/i.test(f.name))) wasm.set(f.name, new Uint8Array(await f.arrayBuffer()));
       const summary = this.summary!;
       const result = await runPlan(await plan.text(), {
-        rpcUrl: this.virtualRpcUrl(summary)!,
+        rpcUrl: await this.virtualRpc(),
         passphrase: summary.passphrase,
         wasm,
         call: (method, params) => this.call(method, params),

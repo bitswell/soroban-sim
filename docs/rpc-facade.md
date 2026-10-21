@@ -11,6 +11,11 @@ network ([#23], phase 3).
 
 [#23]: https://github.com/theahaco/soroban-sim/issues/23
 
+The request handling lives in `crates/soroban-sim-facade`, without a
+transport. `serve` adds HTTP, progress lines and the report files. The
+browser session answers its virtual RPC URL with the same crate
+([`docs/browser-session.md`](browser-session.md)).
+
 ## Quick start
 
 ```sh

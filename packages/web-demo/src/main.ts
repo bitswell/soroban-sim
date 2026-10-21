@@ -262,9 +262,10 @@ function selectedFeePayer(): string | undefined {
 }
 
 /** stellar-sdk pointed at the open session's virtual RPC URL. */
-function sessionRpc(): rpc.Server | undefined {
-  const url = sessionHost?.virtualRpcUrl();
-  return url ? new rpc.Server(url, { allowHttp: url.startsWith("http:") }) : undefined;
+async function sessionRpc(): Promise<rpc.Server | undefined> {
+  if (!sessionHost?.summary) return undefined;
+  const url = await sessionHost.virtualRpc();
+  return new rpc.Server(url, { allowHttp: url.startsWith("http:") });
 }
 
 function suggestAuthorizer(): void {
@@ -342,7 +343,7 @@ async function exactSource(): Promise<
   const address = selectedFeePayer();
   if (!address) return undefined;
   // With a session open, the fee payer's sequence is the session's.
-  const sequence = await accountSequence(address, sessionRpc() ?? testnetRpc);
+  const sequence = await accountSequence(address, (await sessionRpc()) ?? testnetRpc);
   if (!sequence) return undefined;
   if (address === localIdentity.publicKey && !localIdentityFunded) {
     localIdentityFunded = true;
@@ -1379,6 +1380,12 @@ function submitTargetIsSession(): boolean {
 function renderSubmitTarget(): void {
   const session = sessionHost?.summary;
   submitTarget.hidden = !session;
+  // The session's throwaway payer exists only in the session.
+  const testnetChoice = submitTarget.querySelector<HTMLInputElement>('input[value="testnet"]')!;
+  testnetChoice.disabled = Boolean(session) && identityMode === "local";
+  if (testnetChoice.disabled && testnetChoice.checked) {
+    submitTarget.querySelector<HTMLInputElement>('input[value="session"]')!.checked = true;
+  }
   const intoSession = submitTargetIsSession();
   submitWarning.textContent = intoSession
     ? `Local simulation is finished. The call is prepared again against the ${session!.networkName} session's state, signed, and submitted into the session through its virtual RPC. Nothing is broadcast.`
@@ -1426,7 +1433,7 @@ replayAck.addEventListener("change", renderSubmitTarget);
  */
 async function submitIntoSession(): Promise<string> {
   const session = sessionHost!.summary!;
-  const server = sessionRpc()!;
+  const server = (await sessionRpc())!;
   const prepared = TransactionBuilder.fromXdr(preparedTransactionXdr!, Networks.TESTNET) as Transaction;
   const call = prepared.operations[0];
   if (call?.type !== "invokeHostFunction") throw new Error("the prepared envelope holds no contract call");

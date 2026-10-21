@@ -132,6 +132,23 @@ test("a two-step dependent sequence runs on a recorded testnet fork and survives
   expect(asked.slice(before)).toEqual([]);
 });
 
+test("plan steps sign classic authorization entries with throwaway keys", async ({ page, context }) => {
+  test.setTimeout(120_000);
+  await recordedRpc(context, TESTNET_RPC, testnetFork());
+  await fork(page, "testnet");
+  await page.locator("#session-plan-file").setInputFiles(fileURLToPath(new URL("./fixtures/classic-auth.yaml", import.meta.url)));
+  await expect(page.locator("#session-plan-status")).toContainText("all as expected", { timeout: 60_000 });
+  // payer override, two funding overrides, the SAC deploy, the transfer.
+  await expect(page.locator("#session-steps li")).toHaveCount(5);
+  await expect(step(page, 5)).toHaveAttribute("data-outcome", "applied");
+  await step(page, 5).locator(".session-step-head").click();
+  // alice's entry is an address credential (stellar-sdk signs the CAP-71 v2
+  // arm) carrying her throwaway signature; carol signed the envelope.
+  const alice = "GBEFICSBULGI6ZIMM36MCGPLBWQUKAD6JYNR6N3WQD2JOK6BLP4C7F2J";
+  await expect(step(page, 5).locator(".session-step-body")).toContainText(`address_v2 ${alice} · signed`);
+  await expect(page.locator("#session-verdict")).toHaveText("passed");
+});
+
 test("the wallet pre-submit flow submits into the session through the virtual RPC", async ({ page, context }) => {
   test.setTimeout(180_000);
   const asked = await recordedRpc(context, TESTNET_RPC, testnetFork());

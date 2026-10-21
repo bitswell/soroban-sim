@@ -440,9 +440,14 @@ class Runner {
     if (op === "skip") return { succeeded: true, outcome: "skipped", text: "code is already on the ledger" };
     const source = await this.interp(String(step.source ?? this.options.source ?? ""));
     if (!StrKey.isValidEd25519PublicKey(source)) throw new PlanError(`${label}: no G-address source (step.source or options.source)`);
-    const account = await this.server.getAccount(source);
+    // build() bumps its account's sequence, so every build starts from the
+    // session's current one.
+    const sequence = (await this.server.getAccount(source)).sequenceNumber();
     const build = (operation: xdr.Operation) =>
-      new TransactionBuilder(account, { fee: "100", networkPassphrase: this.ctx.passphrase }).addOperation(operation).setTimeout(0).build();
+      new TransactionBuilder(new Account(source, sequence), { fee: "100", networkPassphrase: this.ctx.passphrase })
+        .addOperation(operation)
+        .setTimeout(0)
+        .build();
     let tx = build(op);
     let sim = await this.server.simulateTransaction(tx);
     if (rpc.Api.isSimulationError(sim)) return { succeeded: false, outcome: "refused", text: sim.error };
