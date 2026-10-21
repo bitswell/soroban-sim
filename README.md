@@ -183,7 +183,7 @@ resource metrics. The committed sample in `fixtures/replay` replays exactly in
 CI; see `docs/replay.md`.
 
 ```sh
-cargo run --release -p soroban-sim-cli -- replay fetch --network mainnet --min-ledgers 55 --out mainnet.json.gz --report mainnet
+cargo run --release -p soroban-sim-cli -- replay fetch --network mainnet --min-ledgers 55 --out mainnet.json.gz
 cargo run --release -p soroban-sim-cli -- replay run fixtures/replay/*.json.gz --report fidelity
 ```
 

@@ -66,9 +66,6 @@ struct FetchArgs {
     /// Add the new sample to the fixture at --out instead of replacing it.
     #[arg(long)]
     append: bool,
-    /// Replay the fixture right away and write PREFIX.json and PREFIX.md.
-    #[arg(long)]
-    report: Option<PathBuf>,
     #[arg(long, short)]
     quiet: bool,
 }
@@ -268,10 +265,7 @@ fn run() -> Result<bool> {
                 fixture.entries.len(),
                 rpc.calls()
             );
-            match &args.report {
-                Some(prefix) => replay_report(vec![(args.out.clone(), fixture)], prefix, !args.quiet),
-                None => Ok(true),
-            }
+            Ok(true)
         }
         Command::Replay(ReplayCommand::Run(args)) => {
             let fixtures = args.fixtures.iter().map(|p| Ok((p.clone(), ReplayFixture::load(p)?))).collect::<Result<Vec<_>>>()?;

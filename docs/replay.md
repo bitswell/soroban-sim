@@ -14,7 +14,7 @@ recorded about it.
 ```sh
 # Record a sample of the latest ledgers (read-only RPC; nothing is sent).
 cargo run --release -p soroban-sim-cli -- replay fetch --network mainnet \
-  --min-ledgers 55 --out mainnet.json.gz --report mainnet
+  --min-ledgers 55 --out mainnet.json.gz
 # Replay fixtures offline.
 cargo run --release -p soroban-sim-cli -- replay run fixtures/replay/*.json.gz --report fidelity
 ```
