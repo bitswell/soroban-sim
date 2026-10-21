@@ -622,7 +622,7 @@ mod tests {
         // Entry 4 changes in the ledger, then entries 3 and 4 (with their
         // TTLs) are evicted by the scan at its close.
         let k4 = data_key(4);
-        let t = Tx { envelope: Some(envelope(1, 1, &[], &[k4.clone()])), fee: changes(&[]), before: changes(&[]), op: changes(&[(data(4), data(4)), (ttl(4, 90), ttl(4, 95))]) };
+        let t = Tx { envelope: Some(envelope(1, 1, &[], std::slice::from_ref(&k4))), fee: changes(&[]), before: changes(&[]), op: changes(&[(data(4), data(4)), (ttl(4, 90), ttl(4, 95))]) };
         let mut meta = ledger(&[t], &[vec![vec![0]]]);
         let evicted = [data_key(3), ttl_key(&data_key(3)).unwrap(), k4.clone(), ttl_key(&k4).unwrap()];
         meta.evicted_keys = evicted.to_vec().try_into().unwrap();
@@ -647,7 +647,7 @@ mod tests {
         // Two transactions from account 5 (sequences 6 and 7); the first one's
         // footprint writes its own source.
         let key = account_key(&AccountId(PublicKey::PublicKeyTypeEd25519(Uint256([5; 32]))));
-        let t1 = Tx { envelope: Some(envelope(5, 6, &[], &[key.clone()])), fee: changes(&[]), before: changes(&[(account(5, 5, 0), account(5, 6, 0))]), op: changes(&[(account(5, 7, 0), account(5, 7, 1))]) };
+        let t1 = Tx { envelope: Some(envelope(5, 6, &[], std::slice::from_ref(&key))), fee: changes(&[]), before: changes(&[(account(5, 5, 0), account(5, 6, 0))]), op: changes(&[(account(5, 7, 0), account(5, 7, 1))]) };
         let t2 = Tx { envelope: Some(envelope(5, 7, &[], &[])), fee: changes(&[]), before: changes(&[(account(5, 6, 0), account(5, 7, 0))]), op: changes(&[]) };
         let meta = ledger(&[t1, t2], &[vec![vec![0, 1]]]);
         let mut index = ChangeIndex::default();
@@ -666,7 +666,7 @@ mod tests {
         let k = data_key(3);
         let bump = |from, to| changes(&[(ttl(3, from), ttl(3, to))]);
         let t = |i: i64, ro: bool, op| Tx {
-            envelope: Some(if ro { envelope(1, i, &[k.clone()], &[]) } else { envelope(1, i, &[], &[k.clone()]) }),
+            envelope: Some(if ro { envelope(1, i, std::slice::from_ref(&k), &[]) } else { envelope(1, i, &[], std::slice::from_ref(&k)) }),
             fee: changes(&[]),
             before: changes(&[]),
             op,
