@@ -46,6 +46,10 @@ and fee-processing changes:
 - core's `core_metrics` diagnostic counters: CPU instructions, memory, entries
   and bytes read and written, events and their size.
 
+Diagnostic events and `core_metrics` are only in the meta when the recording
+node runs with Soroban diagnostics on (the public mainnet and testnet RPCs do);
+without them those two comparisons are skipped.
+
 ## How each pre-state is rebuilt
 
 RPC's `getLedgerEntries` only serves its latest ledger. `fetch` takes a window

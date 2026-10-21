@@ -194,12 +194,13 @@ pub fn replay(tx: &ReplayTx) -> Result<ReplayOutcome> {
         }
     }
 
-    // --- the host's diagnostic events (calls, returns, logs, errors) ---
-    if let Some(why) = diagnostics_differ(&meta.diagnostic_events, &record.diagnostics) {
-        mismatch("diagnostics", None, why.0, why.1);
+    // --- the host's diagnostic events (calls, returns, logs, errors) and
+    // core's resource metrics, when the recording node emitted them ---
+    if !meta.diagnostic_events.is_empty() {
+        if let Some(why) = diagnostics_differ(&meta.diagnostic_events, &record.diagnostics) {
+            mismatch("diagnostics", None, why.0, why.1);
+        }
     }
-
-    // --- core's resource metrics ---
     let real_metrics = core_metrics(&meta.diagnostic_events);
     for (name, ours) in record.metrics.named() {
         if let Some(&real) = real_metrics.get(name) {

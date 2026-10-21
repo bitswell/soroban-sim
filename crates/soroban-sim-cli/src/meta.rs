@@ -48,11 +48,6 @@ impl Pos {
     pub fn executing(ledger: u32, index: u32, parallel: bool) -> Self {
         Self { ledger, phase: if parallel { Phase::SorobanApply } else { Phase::Apply }, index }
     }
-
-    /// After every change of `ledger`.
-    pub fn end_of(ledger: u32) -> Self {
-        Self { ledger, phase: Phase::Upgrades, index: u32::MAX }
-    }
 }
 
 /// One change to one key.
@@ -68,20 +63,10 @@ pub struct KeyChange {
 #[derive(Default)]
 pub struct ChangeIndex {
     changes: HashMap<LedgerKey, Vec<KeyChange>>,
-    first: Option<u32>,
     last: Option<u32>,
 }
 
 impl ChangeIndex {
-    /// The first and last ledger indexed.
-    pub fn range(&self) -> Option<(u32, u32)> {
-        Some((self.first?, self.last?))
-    }
-
-    pub fn contains_ledger(&self, seq: u32) -> bool {
-        self.range().is_some_and(|(a, b)| a <= seq && seq <= b)
-    }
-
     /// Add the next ledger of the window.
     pub fn add(&mut self, meta: &LedgerCloseMetaV2) -> Result<()> {
         let seq = meta.ledger_header.header.ledger_seq;
@@ -90,7 +75,6 @@ impl ChangeIndex {
                 bail!("ledger {seq} does not follow ledger {last} in the change index");
             }
         }
-        self.first.get_or_insert(seq);
         self.last = Some(seq);
         for_each_change(meta, |pos, key, before, after| {
             self.changes.entry(key).or_default().push(KeyChange { pos, before, after });
@@ -109,26 +93,11 @@ impl ChangeIndex {
         }
     }
 
-    /// The live-until ledger of a contract entry just before `pos`, if the
-    /// window decides it (`Some(None)`: the TTL entry was absent).
-    pub fn live_until_before(&self, key: &LedgerKey, pos: Pos) -> Result<Option<Option<u32>>> {
-        Ok(self.value_before(&ttl_key(key)?, pos).map(|e| {
-            e.and_then(|e| match e.data {
-                LedgerEntryData::Ttl(t) => Some(t.live_until_ledger_seq),
-                _ => None,
-            })
-        }))
-    }
-
     /// Every recorded change of `key`, in order.
     pub fn changes_of(&self, key: &LedgerKey) -> &[KeyChange] {
         self.changes.get(key).map_or(&[], |c| c.as_slice())
     }
 
-    /// Whether the window changed `key` at or after `pos`.
-    pub fn changed_since(&self, key: &LedgerKey, pos: Pos) -> bool {
-        self.changes.get(key).is_some_and(|c| c.iter().any(|c| c.pos >= pos))
-    }
 }
 
 /// Every change a ledger close made, in the order core made them, as
