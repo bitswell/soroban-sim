@@ -6,11 +6,14 @@
 //! operation's result, fee charged) and every entry it read or changed must
 //! come out as the network's.
 //!
-//! `fixtures/replay/classic-mainnet.json` is a recorded sample. Record a new
-//! one from the latest mainnet ledgers (read-only RPC; nothing is sent):
+//! `fixtures/replay/classic-mainnet.json` is a recorded sample (the crate's
+//! copy, kept in sync by `scripts/sync-package-assets.py`). Record a new one
+//! from the latest mainnet ledgers (read-only RPC; nothing is sent), then sync
+//! the copy:
 //!
-//!   SOROBAN_SIM_CLASSIC_CAPTURE=fixtures/replay/classic-mainnet.json \
+//!   SOROBAN_SIM_CLASSIC_CAPTURE=$PWD/fixtures/replay/classic-mainnet.json \
 //!     cargo test -p soroban-sim-cli --test classic_replay -- --ignored
+//!   scripts/sync-package-assets.py
 //!
 //! `SOROBAN_SIM_CLASSIC_LEDGERS` (default 360, about half an hour) is the
 //! window, `SOROBAN_SIM_CLASSIC_MAX` (default 150) the most transactions
@@ -84,12 +87,8 @@ struct Slot {
     entry: Option<String>,
 }
 
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
 fn fixture_path() -> PathBuf {
-    repo().join("fixtures/replay/classic-mainnet.json")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/replay/classic-mainnet.json")
 }
 
 fn b64(x: &impl WriteXdr) -> String {
