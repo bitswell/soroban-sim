@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 const FORK_LEDGER: u32 = 10_000_000;
 
 fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -360,7 +360,7 @@ steps:
 fn recorded_testnet_fork(dir: &Path) -> PathBuf {
     use soroban_env_host::xdr::LedgerHeader;
     let b64 = |s: &serde_json::Value| base64::engine::general_purpose::STANDARD.decode(s.as_str().unwrap()).unwrap();
-    let raw = std::fs::read_to_string(repo().join("packages/web-demo/tests/fixtures/testnet-fork.json")).unwrap();
+    let raw = std::fs::read_to_string(repo().join("fixtures/testnet-fork.json")).unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let entries = json["entries"]
         .as_array()

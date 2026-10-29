@@ -2,8 +2,74 @@
 
 Portable Soroban simulation spike for browsers, WASI Preview 2 components, and native Rust.
 
-Target repository: `theahaco/soroban-sim`  
-Intended npm package: `@theahaco/soroban-sim`
+## Why rehearse on a fork
+
+Testnet is shared, and its costs can move away from mainnet's. On 2026-10-25,
+testnet's live Soroban state (about 4.2 GB) had grown past the network's 4 GB
+state target. Above the target, rent rises steeply. Writing one new persistent
+entry and keeping it for the maximum TTL simulated at 400–510 XLM, against under
+1 XLM five days earlier. Uploading a 7 KB contract cost about 2,000 XLM, more
+than a plain transaction's fee can be. A network configuration upgrade at ledger
+5,385,212 (17:34:07 UTC that day) raised the target to 7 GB, and costs fell back.
+Mainnet held about 1.7 GB against a 3 GB target throughout.
+
+Soroban Sim loads the network configuration from the forked ledger's own
+`ConfigSetting` entries. A session forked from mainnet
+([network sessions](#network-sessions), `soroban-sim serve --fork mainnet`)
+therefore prices fees and rent as mainnet would, runs on your own machine, and
+adds no load to testnet.
+
+## Installation and releases
+
+The command-line tool is the `soroban-sim-cli` package; its executable is
+`soroban-sim`. Version 0.1.0 is published on
+[crates.io](https://crates.io/crates/soroban-sim-cli) and as prebuilt binaries on
+the [GitHub release](https://github.com/theahaco/soroban-sim/releases/tag/soroban-sim-cli-v0.1.0).
+Install it one of three ways:
+
+```sh
+cargo install soroban-sim-cli --locked   # build from source; needs Rust 1.89+
+cargo binstall soroban-sim-cli           # prebuilt binary; needs cargo-binstall
+soroban-sim --version
+```
+
+or download a prebuilt archive yourself. Each release has one archive per
+target, named `soroban-sim-cli-v<version>-<target>.tar.gz` (Windows also gets a
+`.zip`), holding a single `soroban-sim` (`soroban-sim.exe` on Windows), and a
+`.sha256` checksum file beside it:
+
+| OS | Targets |
+|---|---|
+| Linux | `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl` |
+| macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` |
+| Windows | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
+| FreeBSD | `x86_64-unknown-freebsd` |
+
+CI runs `--version` and `--help` from every archive built on a native runner. The
+cross-built Windows arm64, Linux musl arm64 and FreeBSD archives are checked for
+layout and checksum only.
+
+```sh
+tag=soroban-sim-cli-v0.1.0
+target=x86_64-unknown-linux-gnu
+base=https://github.com/theahaco/soroban-sim/releases/download/$tag
+curl -LO "$base/$tag-$target.tar.gz" -LO "$base/$tag-$target.sha256"
+sha256sum -c "$tag-$target.sha256"   # macOS: shasum -a 256 -c
+tar -xzf "$tag-$target.tar.gz"
+./soroban-sim --version
+```
+
+On Windows, download the `.zip` and compare `Get-FileHash <archive>` in
+PowerShell with the matching line of the `.sha256` file.
+
+The Rust libraries are `soroban-sim-core`, `soroban-sim-facade` and
+`soroban-sim-component` (0.1.0). `soroban-sim-host` (29.0.2) is the isolated
+upstream application host used for exact native metering; its
+[`UPSTREAM.json`](crates/soroban-sim-host/UPSTREAM.json) records which
+`soroban-env-host` release it copies. The TypeScript package
+`@theahaco/soroban-sim` (`packages/soroban-sim`) is not published to npm yet.
+See [Publishing and release maintenance](docs/releases.md) for how releases are
+cut, verified and recovered.
 
 ## Architecture
 
