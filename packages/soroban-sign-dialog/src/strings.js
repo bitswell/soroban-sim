@@ -100,8 +100,8 @@ export const STRINGS = {
 
   // The preview.
   effects: 'Effects',
-    previewButton: 'Check outcome',
-    previewUnavailable: 'Preview unavailable.',
+  previewButton: 'Check outcome',
+  previewUnavailable: 'Preview unavailable.',
   treeStillExact: 'The authorization tree in Details is still exact.',
   previewFailed: (p) => `Preview failed: ${p.error}`,
   wouldAccept: (p) => `<b>Would be accepted</b> by ${p.account}${p.rule ? ` under rule <code>${p.rule}</code>` : ''}.`,

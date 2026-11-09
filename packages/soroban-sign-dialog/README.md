@@ -185,8 +185,10 @@ Top to bottom, by default:
 4. **Details**, one disclosure holding the full authorization tree with raw
    contract, function and argument data, the account's verdict and cap, balance
    changes and events.
-5. **Reject** and **Approve**. While a warning or refusal stands, Approve reads
-   *Approve anyway* and needs a second click (`strict` disables it instead).
+5. **Reject** and **Approve**. Approve is disabled while the outcome is being
+   checked. While a warning or refusal stands, or a started preview could not
+   simulate the request, Approve reads *Approve anyway* and needs a second
+   click (`strict` disables it instead).
 
 `details="open"` starts with Details expanded, for a wallet's own signing page.
 
@@ -300,7 +302,9 @@ an `extra` flag. With `strict`, Approve stays disabled instead.
 
 Other flags: `differs` (same signer, different tree), `missing` (the
 recording needs an entry the request lacks), `refused` (the account would
-refuse), `fails` (the transaction would fail).
+refuse), `fails` (the transaction would fail), `not-simulated` (a preview
+ran but ended in an error or the tree-only fallback; the warning reads "This
+request could not be simulated. Approve anyway?").
 
 ### Smart-account verdicts (local fork only)
 
