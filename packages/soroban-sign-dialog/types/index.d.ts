@@ -26,7 +26,8 @@ export type Flag =
   | { kind: 'extra' | 'differs'; entry: number }
   | { kind: 'missing'; recorded: number }
   | { kind: 'refused'; address: string; code?: number }
-  | { kind: 'fails'; error: string | null };
+  | { kind: 'fails'; error: string | null }
+  | { kind: 'not-simulated'; code: string | null };
 
 export interface ApproveDetail {
   transaction: string | null;
@@ -68,7 +69,7 @@ export interface Verdict {
 export interface Budget {
   address: string;
   rule?: { id: number; name?: string; grant?: number | null };
-  token: TokenInfo;
+  token: TokenInfo & { contract?: string };
   limit: string;
   periodLedgers: number;
   spentInWindow: string;

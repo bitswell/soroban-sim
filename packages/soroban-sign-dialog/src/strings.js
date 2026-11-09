@@ -41,6 +41,7 @@ export const STRINGS = {
   // Warnings above Approve.
   unusedWarning: (p) => `This request also asks you to sign an authorization the transaction does not use: ${p.what}. If you approve, the signature is published with the transaction and anyone can submit that authorization later, until it expires.`,
   differsWarning: 'The simulation needs a different authorization from the one you are asked to sign.',
+  notSimulatedWarning: 'This request could not be simulated. Approve anyway?',
   missingWarning: 'The transaction needs an authorization this request does not include, so it is likely to fail.',
 
   // Everything else, behind one disclosure.

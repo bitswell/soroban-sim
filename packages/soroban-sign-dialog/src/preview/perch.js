@@ -140,15 +140,14 @@ export function perchAdapter(account, hint) {
 
     budgets(op, sequence, tokens) {
       const out = [];
-      for (const [i, fn] of this.entryContexts(op).flat().entries()) {
-        const rule = this.ruleFor(fn, i);
+      for (const [fn, rule] of this.entryContexts(op).flatMap((fns) => fns.map((fn, i) => [fn, this.ruleFor(fn, i)]))) {
         if (!rule?.cap) continue;
         const cutoff = Math.max(0, sequence - rule.cap.period);
         const live = (spends.get(rule.id) ?? []).filter((s) => s.ledger > cutoff);
         const spent = live.reduce((a, s) => a + s.amount, 0n);
         const amount = fn.args[rule.cap.amountArg]?.v ?? 0n;
         out.push({
-          address: account, rule: { id: rule.id, name: rule.name, grant: rule.grant }, token: tokens[rule.contract] ?? { code: 'units', decimals: 0 },
+          address: account, rule: { id: rule.id, name: rule.name, grant: rule.grant }, token: tokens[rule.contract] ?? { code: 'units', decimals: 0, contract: rule.contract },
           limit: rule.cap.limit.toString(), periodLedgers: rule.cap.period, spentInWindow: spent.toString(), amount: amount.toString(),
           ledger: sequence, nextReleaseLedger: live.length ? live[0].ledger + rule.cap.period : null,
         });

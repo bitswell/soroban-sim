@@ -315,6 +315,7 @@ export class SorobanSignDialog extends Base {
   #flags() {
     const flags = [];
     const p = this.#preview;
+    if (this.#previewState === 'error' || this.#previewState === 'fallback') flags.push({ kind: 'not-simulated', code: p?.code ?? null });
     if (this.#comparison) {
       for (const e of this.#comparison.entries) if (e.status !== 'match') flags.push({ kind: e.status, entry: e.index });
       for (const i of this.#comparison.missing) flags.push({ kind: 'missing', recorded: i });
@@ -346,6 +347,11 @@ export class SorobanSignDialog extends Base {
   #token(addr) {
     if (addr === this.#nativeSac) return this.#tokens.get(addr) ?? { code: 'XLM', decimals: 7 };
     return this.#tokens.get(addr) ?? null;
+  }
+
+  /** A provider's token info, or the element's labels for a contract it did not know. */
+  #assetToken(t) {
+    return (t?.contract && this.#token(t.contract)) || t || { code: '', decimals: 0 };
   }
 
   #addr(a) {
@@ -498,7 +504,7 @@ export class SorobanSignDialog extends Base {
     if (p.balances?.length) {
       const rows = p.balances.map((b) => {
         const before = BigInt(b.before ?? 0), after = BigInt(b.after ?? 0), d = after - before;
-        const tok = b.asset ?? { code: '', decimals: 0 };
+        const tok = this.#assetToken(b.asset);
         return `<tr><td>${this.#addr(b.address)}</td><td>${esc(tok.code)}</td><td class="num">${esc(formatAmount(before, tok.decimals))}</td><td class="num">${esc(formatAmount(after, tok.decimals))}</td><td class="num ${d < 0n ? 'neg' : 'pos'}">${d > 0n ? '+' : ''}${esc(formatAmount(d, tok.decimals))}</td></tr>`;
       }).join('');
       const h = this.#strings.balanceHeaders;
@@ -568,7 +574,7 @@ export class SorobanSignDialog extends Base {
       ? this.#entries.map((e, i) => `<li>${this.#summaryLine(e.root.fn)}${cmp?.entries[i]?.status === 'extra' ? ` <span class="badge bad">${this.#t('summaryUnusedTag')}</span>` : ''}</li>`)
       : op?.type === 'invoke' ? [`<li>${this.#summaryLine(op.hostFunction)}</li>`] : [`<li>${this.#t('operation', { type: esc(op?.type ?? 'unknown') })}</li>`];
     const budgets = (this.#previewState === 'done' ? this.#preview.budgets ?? [] : []).map((b) => {
-      const tok = b.token ?? { code: '', decimals: 0 };
+      const tok = this.#assetToken(b.token);
       const limit = BigInt(b.limit), remaining = limit - BigInt(b.spentInWindow), amount = BigInt(b.amount ?? 0);
       const over = amount > remaining;
       const left = over ? (remaining > 0n ? remaining : 0n) : remaining - amount;
@@ -580,18 +586,17 @@ export class SorobanSignDialog extends Base {
   /** Plain warnings from the independent recording. */
   #warningsHtml() {
     const cmp = this.#comparison;
-    if (!cmp) return '';
-    const out = [];
-    for (const e of cmp.entries) {
+    const out = this.#flags().some((f) => f.kind === 'not-simulated') ? [this.#t('notSimulatedWarning')] : [];
+    for (const e of cmp?.entries ?? []) {
       if (e.status === 'extra') out.push(this.#t('unusedWarning', { what: this.#summaryLine(this.#entries[e.index].root.fn) }));
       if (e.status === 'differs') out.push(this.#t('differsWarning'));
     }
-    if (cmp.missing.length) out.push(this.#t('missingWarning', { count: cmp.missing.length }));
+    if (cmp?.missing.length) out.push(this.#t('missingWarning', { count: cmp.missing.length }));
     return out.map((w) => `<div class="notice bad" part="warning" role="alert">${w}</div>`).join('');
   }
 
   #budget(b) {
-    const tok = b.token ?? { code: '', decimals: 0 };
+    const tok = this.#assetToken(b.token);
     const limit = BigInt(b.limit), spent = BigInt(b.spentInWindow), amount = BigInt(b.amount ?? 0);
     const remaining = limit - spent;
     const fits = amount <= remaining;
@@ -652,6 +657,7 @@ export class SorobanSignDialog extends Base {
     const flags = this.#flags();
     const risky = flags.length > 0 || !!this.#error;
     const strict = this.hasAttribute('strict');
+    const checking = this.#previewState === 'loading';
     const approveLabel = this.#error ? this.#t('approveButton') : this.#confirming ? this.#t('confirmApproveAnyway') : risky ? this.#t('approveAnyway') : this.#t('approveButton');
     d.innerHTML = `<header part="header">
         <div class="meta"><slot name="logo"></slot><span class="chip" part="network">${esc(net)}</span>${dapp ? `<span part="dapp">${this.#t('requestFrom', { dapp: esc(dapp) })}</span>` : ''}</div>
@@ -663,7 +669,7 @@ export class SorobanSignDialog extends Base {
         <div class="footer-slot"><slot name="footer"></slot></div>
         <div class="actions">
           <button type="button" data-act="reject" part="reject">${this.#t('reject')}</button>
-          <button type="button" data-act="approve" part="approve" class="${risky ? 'danger' : 'primary'}" ${this.#error || (strict && risky) || !this.#decoded ? 'disabled' : ''}>${approveLabel}</button>
+          <button type="button" data-act="approve" part="approve" class="${risky ? 'danger' : 'primary'}" ${this.#error || (strict && risky) || checking || !this.#decoded ? 'disabled' : ''}>${approveLabel}</button>
         </div>
       </footer>`;
     // Widths through the CSSOM: no style attributes, so no `unsafe-inline`.
