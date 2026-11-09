@@ -113,7 +113,7 @@ export type Strings = { [key: string]: unknown } & {
   notices: Record<string, string | ((params: any) => string)>;
   reasons: Record<string, string | ((params: any) => string)>;
   balanceHeaders: [string, string, string, string, string];
-  sign: Text; reject: Text; signAnyway: Text; confirmSignAnyway: Text;
+  approveButton: Text; reject: Text; approveAnyway: Text; confirmApproveAnyway: Text; details: Text;
 };
 export type StringOverrides = Partial<Omit<Strings, 'networks' | 'notices' | 'reasons'>> & {
   networks?: Partial<Strings['networks']>;

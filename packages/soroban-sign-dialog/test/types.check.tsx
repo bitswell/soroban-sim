@@ -6,7 +6,7 @@ import { SignDialog } from '@theahaco/soroban-sign-dialog/react';
 define();
 const el = document.createElement('soroban-sign-dialog');
 el.labels = { G: 'Me', C: { name: 'Token', token: { code: 'TOK', decimals: 7 } } };
-el.strings = { sign: 'Firmar', notices: { protocol: (p: { protocol: number }) => `p${p.protocol}` } };
+el.strings = { approveButton: 'Aprobar', summarySend: (p: { amount: string; to: string }) => `Enviar ${p.amount} a ${p.to}`, notices: { protocol: (p: { protocol: number }) => `p${p.protocol}` } };
 el.addEventListener('approve', (e) => { const d: ApproveDetail = e.detail; void d.entries[0]?.invocationHash; });
 el.addEventListener('reject', (e) => { const r: 'rejected' | 'dismissed' | 'closed' | 'superseded' = e.detail.reason; void r; });
 const hint: SignerHint = { verifier: 'C…', key: 'ab', ruleIds: [1] };

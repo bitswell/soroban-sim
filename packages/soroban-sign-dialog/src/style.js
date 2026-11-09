@@ -86,6 +86,20 @@ h2 { margin: var(--ssd-space-2) 0 var(--ssd-space-1); font-size: var(--ssd-title
 h3 { font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ssd-muted); margin: var(--ssd-space-4) 0 var(--ssd-space-2); }
 h3:first-child { margin-top: var(--ssd-space-2); }
 b { font-weight: var(--ssd-weight-strong); }
+.what ul { list-style: none; margin: var(--ssd-space-2) 0; padding: 0; }
+.what li { font-size: var(--ssd-title-size); font-weight: var(--ssd-weight-strong); line-height: 1.35; overflow-wrap: anywhere; margin: 0 0 var(--ssd-space-1); }
+.budget-line { margin: 0 0 var(--ssd-space-2); color: var(--ssd-muted); font-size: var(--ssd-small-size); }
+.budget-line[data-over="true"] { color: var(--ssd-danger); font-weight: var(--ssd-weight-strong); }
+.status { display: flex; gap: var(--ssd-space-2); align-items: flex-start; border: var(--ssd-border-width) solid var(--ssd-border); border-radius: var(--ssd-radius-sm); padding: var(--ssd-space-2) var(--ssd-space-3); margin: var(--ssd-space-2) 0; background: var(--ssd-surface); }
+.status .icon { font-weight: 700; font-size: 1.1rem; line-height: 1.2; color: var(--ssd-muted); }
+.status[data-state="success"] { background: var(--ssd-ok-bg); border-color: color-mix(in srgb, var(--ssd-ok) 45%, transparent); }
+.status[data-state="success"] .icon { color: var(--ssd-ok); }
+.status[data-state="refused"] { background: var(--ssd-danger-bg); border-color: color-mix(in srgb, var(--ssd-danger) 45%, transparent); }
+.status[data-state="refused"] .icon { color: var(--ssd-danger); }
+.status .spinner { margin-top: 0.25em; }
+.status button { margin-top: var(--ssd-space-2); }
+details.more { margin-top: var(--ssd-space-3); border-top: var(--ssd-border-width) solid var(--ssd-border); padding-top: var(--ssd-space-2); }
+details.more > summary { font-size: var(--ssd-font-size); font-weight: var(--ssd-weight-strong); color: var(--ssd-fg); padding: var(--ssd-space-1) 0; }
 .entry { border: var(--ssd-border-width) solid var(--ssd-border); border-radius: var(--ssd-radius-sm); padding: var(--ssd-space-2) var(--ssd-space-3); margin: 0 0 var(--ssd-space-2); background: var(--ssd-bg); min-width: 0; }
 .entry[data-status="extra"], .entry[data-status="differs"] { border-color: var(--ssd-danger); background: var(--ssd-danger-bg); }
 .entry[data-status="match"] { border-color: color-mix(in srgb, var(--ssd-ok) 55%, var(--ssd-border)); }

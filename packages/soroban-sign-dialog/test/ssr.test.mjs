@@ -10,7 +10,7 @@ test('imports and defines without a DOM', async () => {
   const m = await import('../src/index.js');
   m.define();
   assert.equal(m.TAG, 'soroban-sign-dialog');
-  assert.equal(typeof m.STRINGS.sign, 'string');
+  assert.equal(m.STRINGS.approveButton, 'Approve');
 });
 
 test('the React wrapper renders the element on the server', async () => {

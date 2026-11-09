@@ -17,9 +17,34 @@ export const STRINGS = {
   titleEmpty: 'No request',
   summary: (p) => `Fee up to ${p.fee} XLM, paid by ${p.payer}`,
   reject: 'Reject',
-  sign: 'Sign',
-  signAnyway: 'Sign anyway',
-  confirmSignAnyway: 'Confirm: sign anyway',
+  approveButton: 'Approve',
+  approveAnyway: 'Approve anyway',
+  confirmApproveAnyway: 'Confirm: approve anyway',
+
+  // The summary at the top: one plain line per authorized call, and the
+  // spending cap when the preview found one.
+  summarySend: (p) => `Send ${p.amount} to ${p.to}`,
+  summaryUnusedTag: 'not used',
+  summaryBudget: (p) => (p.over
+    ? `Over the cap: ${p.left} of ${p.limit} ${p.code} left this window`
+    : `${p.left} of ${p.limit} ${p.code} left this window after this`),
+
+  // The simulated outcome, as one status.
+  statusSuccess: 'Will succeed',
+  statusRefused: 'Will be refused',
+  statusUnknown: 'Outcome unknown',
+  statusChecking: 'Checking the outcome…',
+  statusIdle: 'Outcome not checked yet',
+  simulatedOk: 'The simulation against current ledger state completed.',
+  notSimulated: 'This request was not simulated.',
+
+  // Warnings above Approve.
+  unusedWarning: (p) => `This request also asks you to sign an authorization the transaction does not use: ${p.what}. If you approve, the signature is published with the transaction and anyone can submit that authorization later, until it expires.`,
+  differsWarning: 'The simulation needs a different authorization from the one you are asked to sign.',
+  missingWarning: 'The transaction needs an authorization this request does not include, so it is likely to fail.',
+
+  // Everything else, behind one disclosure.
+  details: 'Details',
 
   // The request.
   nothingToReview: 'Nothing to review.',
@@ -74,11 +99,9 @@ export const STRINGS = {
 
   // The preview.
   effects: 'Effects',
-  previewIntro: 'The tree above is decoded from the request itself. A preview runs the transaction in a local simulator against current ledger state.',
-  previewButton: 'Preview effects',
-  previewRunning: 'Running the simulation…',
-  previewUnavailable: 'Preview unavailable.',
-  treeStillExact: 'The authorization tree above is still exact.',
+    previewButton: 'Check outcome',
+    previewUnavailable: 'Preview unavailable.',
+  treeStillExact: 'The authorization tree in Details is still exact.',
   previewFailed: (p) => `Preview failed: ${p.error}`,
   wouldAccept: (p) => `<b>Would be accepted</b> by ${p.account}${p.rule ? ` under rule <code>${p.rule}</code>` : ''}.`,
   wouldRefuse: (p) => `<b>Would be refused</b> by ${p.account}${p.rule ? ` under rule <code>${p.rule}</code>` : ''}.`,

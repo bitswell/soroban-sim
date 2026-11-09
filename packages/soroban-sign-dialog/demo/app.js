@@ -14,13 +14,18 @@ const SPANISH = {
   titleOne: 'Autoriza esta llamada',
   titleMany: (p) => `Autoriza ${p.count} llamadas`,
   reject: 'Rechazar',
-  sign: 'Firmar',
-  signAnyway: 'Firmar de todos modos',
-  confirmSignAnyway: 'Confirmar: firmar de todos modos',
+  approveButton: 'Aprobar',
+  approveAnyway: 'Aprobar de todos modos',
+  confirmApproveAnyway: 'Confirmar: aprobar de todos modos',
   whatYouAuthorize: 'Lo que autorizas',
   effects: 'Efectos',
-  previewButton: 'Previsualizar efectos',
-  previewRunning: 'Ejecutando la simulación…',
+  details: 'Detalles',
+  previewButton: 'Comprobar el resultado',
+  statusSuccess: 'Saldrá bien',
+  statusRefused: 'Será rechazada',
+  statusUnknown: 'Resultado desconocido',
+  statusChecking: 'Comprobando el resultado…',
+  summarySend: (p) => `Enviar ${p.amount} a ${p.to}`,
   send: (p) => `Enviar ${p.amount} de ${p.from} a ${p.to}`,
   badgeExtra: '⚠ Esta transacción no la usa',
   badgeMatch: '✓ Coincide con la simulación',
@@ -38,7 +43,6 @@ const providers = {
 let source = 'fixture';
 dialog.labels = F.labels;
 dialog.previewProvider = providers.fixture();
-dialog.setAttribute('preview', 'manual');
 
 const set = (id, fn) => document.getElementById(id).addEventListener('change', (e) => fn(e.target.value));
 set('theme', (v) => {

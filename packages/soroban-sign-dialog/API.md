@@ -27,12 +27,13 @@ defines on first use, creates one shared dialog, and opens it.
 | `network` | `network`, `networkPassphrase` | `testnet`, `mainnet`, `futurenet`, `local`, or a passphrase. Default `testnet`. Both properties read back the passphrase. |
 | `signer` | `signer` | The address the wallet signs for. Its entries read "(you)" and get `forSigner: true`. |
 | `dapp` | `dapp` | Who is asking, shown in the header. |
-| `preview` | | `manual` (a "Preview effects" button; default), `auto` (run on open), `off`. |
+| `preview` | | `auto` (default: simulate on open when an engine or provider is set), `manual` (a "Check outcome" button in the status line), `off`. |
 | `engine` | `engine` | URL of the engine module, imported on the first preview when no `previewProvider` is set. |
 | `rpc-url` | `rpcUrl` | Passed to the preview provider. |
 | `theme` | | `light`, `dark`, or absent to follow `prefers-color-scheme`. |
 | `inline` | | Render in place, not as a modal (a wallet's own signing page). |
-| `strict` | `strict` | Keep Sign disabled while any flag is raised. |
+| `details` | | `open` to show the Details disclosure expanded on open. |
+| `strict` | `strict` | Keep Approve disabled while any flag is raised. |
 | `open` | `open` (read-only) | Setting the attribute opens the dialog; removing it closes it with reason `closed`. |
 | | `labels` | `{ [address]: name \| { name, token: { code, decimals } } }`: the wallet's address book and the token metadata it trusts. Only the native asset contract is derived by the dialog itself. |
 | | `strings` | Overrides for user-facing text, merged over `STRINGS`. |
@@ -80,7 +81,7 @@ and a passkey prompt opened from it keeps its user activation. Calling
 Flags: `{ kind: 'extra', entry }` (the transaction does not use this entry),
 `{ kind: 'differs', entry }`, `{ kind: 'missing', recorded }`,
 `{ kind: 'refused', address, code }`, `{ kind: 'fails', error }`. While any is
-raised, Sign reads "Sign anyway" and needs a second click; with `strict` it is
+raised, Approve reads "Approve anyway" and needs a second click; with `strict` it is
 disabled.
 
 ### Theming, parts and slots

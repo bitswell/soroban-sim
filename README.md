@@ -269,10 +269,11 @@ request handler, `crates/soroban-sim-facade`. See `docs/browser-session.md`.
 `packages/soroban-sign-dialog` (`@theahaco/soroban-sign-dialog`) is an
 embeddable `<soroban-sign-dialog>` web component for wallets and dapps. It
 renders the full tree of requested authority from a transaction's XDR alone
-(about 16 KB brotli, any protocol), and on request lazily loads a preview
-engine that re-records the tree with soroban-sim's host, marks entries the
-transaction never uses, and shows balance changes, events and a smart
-account's own verdict. The engine ships one reactor per host protocol
+(about 17 KB brotli, any protocol) under a plain summary, and lazily loads a
+preview engine that re-records the tree with soroban-sim's host. The user sees
+one status (will succeed, will be refused or unknown), a warning for entries
+the transaction never uses, and, behind Details, balance changes, events and a
+smart account's own verdict. The engine ships one reactor per host protocol
 (`crates/soroban-sim-preview`, p29 and p30, about 470 KB brotli each) and
 picks one by the network's `protocolVersion`. See the package README.
 

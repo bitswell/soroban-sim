@@ -23,7 +23,8 @@ for (const [name, url] of Object.entries(PAGES)) {
 
     test('renders labels passed as a property, and a slot', async ({ page }) => {
       // An object stringified into an attribute would leave raw addresses.
-      await expect(page.locator('soroban-sign-dialog .sentence')).toContainText('Send 5 XLM from Your account (you)');
+      await expect(page.locator('soroban-sign-dialog [part="what"]')).toContainText('Send 5 XLM to Corner Café');
+      await expect(page.locator('soroban-sign-dialog [part="tree"] .sentence')).toContainText('Send 5 XLM from Your account (you)');
       await expect(page.getByText('Signed with Acme Wallet')).toBeVisible();
     });
 

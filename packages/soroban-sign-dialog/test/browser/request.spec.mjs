@@ -56,6 +56,8 @@ test('another party has not signed: verdict unknown, no refused flag, recording 
       balances: root.querySelectorAll('[part="balances"] tbody tr').length,
       events: root.querySelectorAll('[part="events"] li').length,
       approve: root.querySelector('[data-act="approve"]').textContent,
+      status: root.querySelector('[part="status"]').dataset.state,
+      reason: root.querySelector('[part="status"]').textContent,
     };
   }, {
     ledger: [...capture.ledger, ...multiParty.ledger],
@@ -68,5 +70,7 @@ test('another party has not signed: verdict unknown, no refused flag, recording 
   expect(result.verdict).toContain('Other parties have not signed yet');
   expect(result.balances).toBe(2);
   expect(result.events).toBe(1);
-  expect(result.approve).toBe('Sign');
+  expect(result.approve).toBe('Approve');
+  expect(result.status).toBe('unknown');
+  expect(result.reason).toContain('Other parties have not signed yet');
 });

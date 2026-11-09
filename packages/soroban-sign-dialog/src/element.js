@@ -45,7 +45,7 @@ function adoptStyle(root) {
 const Base = globalThis.HTMLElement ?? class {};
 
 export class SorobanSignDialog extends Base {
-  static observedAttributes = ['transaction', 'auth-entries', 'network', 'signer', 'dapp', 'open', 'preview', 'engine', 'rpc-url', 'strict'];
+  static observedAttributes = ['transaction', 'auth-entries', 'network', 'signer', 'dapp', 'open', 'preview', 'engine', 'rpc-url', 'strict', 'details'];
 
   #root;
   #labels = new Map();
@@ -64,6 +64,7 @@ export class SorobanSignDialog extends Base {
   #renderQueued = false;
   #abort = null;
   #approval = null;
+  #detailsOpen = null;
 
   constructor() {
     super();
@@ -72,7 +73,7 @@ export class SorobanSignDialog extends Base {
     this.dialog = document.createElement('dialog');
     this.dialog.setAttribute('part', 'dialog');
     this.dialog.setAttribute('aria-labelledby', 'ssd-title');
-    this.dialog.setAttribute('aria-describedby', 'ssd-sub');
+    this.dialog.setAttribute('aria-describedby', 'ssd-what ssd-status');
     this.#root.append(this.dialog);
     this.dialog.addEventListener('cancel', (e) => { e.preventDefault(); this.#finish('dismissed'); });
     this.dialog.addEventListener('click', (e) => this.#onClick(e));
@@ -157,7 +158,7 @@ export class SorobanSignDialog extends Base {
    * the `engine` attribute on first use and calls its `preview(request)`.
    */
   get previewProvider() { return this.#provider; }
-  set previewProvider(fn) { this.#provider = fn; this.#queue(); }
+  set previewProvider(fn) { this.#provider = fn; this.#queue(); queueMicrotask(() => this.#autoPreview()); }
 
   get previewResult() { return this.#preview; }
 
@@ -176,7 +177,16 @@ export class SorobanSignDialog extends Base {
     else this.dialog.showModal();
     this.#root.querySelector('[data-act="reject"]')?.focus();
     this.dispatchEvent(new CustomEvent('open', { bubbles: true, composed: true }));
-    if (this.getAttribute('preview') === 'auto') this.runPreview();
+    this.#autoPreview();
+  }
+
+  /** `preview` is `auto` (the default), `manual` or `off`. */
+  get #previewMode() { return this.getAttribute('preview') ?? 'auto'; }
+
+  get #canPreview() { return !!(this.#provider || this.hasAttribute('engine')) && this.#previewMode !== 'off'; }
+
+  #autoPreview() {
+    if (this.dialog?.open && this.#previewMode === 'auto' && this.#canPreview && this.#previewState === 'idle') this.runPreview();
   }
 
   close() { this.#finish('closed'); }
@@ -272,6 +282,7 @@ export class SorobanSignDialog extends Base {
     this.#comparison = null;
     this.#previewState = 'idle';
     this.#confirming = false;
+    this.#detailsOpen = null;
     this.#abort?.abort();
     try {
       if (this.transaction) {
@@ -289,6 +300,7 @@ export class SorobanSignDialog extends Base {
     }
     this.#approval = this.#error || !this.#decoded ? null : this.#approvalDetail();
     this.#approval?.catch(() => {});
+    if (this.dialog?.open) queueMicrotask(() => this.#autoPreview());
     nativeAssetContract(this.networkPassphrase).then((id) => {
       if (id !== this.#nativeSac) { this.#nativeSac = id; this.#queue(); }
     }, () => {});
@@ -459,20 +471,10 @@ export class SorobanSignDialog extends Base {
       ${note}<ol class="tree" role="list">${this.#node(e.root)}</ol></article>`;
   }
 
-  #previewHtml() {
-    const state = this.#previewState;
+  /** The preview's evidence, for the Details disclosure. */
+  #effectsHtml() {
     const p = this.#preview;
-    const section = (inner, live = '') => `<section class="preview" part="preview"${live}><h3>${this.#t('effects')}</h3>${inner}</section>`;
-    if (state === 'idle') {
-      const canPreview = this.#provider || this.hasAttribute('engine');
-      if (this.getAttribute('preview') === 'off' || !canPreview) return '';
-      return section(`<p class="small muted">${this.#t('previewIntro')}</p><button type="button" data-act="preview" part="preview-button">${this.#t('previewButton')}</button>`);
-    }
-    if (state === 'loading') return section(`<p role="status"><span class="spinner" aria-hidden="true"></span>${this.#t('previewRunning')}</p>`);
-    if (state !== 'done') {
-      const text = p?.code === 'error' ? this.#t('previewFailed', { error: esc(p.params?.error ?? '') }) : this.#coded('notices', p?.code, p?.params, p?.notice ?? this.#t('previewUnavailable'));
-      return section(`<div class="notice ${state === 'error' ? 'bad' : ''}" part="notice" role="status">${text} ${this.#t('treeStillExact')}</div>`);
-    }
+    if (this.#previewState !== 'done') return '';
     const parts = [];
     if (p.notice || (p.code && this.#strings.notices[p.code])) parts.push(`<div class="notice" part="notice">${this.#coded('notices', p.code, p.params, p.notice)}</div>`);
     const cmp = this.#comparison;
@@ -513,7 +515,79 @@ export class SorobanSignDialog extends Base {
       parts.push(`<div class="notice bad">${this.#t('wouldFail', { error: esc(p.outcome.error ?? 'unknown error'), codes: codes || null })}</div>`);
     }
     parts.push(`<p class="small muted">${this.#t('footnote', { ledger: p.ledger ? esc(p.ledger.sequence) : null, protocol: esc(p.ledger?.protocol ?? p.engine?.protocol ?? '?'), source: esc(p.stateSource ?? 'RPC') })}</p>`);
-    return section(parts.join(''), ' aria-live="polite"');
+    return `<section class="preview" part="preview"><h3>${this.#t('effects')}</h3>${parts.join('')}</section>`;
+  }
+
+  /** One status for the simulated outcome: success, refused, unknown, checking or idle. */
+  #outcome() {
+    const s = this.#previewState, p = this.#preview;
+    if (s === 'loading') return { state: 'checking' };
+    if (s === 'idle') return this.#canPreview ? { state: 'idle' } : { state: 'unknown', reason: this.#t('notSimulated') };
+    if (s !== 'done') {
+      const reason = p?.code === 'error' ? this.#t('previewFailed', { error: esc(p.params?.error ?? '') }) : this.#coded('notices', p?.code, p?.params, p?.notice ?? this.#t('previewUnavailable'));
+      return { state: 'unknown', reason: `${reason} ${this.#t('treeStillExact')}` };
+    }
+    const reason = (v) => (v.reasonCode || v.reason ? this.#coded('reasons', v.reasonCode, v.params, v.reason) : '');
+    const verdicts = p.verdicts ?? [];
+    const refused = verdicts.find((v) => v.allowed === false);
+    if (refused) return { state: 'refused', reason: reason(refused) || this.#t('contractError', { code: esc(refused.code ?? '?') }) };
+    const unknown = verdicts.find((v) => v.allowed == null);
+    if (p.outcome && !p.outcome.ok && !unknown) {
+      const codes = (p.outcome.codes ?? []).map((c) => esc(c.code ?? c)).join(', ');
+      return { state: 'refused', reason: this.#t('wouldFail', { error: esc(p.outcome.error ?? 'unknown error'), codes: codes || null }) };
+    }
+    if (unknown) return { state: 'unknown', reason: reason(unknown) };
+    const accepted = verdicts.find((v) => v.allowed);
+    return { state: 'success', reason: (accepted && reason(accepted)) || this.#t('simulatedOk') };
+  }
+
+  #statusHtml() {
+    const o = this.#outcome();
+    const icon = { success: '✓', refused: '✕', unknown: '?', idle: '•' }[o.state];
+    const title = this.#t({ success: 'statusSuccess', refused: 'statusRefused', unknown: 'statusUnknown', checking: 'statusChecking', idle: 'statusIdle' }[o.state]);
+    const mark = o.state === 'checking' ? '<span class="spinner" aria-hidden="true"></span>' : `<span class="icon" aria-hidden="true">${icon}</span>`;
+    const button = o.state === 'idle' ? `<button type="button" data-act="preview" part="preview-button">${this.#t('previewButton')}</button>` : '';
+    return `<section id="ssd-status" class="status" part="status" data-state="${o.state}" role="status" aria-live="polite">${mark}
+      <div><b>${title}</b>${o.reason ? `<div class="small" part="status-reason">${o.reason}</div>` : ''}${button}</div></section>`;
+  }
+
+  /** A one-line, plain account of one authorized call. */
+  #summaryLine(fn) {
+    if (fn.kind === 'call' && fn.fn === 'transfer' && fn.args.length === 3) {
+      const token = this.#token(fn.contract.str);
+      const [from, to, amount] = fn.args;
+      if (token && from?.str === this.signer && /128|64/.test(amount?.t ?? '')) return this.#t('summarySend', { amount: this.#amount(amount.v, token), to: this.#addr(to) });
+    }
+    return this.#sentence(fn);
+  }
+
+  #summaryHtml() {
+    const op = this.#decoded.op;
+    const cmp = this.#comparison;
+    const lines = this.#entries.length
+      ? this.#entries.map((e, i) => `<li>${this.#summaryLine(e.root.fn)}${cmp?.entries[i]?.status === 'extra' ? ` <span class="badge bad">${this.#t('summaryUnusedTag')}</span>` : ''}</li>`)
+      : op?.type === 'invoke' ? [`<li>${this.#summaryLine(op.hostFunction)}</li>`] : [`<li>${this.#t('operation', { type: esc(op?.type ?? 'unknown') })}</li>`];
+    const budgets = (this.#previewState === 'done' ? this.#preview.budgets ?? [] : []).map((b) => {
+      const tok = b.token ?? { code: '', decimals: 0 };
+      const limit = BigInt(b.limit), remaining = limit - BigInt(b.spentInWindow), amount = BigInt(b.amount ?? 0);
+      const over = amount > remaining;
+      const left = over ? (remaining > 0n ? remaining : 0n) : remaining - amount;
+      return `<p class="budget-line" part="budget-line" data-over="${over}">${this.#t('summaryBudget', { left: esc(formatAmount(left, tok.decimals)), limit: esc(formatAmount(limit, tok.decimals)), code: esc(tok.code), over })}</p>`;
+    }).join('');
+    return `<section id="ssd-what" class="what" part="what"><ul>${lines.join('')}</ul>${budgets}</section>`;
+  }
+
+  /** Plain warnings from the independent recording. */
+  #warningsHtml() {
+    const cmp = this.#comparison;
+    if (!cmp) return '';
+    const out = [];
+    for (const e of cmp.entries) {
+      if (e.status === 'extra') out.push(this.#t('unusedWarning', { what: this.#summaryLine(this.#entries[e.index].root.fn) }));
+      if (e.status === 'differs') out.push(this.#t('differsWarning'));
+    }
+    if (cmp.missing.length) out.push(this.#t('missingWarning', { count: cmp.missing.length }));
+    return out.map((w) => `<div class="notice bad" part="warning" role="alert">${w}</div>`).join('');
   }
 
   #budget(b) {
@@ -548,6 +622,9 @@ export class SorobanSignDialog extends Base {
     const d = this.dialog;
     if (!d) return;
     const focused = this.#root.activeElement?.closest?.('[data-act]')?.dataset.act;
+    // innerHTML replaces the disclosure; keep it as the user left it.
+    const more = d.querySelector('details[part="details"]');
+    if (more) this.#detailsOpen = more.open;
     const dapp = this.getAttribute('dapp');
     const netKey = Object.entries(NETWORKS).find(([, v]) => v === this.networkPassphrase)?.[0];
     const net = netKey ? this.#strings.networks[netKey] ?? netKey : this.#t('customNetwork');
@@ -567,16 +644,19 @@ export class SorobanSignDialog extends Base {
       const entries = n ? this.#entries.map((e, i) => this.#entry(e, i)).join('')
         : op?.type === 'invoke' ? `<article class="entry" part="entry"><div class="entry-head"><span>${this.#t('sourceAuthority')}</span></div><ol class="tree" role="list">${this.#node({ fn: op.hostFunction, subs: [] })}</ol></article>`
         : `<p>${this.#t('operation', { type: esc(op?.type ?? 'unknown') })}</p>`;
-      body = `<h3>${this.#t('whatYouAuthorize')}</h3><div part="tree">${entries}</div>${this.#previewHtml()}`;
+      const open = this.#detailsOpen ?? this.getAttribute('details') === 'open';
+      body = `${this.#summaryHtml()}${this.#statusHtml()}${this.#warningsHtml()}
+        <details class="more" part="details"${open ? ' open' : ''}><summary part="details-summary">${this.#t('details')}</summary>
+        <h3>${this.#t('whatYouAuthorize')}</h3><div part="tree">${entries}</div>${this.#effectsHtml()}</details>`;
     }
     const flags = this.#flags();
     const risky = flags.length > 0 || !!this.#error;
     const strict = this.hasAttribute('strict');
-    const approveLabel = this.#error ? this.#t('sign') : this.#confirming ? this.#t('confirmSignAnyway') : risky ? this.#t('signAnyway') : this.#t('sign');
+    const approveLabel = this.#error ? this.#t('approveButton') : this.#confirming ? this.#t('confirmApproveAnyway') : risky ? this.#t('approveAnyway') : this.#t('approveButton');
     d.innerHTML = `<header part="header">
         <div class="meta"><slot name="logo"></slot><span class="chip" part="network">${esc(net)}</span>${dapp ? `<span part="dapp">${this.#t('requestFrom', { dapp: esc(dapp) })}</span>` : ''}</div>
         <h2 id="ssd-title" part="title">${title}</h2>
-        <p id="ssd-sub" class="sub" part="summary">${sub}</p>
+        <p id="ssd-sub" class="sub" part="fee">${sub}</p>
         <slot name="header"></slot></header>
       <div class="body" part="body">${body}</div>
       <footer part="footer">

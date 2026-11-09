@@ -8,12 +8,14 @@ anything is signed.
 - **The authorization tree, always.** Every entry, every nested call, with
   argument values and readable sentences for token transfers. It is decoded
   in the browser from the bytes the signature covers. No network, no
-  simulator, any protocol. About 16 KB brotli.
-- **A preview, on request.** "Preview effects" lazily loads a WebAssembly
-  build of soroban-sim's host (about 470 KB brotli). It runs the transaction
-  against current ledger state, records which authorizations the transaction
-  really needs, and shows balance changes, events and, for smart accounts the
-  wallet describes, the account's own verdict and remaining spending cap.
+  simulator, any protocol. About 17 KB brotli.
+- **A simulated outcome.** When the wallet gives it an engine, the dialog
+  lazily loads a WebAssembly build of soroban-sim's host (about 470 KB
+  brotli) as it opens. It runs the transaction against current ledger state,
+  records which authorizations the transaction really needs, and reports one
+  status: will succeed, will be refused, or unknown, with a one-line reason.
+  Balance changes, events and a smart account's own verdict and spending cap
+  come with it.
 - **It never holds keys.** Approval hands back the exact entries to sign and
   a hash of each reviewed invocation. The wallet signs.
 - **White-label.** No product names in the UI. Theme tokens, `::part()`
@@ -25,7 +27,7 @@ anything is signed.
 
 ## Quick start
 
-One line in the page, one call when the user wants to sign:
+One line in the page, one call when the user wants to approve:
 
 ```html
 <script type="module" src="/vendor/soroban-sign-dialog/soroban-sign-dialog.js"></script>
@@ -167,6 +169,27 @@ Works zoneless or with zone.js; the example runs zoneless.
 
 See [Quick start](#quick-start) and `examples/html/`.
 
+## What the user sees
+
+Top to bottom, by default:
+
+1. **A summary** of what is being approved, one plain line per authorized
+   call ("Send 2 XLM to Corner Café"), and, when the preview finds a spending
+   cap, how much of it is left ("5 of 10 XLM left this window after this").
+2. **One status** for the simulated outcome: *Will succeed*, *Will be
+   refused* or *Outcome unknown*, with a one-line reason. It runs as the dialog
+   opens when an engine or provider is set. On a protocol the engine has no
+   build for, or with no engine, the status is unknown and says why; the
+   summary and the tree still come from the request's own bytes.
+3. **Plain warnings**, such as an authorization the transaction does not use.
+4. **Details**, one disclosure holding the full authorization tree with raw
+   contract, function and argument data, the account's verdict and cap, balance
+   changes and events.
+5. **Reject** and **Approve**. While a warning or refusal stands, Approve reads
+   *Approve anyway* and needs a second click (`strict` disables it instead).
+
+`details="open"` starts with Details expanded, for a wallet's own signing page.
+
 ## Make it yours
 
 ### Theme tokens
@@ -195,7 +218,8 @@ Light and dark follow `prefers-color-scheme`; `theme="light"` or
 `theme="dark"` pins one. Dark values are the same tokens, so override them
 inside your own dark-mode rule.
 
-Parts: `dialog`, `header`, `network`, `dapp`, `title`, `summary`, `body`,
+Parts: `dialog`, `header`, `network`, `dapp`, `title`, `fee`, `body`, `what`,
+`budget-line`, `status`, `status-reason`, `warning`, `details`, `details-summary`,
 `tree`, `entry`, `unused-entry`, `node`, `node-details`, `doc`, `preview`,
 `preview-button`, `auth-check`, `verdict`, `budget`, `balances`, `events`,
 `notice`, `footer`, `approve`, `reject`.
@@ -206,7 +230,7 @@ Parts: `dialog`, `header`, `network`, `dapp`, `title`, `summary`, `body`,
 |---|---|
 | `logo` | Start of the header row, before the network chip |
 | `header` | Under the title and fee line |
-| `footer` | Left of the Reject and Sign buttons |
+| `footer` | Left of the Reject and Approve buttons |
 
 ### Strings and languages
 
@@ -215,10 +239,12 @@ Assign any subset; the rest keep their defaults.
 
 ```js
 dialog.strings = {
-  sign: 'Firmar',
+  approveButton: 'Aprobar',
   reject: 'Rechazar',
+  details: 'Detalles',
   titleOne: 'Autoriza esta llamada',
-  send: (p) => `Enviar ${p.amount} de ${p.from} a ${p.to}`,
+  summarySend: (p) => `Enviar ${p.amount} a ${p.to}`,
+  statusSuccess: 'Saldrá bien',
   notices: { protocol: (p) => `La red usa el protocolo ${p.protocol}.` },
 };
 ```
@@ -232,7 +258,8 @@ parameters (`notices`, `reasons`), so those translate too.
 ## The preview
 
 Opt in by giving the dialog a preview provider. The engine is a separate
-module that loads only when the user asks for a preview:
+module, imported when the dialog first opens with one (or when the user asks,
+with `preview="manual"`):
 
 ```js
 import { createPreview } from '@theahaco/soroban-sign-dialog/preview';
@@ -244,7 +271,8 @@ dialog.previewProvider = createPreview({
 ```
 
 Or point the `engine` attribute at `dist/preview/soroban-sim-preview.js` and
-set `rpc-url`. `preview="auto"` runs it when the dialog opens.
+set `rpc-url`. `preview="manual"` waits for the user to press "Check outcome";
+`preview="off"` never simulates.
 
 What the preview does:
 
@@ -265,9 +293,10 @@ its calls consume. The network accepts the transaction anyway, and such an
 entry's signature stays valid until it expires, so it can be submitted in a
 later transaction. The tree alone cannot tell such an entry apart from one the
 transaction needs. The preview can: an entry the independent recording does
-not contain is marked **Not used by this transaction**, Sign turns into
-**Sign anyway** and needs a second click, and the `approve` detail carries an
-`extra` flag. With `strict`, Sign stays disabled instead.
+not contain is tagged "not used" in the summary, a plain warning above the
+buttons says what it authorizes and why that matters, Approve turns into
+**Approve anyway** and needs a second click, and the `approve` detail carries
+an `extra` flag. With `strict`, Approve stays disabled instead.
 
 Other flags: `differs` (same signer, different tree), `missing` (the
 recording needs an entry the request lacks), `refused` (the account would
@@ -364,7 +393,7 @@ CI fails the build when a budget is exceeded (`pnpm size`):
 
 | Artifact | brotli | Budget |
 |---|---:|---:|
-| Tree view (`soroban-sign-dialog.js`, the whole core) | ~16 KB | 20 KB |
+| Tree view (`soroban-sign-dialog.js`, the whole core) | ~17 KB | 20 KB |
 | Engine, protocol 29 (engine JS + worker + reactor) | ~476 KB | 600 KB |
 | Engine, protocol 30 | ~488 KB | 600 KB |
 | React wrapper (beside the core) | ~0.5 KB | 2 KB |
