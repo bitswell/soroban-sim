@@ -105,7 +105,7 @@ honour `signal` to stop work when the dialog closes or the request changes.
   engine: { name, host, protocol, builds },
   ledger: { sequence, protocol },
   stateSource,                            // shown in the footnote
-  recordedAuth: [base64 SorobanAuthorizationEntry],  // the independent recording
+  recordedAuth: [base64 SorobanAuthorizationEntry] | null,  // the independent recording; null when it failed, so used/unused is unknown
   outcome: { ok, error, codes: [{ contract, code }] },  // contract: who raised it, null for the host
   verdicts: [{ address, kind, allowed, rule: { id, name, grant }, code, reasonCode, params, reason }],
   budgets: [{ address, rule, token: { code, decimals }, limit, periodLedgers, spentInWindow, amount, ledger, nextReleaseLedger }],

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { preview, fixtureProvider, BUILDS } from '../src/preview/soroban-sim-preview.js';
 import { perchAdapter } from '../src/preview/perch.js';
-import { compareAuth, decodeAuthEntry, decodeEnvelope } from '../src/xdr.js';
+import { compareAuth, decodeAuthEntry, decodeEnvelope, decodeLedgerEntry } from '../src/xdr.js';
 import { capture, multiParty, scenario } from './fixture.mjs';
 
 const A = capture.addresses;
@@ -149,6 +149,21 @@ for (const protocol of [29, 30]) {
     assert.equal(r.events.length, 1);
   });
 }
+
+test('a failed recording leaves the used/unused comparison unknown', async () => {
+  // Without the account's XLM balance the token contract fails the transfer,
+  // so the recording produces no tree to compare the supplied entries with.
+  const isBalance = (d) => d.type === 'contract-data' && d.contract.str === A.nativeSac && d.key.t === 'vec' && d.key.v[0].v === 'Balance' && d.key.v[1].str === A.account;
+  const broke = fixtureProvider({
+    ledger: capture.ledger.filter((e) => !isBalance(decodeLedgerEntry(e.entry))),
+    latest: { sequence: capture.network.sequence - 1, protocolVersion: 29, closeTime: capture.network.timestamp - 5 },
+  });
+  const r = await run('within-cap', 29, { hints: {}, stateProvider: broke });
+  assert.equal(r.status, 'ok');
+  assert.equal(r.outcome.ok, false);
+  assert.ok(r.outcome.codes.some((c) => c.contract === A.nativeSac && c.code === 10));
+  assert.equal(r.recordedAuth, null, 'no recorded tree, so no entry is marked unused');
+});
 
 test('a contract error is the account’s refusal only when the account raised it', () => {
   const op = decodeEnvelope(scenario('within-cap').envelope).tx.operations[0];

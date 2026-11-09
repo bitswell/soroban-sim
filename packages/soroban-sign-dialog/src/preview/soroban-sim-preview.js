@@ -359,9 +359,10 @@ export async function preview(req) {
     const nativeSac = await nativeAssetContract(passphrase);
     const tokens = { [nativeSac]: { code: 'XLM', decimals: 7 }, ...(req.tokens ?? {}) };
     // Budgets and verdicts count only the entries the transaction consumes:
-    // those the independent recording also produced.
-    const cmp = compareAuth(op.auth, record.auth.map(decodeAuthEntry));
-    const consumed = { ...op, auth: op.auth.filter((_, i) => cmp.entries[i].status === 'match') };
+    // those the independent recording also produced. A failed recording
+    // produces no tree, so which entries are used is unknown: count them all.
+    const cmp = record.ok ? compareAuth(op.auth, record.auth.map(decodeAuthEntry)) : null;
+    const consumed = cmp ? { ...op, auth: op.auth.filter((_, i) => cmp.entries[i].status === 'match') } : op;
     const verdicts = [];
     const budgets = [];
     for (const a of used) {
@@ -382,7 +383,7 @@ export async function preview(req) {
       notice: unhinted ? 'No signer hint was given, so the account’s own policy was not evaluated; effects assume every authorization passes.' : undefined,
       ledger,
       stateSource: state.describe?.() ?? 'RPC',
-      recordedAuth: record.auth,
+      recordedAuth: record.ok ? record.auth : null,
       outcome: { ok: effects.ok, error: effects.ok ? null : effects.error, codes: effects.codes },
       verdicts,
       budgets,
