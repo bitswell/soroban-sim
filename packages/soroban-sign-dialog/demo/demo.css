@@ -1,0 +1,50 @@
+:root {
+  --bg: #f6f3ee; --panel: #fffdf9; --ink: #221d17; --muted: #6d6458; --line: #e4dccf;
+  --brand: #7a3e12; --brand-ink: #fff8f0; --code: #f0eadf;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15120f; --panel: #1f1b17; --ink: #f1ebe2; --muted: #a99d8d; --line: #39322a;
+    --brand: #e0a06a; --brand-ink: #1a1007; --code: #2a241e; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15120f; --panel: #1f1b17; --ink: #f1ebe2; --muted: #a99d8d; --line: #39322a;
+  --brand: #e0a06a; --brand-ink: #1a1007; --code: #2a241e; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 Georgia, "Iowan Old Style", serif; }
+.wrap { max-width: 68rem; margin: 0 auto; padding: 1.25rem 16px 3rem; }
+.notice { font: 13.5px/1.45 system-ui, sans-serif; background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 0.8rem; color: var(--muted); }
+.notice b { color: var(--ink); }
+header.shop { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin: 1.4rem 0 1rem; }
+h1 { margin: 0; font-size: clamp(1.8rem, 5vw, 2.6rem); letter-spacing: -0.01em; }
+h1 small { display: block; font: 600 0.8rem/1.4 system-ui, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; color: var(--brand); }
+.controls { display: flex; gap: 0.5rem; flex-wrap: wrap; font: 14px system-ui, sans-serif; }
+.controls label { display: flex; gap: 0.35rem; align-items: center; color: var(--muted); }
+select { font: inherit; padding: 0.3rem 0.4rem; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); max-width: 100%; }
+.grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1.25rem; align-items: start; }
+@media (max-width: 820px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.menu { display: grid; gap: 0.8rem; }
+.item { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.3rem 1rem; align-items: center; }
+.item h2 { margin: 0; font-size: 1.2rem; }
+.item p { margin: 0; color: var(--muted); font: 14px/1.45 system-ui, sans-serif; grid-column: 1; }
+.item .tag { font: 600 12px/1 system-ui, sans-serif; letter-spacing: 0.04em; text-transform: uppercase; padding: 0.3rem 0.5rem; border-radius: 999px; background: var(--code); color: var(--muted); justify-self: start; }
+.item button { grid-column: 2; grid-row: 1 / span 3; font: 600 15px system-ui, sans-serif; padding: 0.65rem 1rem; border-radius: 10px; border: 0; background: var(--brand); color: var(--brand-ink); cursor: pointer; white-space: nowrap; }
+.item button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+@media (max-width: 480px) { .item { grid-template-columns: minmax(0, 1fr); } .item button { grid-column: 1; grid-row: auto; justify-self: start; } }
+aside { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; font: 14px/1.5 system-ui, sans-serif; min-width: 0; }
+aside h2 { font: 600 0.8rem/1.4 system-ui, sans-serif; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.5rem; }
+pre { background: var(--code); border-radius: 8px; padding: 0.6rem 0.7rem; overflow-x: auto; font: 12.5px/1.5 ui-monospace, Menlo, monospace; margin: 0.4rem 0 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+#log:empty::before { content: "Nothing yet. Pick an order."; color: var(--muted); }
+.ev { border-top: 1px solid var(--line); padding: 0.6rem 0; }
+.ev:first-child { border-top: 0; padding-top: 0; }
+.ev b.ok { color: #2f7a43; } .ev b.no { color: #a33a2a; }
+/* A wallet brands the dialog through its tokens: */
+soroban-sign-dialog.brand {
+  --ssd-accent: #0f766e; --ssd-accent-fg: #ecfeff; --ssd-radius: 20px; --ssd-radius-sm: 12px;
+  --ssd-font: "Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif; --ssd-title-size: 1.25rem;
+  --ssd-space-4: 1.5rem; --ssd-shadow: 0 30px 80px rgba(15, 118, 110, 0.25); --ssd-duration: 240ms;
+}
+soroban-sign-dialog.brand::part(network) { text-transform: uppercase; letter-spacing: 0.06em; }

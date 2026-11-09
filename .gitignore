@@ -4,6 +4,8 @@ packages/*/node_modules/
 packages/soroban-sim/src/generated/
 packages/web-demo/test-results/
 packages/web-demo/playwright-report/
+packages/soroban-sign-dialog/test-results/
+packages/soroban-sign-dialog/playwright-report/
 dist/
 .tmp/
 .DS_Store

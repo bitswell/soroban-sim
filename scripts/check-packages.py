@@ -27,7 +27,9 @@ def main():
     parser.add_argument("--allow-dirty", action="store_true", help="For local development only")
     args = parser.parse_args()
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--locked"], cwd=ROOT))
-    members = [p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
+    workspace = [p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
+    # `publish = false` members (the sign dialog's reactor) are never published.
+    members = [p for p in workspace if p["publish"] != []]
     nodes = {n["id"]: n for n in metadata["resolve"]["nodes"]}
     if any(p["source"] and p["source"].startswith("git+") for p in metadata["packages"]):
         raise SystemExit("Release dependency graph still contains Git-only sources")
@@ -35,6 +37,9 @@ def main():
     if "recording_mode" in nodes[host["id"]]["features"]:
         raise SystemExit("The isolated application host has recording_mode enabled")
     package_args = ["cargo", "package", "--workspace", "--locked"]
+    for package in workspace:
+        if package not in members:
+            package_args += ["--exclude", package["name"]]
     if args.allow_dirty:
         package_args.append("--allow-dirty")
     run(*package_args)

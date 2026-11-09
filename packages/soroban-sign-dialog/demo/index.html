@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign dialog demo</title>
+<meta name="description" content="soroban-sign-dialog with the real preview engine against a captured ledger: a grant transfer within its cap, over its cap, and with an authorization entry the transaction never uses.">
+<link rel="stylesheet" href="demo.css">
+<script type="module" src="../dist/soroban-sign-dialog.js"></script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <p class="notice"><b>Real engine, local ledger.</b> <b>Preview effects</b> runs the protocol's reactor build in a Worker against a ledger captured from a smart account with a spending grant (10 XLM per 100 ledgers, 3 XLM already spent). Nothing is signed and nothing is sent. This page runs under a Content-Security-Policy with no inline scripts or styles.</p>
+
+  <header class="shop">
+    <h1><small>A toy dapp</small>Corner Café</h1>
+    <div class="controls">
+      <label>Theme <select id="theme"><option value="">auto</option><option>light</option><option>dark</option></select></label>
+      <label>Look <select id="look"><option value="">default</option><option value="brand">wallet brand</option></select></label>
+      <label>Language <select id="lang"><option value="en">English</option><option value="es">Español (sample)</option></select></label>
+      <label>State <select id="source"><option value="fixture">captured ledger (protocol 29)</option><option value="fixture-30">captured ledger, as protocol 30</option><option value="fixture-31">captured ledger, as protocol 31</option><option value="testnet">testnet RPC</option></select></label>
+      <label>Preview <select id="preview"><option value="manual">on request</option><option value="auto">automatic</option><option value="off">off</option></select></label>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="menu" aria-label="Orders">
+      <div class="item">
+        <h2>Flat white</h2><span class="tag">5 XLM · within the cap</span>
+        <p>Paid from the account under the shop's grant, which has 7 XLM left in this window.</p>
+        <button type="button" data-scenario="within-cap">Pay 5 XLM</button>
+      </div>
+      <div class="item">
+        <h2>Bag of beans</h2><span class="tag">8 XLM · over the cap</span>
+        <p>More than the grant has left. The tree looks ordinary; the preview shows the account would refuse it.</p>
+        <button type="button" data-scenario="over-cap">Pay 8 XLM</button>
+      </div>
+      <div class="item">
+        <h2>Espresso</h2><span class="tag">2 XLM · unused entry</span>
+        <p>The transaction also carries a signed authorization for 4 XLM to another address that it never uses. Soroban accepts such a transaction, and a signed entry stays valid until it expires, so the dialog marks it.</p>
+        <button type="button" data-scenario="unused-entry">Pay 2 XLM</button>
+      </div>
+    </section>
+
+    <aside>
+      <h2>Embed</h2>
+<pre>&lt;script type="module" src="soroban-sign-dialog.js"&gt;&lt;/script&gt;
+
+const r = await SorobanSignDialog.request({ transaction, signer, dapp });
+if (r.approved) wallet.sign(r.entries);  // keys stay in the wallet</pre>
+      <h2>What the wallet receives</h2>
+      <div id="log" aria-live="polite"></div>
+    </aside>
+  </div>
+</div>
+
+<soroban-sign-dialog id="dialog" engine="../dist/preview/soroban-sim-preview.js">
+  <img slot="logo" src="wallet-logo.svg" alt="Acme Wallet" height="20">
+</soroban-sign-dialog>
+</body>
+</html>

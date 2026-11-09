@@ -264,6 +264,23 @@ report. Signing defaults to throwaway keys, and a real wallet signing into a
 session gets a replay warning. `soroban-sim serve` and the browser share one
 request handler, `crates/soroban-sim-facade`. See `docs/browser-session.md`.
 
+## Sign dialog
+
+`packages/soroban-sign-dialog` (`@theahaco/soroban-sign-dialog`) is an
+embeddable `<soroban-sign-dialog>` web component for wallets and dapps. It
+renders the full tree of requested authority from a transaction's XDR alone
+(about 16 KB brotli, any protocol), and on request lazily loads a preview
+engine that re-records the tree with soroban-sim's host, marks entries the
+transaction never uses, and shows balance changes, events and a smart
+account's own verdict. The engine ships one reactor per host protocol
+(`crates/soroban-sim-preview`, p29 and p30, about 470 KB brotli each) and
+picks one by the network's `protocolVersion`. See the package README.
+
+```sh
+pnpm --filter @theahaco/soroban-sign-dialog build
+pnpm --filter @theahaco/soroban-sign-dialog demo   # http://127.0.0.1:4178/demo/
+```
+
 ## Docs
 
 - `docs/architecture.md` — design and state-loading plan.
@@ -274,6 +291,7 @@ request handler, `crates/soroban-sim-facade`. See `docs/browser-session.md`.
 - `docs/feasibility.md` — Milestone 0 proof and blocker inventory.
 - `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.
 - `docs/upstream.md` — upstream pins and contribution notes.
+- `packages/soroban-sign-dialog/README.md` — the sign dialog: embedding, frameworks, theming, the preview engine.
 
 ## License
 

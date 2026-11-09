@@ -1,0 +1,127 @@
+// Every user-facing string the dialog renders, in English. A wallet replaces
+// any of them with `dialog.strings = { ... }` (merged over these defaults).
+//
+// Values are inserted as HTML. Parameters arrive already escaped (addresses
+// and amounts as small pieces of markup), so an override only has to escape
+// text of its own.
+
+export const STRINGS = {
+  // Header and footer.
+  networks: { testnet: 'Testnet', mainnet: 'Mainnet', futurenet: 'Futurenet', local: 'Local network' },
+  customNetwork: 'Custom network',
+  requestFrom: (p) => `Request from <b>${p.dapp}</b>`,
+  titleOne: 'Authorize this call',
+  titleMany: (p) => `Authorize ${p.count} calls`,
+  titleTransaction: 'Approve this transaction',
+  titleUnreadable: 'This request could not be read',
+  titleEmpty: 'No request',
+  summary: (p) => `Fee up to ${p.fee} XLM, paid by ${p.payer}`,
+  reject: 'Reject',
+  sign: 'Sign',
+  signAnyway: 'Sign anyway',
+  confirmSignAnyway: 'Confirm: sign anyway',
+
+  // The request.
+  nothingToReview: 'Nothing to review.',
+  unreadable: (p) => `${p.error}. Nothing has been signed. Reject the request.`,
+  whatYouAuthorize: 'What you authorize',
+  authorizedBy: (p) => `${p.index}. Authorized by <b>${p.who}</b>`,
+  sourceAccount: 'the transaction source account',
+  addressBound: 'address-bound',
+  sourceAuthority: 'Runs with the source account’s authority',
+  operation: (p) => `${p.type} operation`,
+  you: 'you',
+  nativeAsset: 'XLM (native asset)',
+  argument: (p) => `arg ${p.index}`,
+  argumentCount: (p) => (p.count === 1 ? '1 argument' : `${p.count} arguments`),
+  contract: 'contract',
+  none: 'none',
+  yes: 'yes',
+  no: 'no',
+  bytes: (p) => `${p.length} bytes`,
+  seconds: (p) => `${p.value} s`,
+
+  // Sentences for well-known calls. Amounts and addresses are markup.
+  send: (p) => `Send ${p.amount} from ${p.from} to ${p.to}`,
+  approve: (p) => `Let ${p.spender} spend up to ${p.amount} of ${p.from}’s balance until ledger ${p.until}`,
+  transferFrom: (p) => `${p.spender} sends ${p.amount} from ${p.from} to ${p.to}`,
+  burn: (p) => `Burn ${p.amount} from ${p.from}`,
+  mint: (p) => `Mint ${p.amount} to ${p.to}`,
+  deployAsset: (p) => `Deploy the ${p.code} asset contract`,
+  deploy: (p) => (p.code ? `Deploy a new contract from code ${p.code}` : 'Deploy a new contract'),
+  upload: (p) => `Upload contract code (${p.length} bytes)`,
+  installGrant: (p) => `Install grant #${p.grant} on your account`,
+  replacePolicy: 'Replace your account’s policy document',
+  call: (p) => `Call <code>${p.fn}</code> on ${p.contract}`,
+
+  // A policy document carried in a call's bytes argument.
+  policyDocument: (p) => `Policy document (${p.network ?? 'network not named'})`,
+  rules: 'Rules',
+  signers: 'Signers',
+  anyFunction: 'any function',
+  ruleLine: (p) => `<b>${p.name}</b>: ${p.functions} on ${p.scope}${p.by ? ` by ${p.by}` : ''}${p.cap ? `; at most <b>${p.cap}</b> per ${p.period} ledgers` : ''}`,
+  signerKey: (p) => `key ${p.key}`,
+
+  // The authorization check.
+  badgeMatch: '✓ Matches simulation',
+  badgeExtra: '⚠ Not used by this transaction',
+  badgeDiffers: '⚠ Differs from simulation',
+  extraNote: 'This entry is not needed to run the transaction. If you sign it, the signature is published with the transaction and anyone can submit it later, until it expires.',
+  differsNote: 'The simulation recorded a different authorization for this signer. Compare the trees before signing.',
+  authMatch: '✓ The simulation recorded the same authorization tree independently.',
+  authMismatch: (p) => `⚠ The simulation’s own recording of the authorization tree does not match the request: ${p.extra} not used, ${p.differs} different, ${p.missing} missing.`,
+  neededNotSupplied: 'Needed but not supplied:',
+
+  // The preview.
+  effects: 'Effects',
+  previewIntro: 'The tree above is decoded from the request itself. A preview runs the transaction in a local simulator against current ledger state.',
+  previewButton: 'Preview effects',
+  previewRunning: 'Running the simulation…',
+  previewUnavailable: 'Preview unavailable.',
+  treeStillExact: 'The authorization tree above is still exact.',
+  previewFailed: (p) => `Preview failed: ${p.error}`,
+  wouldAccept: (p) => `<b>Would be accepted</b> by ${p.account}${p.rule ? ` under rule <code>${p.rule}</code>` : ''}.`,
+  wouldRefuse: (p) => `<b>Would be refused</b> by ${p.account}${p.rule ? ` under rule <code>${p.rule}</code>` : ''}.`,
+  contractError: (p) => `Contract error ${p.code}`,
+  spendingCap: 'Spending cap',
+  capRule: (p) => ` · rule <code>${p.rule}</code>`,
+  capMeter: (p) => `${p.spent} spent of ${p.limit}; this request ${p.amount}`,
+  capLeft: (p) => `${p.remaining} of ${p.limit} left in the current window of ${p.period} ledgers.`,
+  capAfter: (p) => `After this: <b>${p.after}</b> left.`,
+  capOver: (p) => `<b>This request (${p.amount}) is over the remaining cap.</b>`,
+  capRelease: (p) => `The oldest spend leaves the window at ledger ${p.ledger}${p.minutes != null ? ` (about ${p.minutes} min)` : ''}.`,
+  balanceChanges: 'Balance changes',
+  balanceHeaders: ['Account', 'Asset', 'Before', 'After', 'Change'],
+  noBalanceChanges: 'No balance changes.',
+  events: 'Events',
+  transferEvent: (p) => `<b>transfer</b> ${p.amount} from ${p.from} to ${p.to}`,
+  undecodableEvent: (p) => `undecodable event (${p.error})`,
+  wouldFail: (p) => `The transaction would fail: ${p.error}${p.codes ? ` (contract error ${p.codes})` : ''}`,
+  footnote: (p) => `Simulated locally${p.ledger ? ` at ledger ${p.ledger}` : ''}, protocol ${p.protocol}, with ledger state from ${p.source}. The result is a prediction, not a guarantee.`,
+
+  // Notices the engine reports by code (PreviewResult.code). The engine's
+  // own English `notice` is used for codes not listed here.
+  notices: {
+    protocol: (p) => `The network is on protocol ${p.protocol}, and this preview supports protocols ${p.builds.join(' and ')}. Effects are not shown, because a simulation under other rules can be wrong.`,
+    'no-rpc': 'No RPC is configured for this network, so ledger state cannot be read.',
+    'no-transaction': 'A preview needs the whole transaction. For bare authorization entries the dialog shows the tree only.',
+    'fee-bump': 'Preview the inner transaction of a fee bump.',
+    'not-invoke': (p) => `This ${p.operation} operation authorizes nothing; there is nothing to preview.`,
+    'no-hint': 'No signer hint was given, so the account’s own policy was not evaluated; effects assume every authorization passes.',
+  },
+
+  // Account verdict reasons by code (verdict.reasonCode).
+  reasons: {
+    accepted: (p) => `Accepted${p.rule ? ` under ${p.grant != null ? `grant ${p.grant}, ` : ''}rule ‘${p.rule}’` : ''}, assuming a valid signature from this key.`,
+    refused: (p) => `The account refuses it${p.cause ? ` because of ${p.cause}` : ''} (contract error ${p.code}).`,
+    'refused-over-cap': (p) => `The account refuses it${p.cause ? ` because of ${p.cause}` : ''} (contract error ${p.code}). The request is more than the cap has left in this window.`,
+    failed: (p) => `The enforcing simulation failed: ${p.error}.`,
+  },
+};
+
+/** Defaults with `overrides` merged in, one level deep for the nested maps. */
+export function mergeStrings(overrides = {}) {
+  const out = { ...STRINGS, ...overrides };
+  for (const k of ['networks', 'notices', 'reasons']) out[k] = { ...STRINGS[k], ...(overrides[k] ?? {}) };
+  return out;
+}

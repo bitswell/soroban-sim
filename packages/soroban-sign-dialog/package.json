@@ -1,0 +1,69 @@
+{
+  "name": "@theahaco/soroban-sign-dialog",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An embeddable, white-label signing dialog for Soroban: the full authorization tree from XDR, with an opt-in local simulation preview",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": [
+    "./dist/soroban-sign-dialog.js",
+    "./src/embed.js"
+  ],
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./embed": {
+      "types": "./types/index.d.ts",
+      "default": "./dist/soroban-sign-dialog.js"
+    },
+    "./preview": {
+      "types": "./types/preview.d.ts",
+      "default": "./dist/preview/soroban-sim-preview.js"
+    },
+    "./react": {
+      "types": "./types/react.d.ts",
+      "default": "./dist/react.js"
+    },
+    "./svelte": {
+      "types": "./types/svelte.d.ts"
+    },
+    "./vue": {
+      "types": "./types/vue.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "types",
+    "README.md",
+    "API.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:js": "node scripts/build.mjs --js-only",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "playwright test",
+    "check": "tsc -p tsconfig.json",
+    "size": "node scripts/size.mjs",
+    "demo": "node scripts/serve.mjs"
+  },
+  "devDependencies": {
+    "@angular/common": "^22.2.5",
+    "@angular/compiler": "^22.2.5",
+    "@angular/core": "^22.2.5",
+    "@angular/platform-browser": "^22.2.5",
+    "@playwright/test": "^1.62.1",
+    "@types/react": "^19.2.18",
+    "esbuild": "^0.28.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-dom18": "npm:react-dom@^18.3.1",
+    "react18": "npm:react@^18.3.1",
+    "rxjs": "^7.8.2",
+    "svelte": "^5.57.3",
+    "typescript": "^5.9.3",
+    "vue": "^3.5.45"
+  }
+}

@@ -6,6 +6,7 @@ members = [
     "crates/soroban-sim-component",
     "crates/soroban-sim-cli",
     "crates/soroban-sim-facade",
+    "crates/soroban-sim-preview",
 ]
 
 [workspace.package]

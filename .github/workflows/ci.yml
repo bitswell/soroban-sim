@@ -53,6 +53,47 @@ jobs:
   binaries:
     uses: ./.github/workflows/build-cli.yml
 
+  sign-dialog:
+    runs-on: ubuntu-latest
+    env:
+      BINARYEN_VERSION: '131'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sign-dialog
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.11.0
+          run_install: false
+      - name: Install binaryen (wasm-opt)
+        run: |
+          curl -sSL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - name: Reactor tests, host 29 and host 30
+        run: |
+          cargo test -p soroban-sim-preview --locked
+          cargo test -p soroban-sim-preview --locked --no-default-features --features p30
+      - run: pnpm install --frozen-lockfile
+      - name: Build the package (reactors, wasm-opt, bundles)
+        run: pnpm --filter @theahaco/soroban-sign-dialog build
+      - name: Size budgets (tree view <= 20 KB, engine <= 600 KB brotli)
+        run: pnpm --filter @theahaco/soroban-sign-dialog size
+      - name: Decoder, comparison, engine and SSR tests
+        run: pnpm --filter @theahaco/soroban-sign-dialog test
+      - name: Type declarations
+        run: pnpm --filter @theahaco/soroban-sign-dialog check
+      - name: Install browser
+        run: pnpm --filter @theahaco/soroban-sign-dialog exec playwright install --with-deps chromium
+      - name: Demo and framework browser tests
+        run: pnpm --filter @theahaco/soroban-sign-dialog test:browser
+
   milestone-0:
     runs-on: macos-latest
     steps:
