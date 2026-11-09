@@ -164,3 +164,18 @@ test('a contract error is the account’s refusal only when the account raised i
   assert.equal(own.reasonCode, 'refused');
   assert.equal(own.params.cause, 'a stale grant');
 });
+
+test('unsigned others only when another party’s entry has no signature yet', () => {
+  const M = multiParty.addresses;
+  const op = decodeEnvelope(multiParty.envelope).tx.operations[0];
+  const perch = perchAdapter(M.account, { verifier: M.verifier, key: M.key });
+  const enforce = { ok: false, error: 'Error(Auth, InvalidAction)', codes: [] };
+  const unsigned = perch.verdict(op, enforce, { ok: true }, capture.network.sequence);
+  assert.equal(unsigned.allowed, null);
+  assert.equal(unsigned.reasonCode, 'unsigned-others');
+  // The cosigner has signed: the failure is not theirs to explain.
+  const signed = { ...op, auth: op.auth.map((e) => (e.credentials.address?.str === M.cosigner ? { ...e, credentials: { ...e.credentials, signature: { t: 'vec', v: [] } } } : e)) };
+  const failed = perch.verdict(signed, enforce, { ok: true }, capture.network.sequence);
+  assert.equal(failed.allowed, null);
+  assert.equal(failed.reasonCode, 'failed');
+});

@@ -125,7 +125,7 @@ export function perchAdapter(account, hint) {
       }
       const code = enforce?.codes?.find((c) => c.contract === account)?.code;
       if (code == null) {
-        if (record?.ok && op.auth.some((e) => e.credentials.address && e.credentials.address.str !== account)) {
+        if (record?.ok && op.auth.some((e) => e.credentials.address && e.credentials.address.str !== account && e.credentials.signature.t === 'void')) {
           return { ...v, allowed: null, reasonCode: 'unsigned-others', params: {}, reason: 'Other parties have not signed yet, so this account’s verdict is unknown.' };
         }
         const error = enforce?.error ?? 'unknown error';
