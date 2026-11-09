@@ -98,14 +98,19 @@ impl SnapshotSource for Snapshot {
             return Ok(None);
         }
         let unknown = || HostError::from((ScErrorType::Storage, ScErrorCode::ExceededLimit));
-        self.needed.try_borrow_mut().map_err(|_| unknown())?.insert((**key).clone());
+        self.needed
+            .try_borrow_mut()
+            .map_err(|_| unknown())?
+            .insert((**key).clone());
         Err(unknown())
     }
 }
 
 impl Snapshot {
     fn take_needed(&self) -> Vec<LedgerKey> {
-        std::mem::take(&mut *self.needed.borrow_mut()).into_iter().collect()
+        std::mem::take(&mut *self.needed.borrow_mut())
+            .into_iter()
+            .collect()
     }
 }
 
@@ -240,7 +245,10 @@ fn run(r: &mut In<'_>, out: &mut Out) -> Result<(), String> {
     let envelope: TransactionEnvelope = r.xdr("transaction envelope")?;
     let mode = r.u8()?;
     if protocol != host_protocol() {
-        return Err(format!("the ledger is on protocol {protocol}; this engine implements protocol {}", host_protocol()));
+        return Err(format!(
+            "the ledger is on protocol {protocol}; this engine implements protocol {}",
+            host_protocol()
+        ));
     }
     let (host_function, source) = extract_invoke_host_function(&envelope)?;
 
@@ -257,13 +265,22 @@ fn run(r: &mut In<'_>, out: &mut Out) -> Result<(), String> {
             let account = r.id()?;
             let mut ids = vec![];
             for _ in 0..r.u32()? {
-                ids.push((0..r.u32()?).map(|_| r.u32()).collect::<Result<Vec<_>, _>>()?);
+                ids.push(
+                    (0..r.u32()?)
+                        .map(|_| r.u32())
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
             }
             let mut keys = vec![];
             for _ in 0..r.u32()? {
                 keys.push((r.id()?, r.blob()?.to_vec()));
             }
-            hints.push(Hint { account, rule_ids: ids, keys, used: Cell::default() });
+            hints.push(Hint {
+                account,
+                rule_ids: ids,
+                keys,
+                used: Cell::default(),
+            });
         }
         let live = Some(sequence.saturating_add(1_000_000));
         if !stubs.is_empty() {
@@ -285,12 +302,19 @@ fn run(r: &mut In<'_>, out: &mut Out) -> Result<(), String> {
 
     let snapshot = STORE.with(|s| {
         let s = s.borrow();
-        let mut present: BTreeMap<LedgerKey, EntryWithLiveUntil> =
-            s.present.iter().map(|(k, (e, live))| (k.clone(), (Rc::new(e.clone()), *live))).collect();
+        let mut present: BTreeMap<LedgerKey, EntryWithLiveUntil> = s
+            .present
+            .iter()
+            .map(|(k, (e, live))| (k.clone(), (Rc::new(e.clone()), *live)))
+            .collect();
         for (e, live) in overrides {
             present.insert(e.to_key(), (Rc::new(e), live));
         }
-        Rc::new(Snapshot { present, absent: s.absent.clone(), needed: RefCell::default() })
+        Rc::new(Snapshot {
+            present,
+            absent: s.absent.clone(),
+            needed: RefCell::default(),
+        })
     });
     let needs = |out: &mut Out, keys: Vec<LedgerKey>| {
         out.u8(ST_NEEDS_STATE);
@@ -349,10 +373,13 @@ fn run(r: &mut In<'_>, out: &mut Out) -> Result<(), String> {
             out.blob(format!("{:?}", e.error).as_bytes());
         }
     }
-    out.list(&contract_errors(&result.diagnostic_events), |o, (contract, code)| {
-        o.blob(contract.as_ref().map_or(&[][..], |c| &c.0 .0[..]));
-        o.u32(*code);
-    });
+    out.list(
+        &contract_errors(&result.diagnostic_events),
+        |o, (contract, code)| {
+            o.blob(contract.as_ref().map_or(&[][..], |c| &c.0 .0[..]));
+            o.u32(*code);
+        },
+    );
     out.list(&result.auth, |o, a| o.xdr(a));
     out.list(&result.contract_events, |o, ev| o.xdr(ev));
     out.list(&result.modified_entries, |o, d| {
@@ -371,35 +398,54 @@ fn run(r: &mut In<'_>, out: &mut Out) -> Result<(), String> {
         Some(d) => out.xdr(d),
         None => out.blob(&[]),
     }
-    let tail = if result.invoke_result.is_err() { diagnostics_tail(&result.diagnostic_events) } else { String::new() };
+    let tail = if result.invoke_result.is_err() {
+        diagnostics_tail(&result.diagnostic_events)
+    } else {
+        String::new()
+    };
     out.blob(tail.as_bytes());
     Ok(())
 }
 
 /// The first `InvokeHostFunction` operation's host function and its source
 /// account (the operation's own source, else the transaction's).
-fn extract_invoke_host_function(envelope: &TransactionEnvelope) -> Result<(HostFunction, AccountId), String> {
+fn extract_invoke_host_function(
+    envelope: &TransactionEnvelope,
+) -> Result<(HostFunction, AccountId), String> {
     let tx = match envelope {
         TransactionEnvelope::Tx(v1) => &v1.tx,
-        TransactionEnvelope::TxV0(_) => return Err("v0 envelopes cannot carry a Soroban invocation".into()),
-        TransactionEnvelope::TxFeeBump(_) => return Err("preview the inner transaction of a fee bump".into()),
+        TransactionEnvelope::TxV0(_) => {
+            return Err("v0 envelopes cannot carry a Soroban invocation".into())
+        }
+        TransactionEnvelope::TxFeeBump(_) => {
+            return Err("preview the inner transaction of a fee bump".into())
+        }
     };
     let (op_source, host_function) = tx
         .operations
         .iter()
         .find_map(|op| match &op.body {
-            OperationBody::InvokeHostFunction(i) => Some((op.source_account.as_ref(), i.host_function.clone())),
+            OperationBody::InvokeHostFunction(i) => {
+                Some((op.source_account.as_ref(), i.host_function.clone()))
+            }
             _ => None,
         })
         .ok_or("the transaction has no InvokeHostFunction operation")?;
     match op_source.unwrap_or(&tx.source_account) {
-        MuxedAccount::Ed25519(key) => Ok((host_function, AccountId(PublicKey::PublicKeyTypeEd25519(key.clone())))),
-        MuxedAccount::MuxedEd25519(_) => Err("muxed (M...) source accounts are not supported".into()),
+        MuxedAccount::Ed25519(key) => Ok((
+            host_function,
+            AccountId(PublicKey::PublicKeyTypeEd25519(key.clone())),
+        )),
+        MuxedAccount::MuxedEd25519(_) => {
+            Err("muxed (M...) source accounts are not supported".into())
+        }
     }
 }
 
 fn supplied_auth(envelope: &TransactionEnvelope) -> Vec<SorobanAuthorizationEntry> {
-    let TransactionEnvelope::Tx(v1) = envelope else { return vec![] };
+    let TransactionEnvelope::Tx(v1) = envelope else {
+        return vec![];
+    };
     v1.tx
         .operations
         .iter()
@@ -413,32 +459,66 @@ fn supplied_auth(envelope: &TransactionEnvelope) -> Vec<SorobanAuthorizationEntr
 /// Give a hinted account's address credentials the `AuthPayload` its
 /// `__check_auth` reads: `{ context_rule_ids, signers: { External(verifier,
 /// key) => sig } }`, with all-zero signatures the stub verifier accepts.
-fn fill_auth_payload(entry: &mut SorobanAuthorizationEntry, hints: &[Hint], sequence: u32) -> Result<(), String> {
+fn fill_auth_payload(
+    entry: &mut SorobanAuthorizationEntry,
+    hints: &[Hint],
+    sequence: u32,
+) -> Result<(), String> {
     let creds = match &mut entry.credentials {
         SorobanCredentials::Address(c) | SorobanCredentials::AddressV2(c) => c,
         _ => return Ok(()),
     };
-    let ScAddress::Contract(ContractId(Hash(id))) = &creds.address else { return Ok(()) };
-    let Some(hint) = hints.iter().find(|h| &h.account == id) else { return Ok(()) };
+    let ScAddress::Contract(ContractId(Hash(id))) = &creds.address else {
+        return Ok(());
+    };
+    let Some(hint) = hints.iter().find(|h| &h.account == id) else {
+        return Ok(());
+    };
     let err = |e: Error| e.to_string();
-    let sym = |s: &str| -> Result<ScVal, String> { Ok(ScVal::Symbol(ScSymbol(s.try_into().map_err(err)?))) };
+    let sym = |s: &str| -> Result<ScVal, String> {
+        Ok(ScVal::Symbol(ScSymbol(s.try_into().map_err(err)?)))
+    };
     let mut signers = vec![];
     for (verifier, key) in &hint.keys {
         let name = ScVal::Vec(Some(ScVec(
-            vec![sym("External")?, ScVal::Address(ScAddress::Contract(ContractId(Hash(*verifier)))), ScVal::Bytes(ScBytes(key.clone().try_into().map_err(err)?))]
-                .try_into()
-                .map_err(err)?,
+            vec![
+                sym("External")?,
+                ScVal::Address(ScAddress::Contract(ContractId(Hash(*verifier)))),
+                ScVal::Bytes(ScBytes(key.clone().try_into().map_err(err)?)),
+            ]
+            .try_into()
+            .map_err(err)?,
         )));
-        signers.push(ScMapEntry { key: name, val: ScVal::Bytes(ScBytes(vec![0u8; 64].try_into().map_err(err)?)) });
+        signers.push(ScMapEntry {
+            key: name,
+            val: ScVal::Bytes(ScBytes(vec![0u8; 64].try_into().map_err(err)?)),
+        });
     }
     let n = hint.used.get();
     hint.used.set(n + 1);
-    let list = hint.rule_ids.get(n).or(hint.rule_ids.last()).cloned().unwrap_or_default();
-    let ids = ScVal::Vec(Some(ScVec(list.iter().map(|i| ScVal::U32(*i)).collect::<Vec<_>>().try_into().map_err(err)?)));
+    let list = hint
+        .rule_ids
+        .get(n)
+        .or(hint.rule_ids.last())
+        .cloned()
+        .unwrap_or_default();
+    let ids = ScVal::Vec(Some(ScVec(
+        list.iter()
+            .map(|i| ScVal::U32(*i))
+            .collect::<Vec<_>>()
+            .try_into()
+            .map_err(err)?,
+    )));
     creds.signature = ScVal::Map(Some(ScMap(
         vec![
-            ScMapEntry { key: sym("context_rule_ids")?, val: ids },
-            ScMapEntry { key: sym("signers")?, val: ScVal::Map(Some(ScMap(signers.try_into().map_err(err)?))) },
+            ScMapEntry {
+                key: sym("context_rule_ids")?,
+                val: ids,
+            },
+            ScMapEntry {
+                key: sym("signers")?,
+                val: ScVal::Map(Some(ScMap(signers.try_into().map_err(err)?))),
+            },
         ]
         .try_into()
         .map_err(err)?,
@@ -512,7 +592,10 @@ fn instance_entry(id: [u8; 32], wasm: Hash) -> LedgerEntry {
             contract: ScAddress::Contract(ContractId(Hash(id))),
             key: ScVal::LedgerKeyContractInstance,
             durability: ContractDataDurability::Persistent,
-            val: ScVal::ContractInstance(ScContractInstance { executable: ContractExecutable::Wasm(wasm), storage: None }),
+            val: ScVal::ContractInstance(ScContractInstance {
+                executable: ContractExecutable::Wasm(wasm),
+                storage: None,
+            }),
         }),
         ext: LedgerEntryExt::V0,
     }

@@ -30,7 +30,10 @@ fn strkey_payload(s: &str) -> [u8; 32] {
 }
 
 fn hex_decode(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 struct Reply<'a>(&'a [u8]);
@@ -147,16 +150,30 @@ fn perch_fixture_verdicts() {
         // Recording: the authorizations the transaction itself needs.
         let out = run_loop(&run_header(&cap, host_protocol(), &env, MODE_RECORD));
         let mut r = Reply(&out);
-        assert_eq!(r.u8(), ST_COMPLETE, "{id}: record {:?}", String::from_utf8_lossy(&out));
+        assert_eq!(
+            r.u8(),
+            ST_COMPLETE,
+            "{id}: record {:?}",
+            String::from_utf8_lossy(&out)
+        );
         assert_eq!(r.u8(), 1, "{id}: the recording run fails");
         r.blob();
         codes(&mut r);
         let recorded: Vec<_> = (0..r.u32()).map(|_| without_nonce(r.blob())).collect();
-        let expected: Vec<_> = s["preview"]["recordedAuth"].as_array().unwrap().iter().map(|v| without_nonce(&B64.decode(v.as_str().unwrap()).unwrap())).collect();
+        let expected: Vec<_> = s["preview"]["recordedAuth"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| without_nonce(&B64.decode(v.as_str().unwrap()).unwrap()))
+            .collect();
         assert_eq!(recorded, expected, "{id}: recorded tree");
         let supplied = s["preview"]["suppliedAuth"].as_array().unwrap().len();
         if id == "unused-entry" {
-            assert_eq!((supplied, recorded.len()), (2, 1), "{id}: the unused entry is not recorded");
+            assert_eq!(
+                (supplied, recorded.len()),
+                (2, 1),
+                "{id}: the unused entry is not recorded"
+            );
         } else {
             assert_eq!(supplied, recorded.len(), "{id}");
         }
@@ -175,7 +192,12 @@ fn perch_fixture_verdicts() {
         put_blob(&mut q, &app_key);
         let out = run_loop(&q);
         let mut r = Reply(&out);
-        assert_eq!(r.u8(), ST_COMPLETE, "{id}: enforce {:?}", String::from_utf8_lossy(&out));
+        assert_eq!(
+            r.u8(),
+            ST_COMPLETE,
+            "{id}: enforce {:?}",
+            String::from_utf8_lossy(&out)
+        );
         let ok = r.u8() == 1;
         let detail = String::from_utf8_lossy(r.blob()).to_string();
         let codes = codes(&mut r);
@@ -193,23 +215,33 @@ fn perch_fixture_verdicts() {
 fn refuses_another_protocol() {
     let cap = capture();
     provide_ledger(&cap);
-    let env = B64.decode(cap["scenarios"][0]["envelope"].as_str().unwrap()).unwrap();
+    let env = B64
+        .decode(cap["scenarios"][0]["envelope"].as_str().unwrap())
+        .unwrap();
     let out = call(&run_header(&cap, host_protocol() + 1, &env, MODE_RECORD));
     let mut r = Reply(&out);
     assert_eq!(r.u8(), ST_ERROR);
     let message = String::from_utf8_lossy(r.blob()).to_string();
-    assert!(message.contains(&format!("implements protocol {}", host_protocol())), "{message}");
+    assert!(
+        message.contains(&format!("implements protocol {}", host_protocol())),
+        "{message}"
+    );
 }
 
 #[test]
 fn reports_unknown_keys() {
     assert_eq!(call(&[OP_RESET]), vec![ST_COMPLETE]);
     let cap = capture();
-    let env = B64.decode(cap["scenarios"][0]["envelope"].as_str().unwrap()).unwrap();
+    let env = B64
+        .decode(cap["scenarios"][0]["envelope"].as_str().unwrap())
+        .unwrap();
     let out = call(&run_header(&cap, host_protocol(), &env, MODE_RECORD));
     let mut r = Reply(&out);
     assert_eq!(r.u8(), ST_NEEDS_STATE);
-    assert!(r.u32() > 0, "an empty store needs at least the network config");
+    assert!(
+        r.u32() > 0,
+        "an empty store needs at least the network config"
+    );
 }
 
 #[test]
@@ -228,7 +260,11 @@ fn strkey(version: u8, payload: &[u8; 32]) -> String {
     for b in &data {
         crc ^= (*b as u16) << 8;
         for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
         }
     }
     data.extend_from_slice(&crc.to_le_bytes());
@@ -292,16 +328,35 @@ fn multi_party_fails_on_the_other_signer_only() {
 
     let out = run_multi_party(&cap, &mp, MODE_RECORD);
     let mut r = Reply(&out);
-    assert_eq!(r.u8(), ST_COMPLETE, "record {:?}", String::from_utf8_lossy(&out));
-    assert_eq!(r.u8(), 1, "the recording run fails: {}", String::from_utf8_lossy(r.blob()));
+    assert_eq!(
+        r.u8(),
+        ST_COMPLETE,
+        "record {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    assert_eq!(
+        r.u8(),
+        1,
+        "the recording run fails: {}",
+        String::from_utf8_lossy(r.blob())
+    );
     r.blob();
     codes(&mut r);
     assert_eq!(r.u32(), 2, "the recording needs both parties");
 
     let out = run_multi_party(&cap, &mp, MODE_ENFORCE);
     let mut r = Reply(&out);
-    assert_eq!(r.u8(), ST_COMPLETE, "enforce {:?}", String::from_utf8_lossy(&out));
-    assert_eq!(r.u8(), 0, "the other party's missing signature fails the enforcing run");
+    assert_eq!(
+        r.u8(),
+        ST_COMPLETE,
+        "enforce {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    assert_eq!(
+        r.u8(),
+        0,
+        "the other party's missing signature fails the enforcing run"
+    );
     r.blob();
     assert!(!codes(&mut r).iter().any(|(c, _)| *c == Some(account)));
 }
@@ -326,10 +381,18 @@ fn write_multi_party_fixture() {
     let sym = |s: &str| ScVal::Symbol(s.try_into().unwrap());
     let vec = |v: Vec<ScVal>| ScVal::Vec(Some(v.try_into().unwrap()));
     let contract = |id: [u8; 32]| ScAddress::Contract(ContractId(Hash(id)));
-    let account_of = |s: &str| ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(strkey_payload(s)))));
+    let account_of = |s: &str| {
+        ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(
+            strkey_payload(s),
+        ))))
+    };
     let code = |w: &[u8]| LedgerEntry {
         last_modified_ledger_seq: 0,
-        data: LedgerEntryData::ContractCode(ContractCodeEntry { ext: ContractCodeEntryExt::V0, hash: Hash(Sha256::digest(w).into()), code: w.to_vec().try_into().unwrap() }),
+        data: LedgerEntryData::ContractCode(ContractCodeEntry {
+            ext: ContractCodeEntryExt::V0,
+            hash: Hash(Sha256::digest(w).into()),
+            code: w.to_vec().try_into().unwrap(),
+        }),
         ext: LedgerEntryExt::V0,
     };
     let instance = |id: [u8; 32], w: &[u8], storage: Option<ScMap>| LedgerEntry {
@@ -339,29 +402,50 @@ fn write_multi_party_fixture() {
             contract: contract(id),
             key: ScVal::LedgerKeyContractInstance,
             durability: ContractDataDurability::Persistent,
-            val: ScVal::ContractInstance(ScContractInstance { executable: ContractExecutable::Wasm(Hash(Sha256::digest(w).into())), storage }),
+            val: ScVal::ContractInstance(ScContractInstance {
+                executable: ContractExecutable::Wasm(Hash(Sha256::digest(w).into())),
+                storage,
+            }),
         }),
         ext: LedgerEntryExt::V0,
     };
 
     let cosigner = "GBVPPZKZBYNEDWZLPUZYZVQNRP3VAMYS4ZPD2AOW54NXAPCF43V4SD25";
-    let (account, payee) = (id("soroban-sim-preview multi-party account"), id("soroban-sim-preview two-party contract"));
+    let (account, payee) = (
+        id("soroban-sim-preview multi-party account"),
+        id("soroban-sim-preview two-party contract"),
+    );
     let (smart, two) = (wasm("smart_account.wasm"), wasm("preview_two_party.wasm"));
     let verifier = strkey_payload(a["verifier"].as_str().unwrap());
     let key = hex_decode(a["appKey"].as_str().unwrap());
     let storage = ScMap(
         vec![
-            ScMapEntry { key: vec(vec![sym("Scheme")]), val: ScVal::U32(0) },
+            ScMapEntry {
+                key: vec(vec![sym("Scheme")]),
+                val: ScVal::U32(0),
+            },
             ScMapEntry {
                 key: vec(vec![sym("Signers")]),
-                val: vec(vec![vec(vec![sym("External"), ScVal::Address(contract(verifier)), ScVal::Bytes(key.try_into().unwrap())])]),
+                val: vec(vec![vec(vec![
+                    sym("External"),
+                    ScVal::Address(contract(verifier)),
+                    ScVal::Bytes(key.try_into().unwrap()),
+                ])]),
             },
-            ScMapEntry { key: vec(vec![sym("ValidUntil")]), val: ScVal::U32(0) },
+            ScMapEntry {
+                key: vec(vec![sym("ValidUntil")]),
+                val: ScVal::U32(0),
+            },
         ]
         .try_into()
         .unwrap(),
     );
-    let ledger = [code(&smart), instance(account, &smart, Some(storage)), code(&two), instance(payee, &two, None)];
+    let ledger = [
+        code(&smart),
+        instance(account, &smart, Some(storage)),
+        code(&two),
+        instance(payee, &two, None),
+    ];
 
     let envelope = |auth: Vec<SorobanAuthorizationEntry>| {
         let args = vec![
@@ -369,7 +453,10 @@ fn write_multi_party_fixture() {
             ScVal::Address(account_of(cosigner)),
             ScVal::Address(contract(strkey_payload(a["nativeSac"].as_str().unwrap()))),
             ScVal::Address(account_of(a["shop"].as_str().unwrap())),
-            ScVal::I128(Int128Parts { hi: 0, lo: 10_000_000 }),
+            ScVal::I128(Int128Parts {
+                hi: 0,
+                lo: 10_000_000,
+            }),
         ];
         let op = Operation {
             source_account: None,
@@ -384,7 +471,9 @@ fn write_multi_party_fixture() {
         };
         TransactionEnvelope::Tx(TransactionV1Envelope {
             tx: Transaction {
-                source_account: MuxedAccount::Ed25519(Uint256(strkey_payload(a["payer"].as_str().unwrap()))),
+                source_account: MuxedAccount::Ed25519(Uint256(strkey_payload(
+                    a["payer"].as_str().unwrap(),
+                ))),
                 fee: 1_000_000,
                 seq_num: SequenceNumber(1),
                 cond: Preconditions::None,

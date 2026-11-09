@@ -11,7 +11,12 @@ pub struct AcceptAll;
 
 #[contractimpl]
 impl AcceptAll {
-    pub fn verify(_env: Env, _signature_payload: Bytes, _key_data: Bytes, _sig_data: Bytes) -> bool {
+    pub fn verify(
+        _env: Env,
+        _signature_payload: Bytes,
+        _key_data: Bytes,
+        _sig_data: Bytes,
+    ) -> bool {
         true
     }
 }
