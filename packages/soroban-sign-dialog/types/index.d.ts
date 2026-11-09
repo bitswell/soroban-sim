@@ -56,7 +56,8 @@ export interface PreviewRequest {
 export interface Verdict {
   address: string;
   kind: string;
-  allowed: boolean;
+  /** null: unknown (the enforcing run failed for a reason outside this account). */
+  allowed: boolean | null;
   rule?: { id: number; name?: string; grant?: number | null };
   code?: number;
   reasonCode?: string;
@@ -92,7 +93,8 @@ export interface PreviewResult {
   stateSource?: string;
   /** Base64 SorobanAuthorizationEntry list the simulation recorded on its own. */
   recordedAuth?: string[];
-  outcome?: { ok: boolean; error: string | null; codes: number[] };
+  /** codes: contract errors, each with the contract that raised it (null for the host). */
+  outcome?: { ok: boolean; error: string | null; codes: { contract: string | null; code: number }[] };
   verdicts?: Verdict[];
   budgets?: Budget[];
   balances?: BalanceChange[];

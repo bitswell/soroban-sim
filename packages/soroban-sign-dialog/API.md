@@ -50,6 +50,12 @@ defines on first use, creates one shared dialog, and opens it.
   A second `request` while one is pending resolves the first as `superseded`.
   Options: `transaction`, `authEntries`, `network`, `signer`, `dapp`, `engine`,
   `rpcUrl`, `theme`, `preview`, `strict`, `labels`, `strings`, `previewProvider`.
+  The per-request options (`transaction` or `authEntries`, `network`, `signer`,
+  `dapp`) describe this request only: any the call leaves out is cleared, so
+  `network` returns to testnet and no signer or dapp carries over from the
+  previous request. The rest are dialog configuration a wallet sets once
+  (`engine`, `rpcUrl`, `theme`, `preview`, `strict`, `labels`, `strings`,
+  `previewProvider`); they persist until a later call sets them again.
 - `runPreview()` runs the preview now.
 
 ### Events
@@ -100,7 +106,7 @@ honour `signal` to stop work when the dialog closes or the request changes.
   ledger: { sequence, protocol },
   stateSource,                            // shown in the footnote
   recordedAuth: [base64 SorobanAuthorizationEntry],  // the independent recording
-  outcome: { ok, error, codes },
+  outcome: { ok, error, codes: [{ contract, code }] },  // contract: who raised it, null for the host
   verdicts: [{ address, kind, allowed, rule: { id, name, grant }, code, reasonCode, params, reason }],
   budgets: [{ address, rule, token: { code, decimals }, limit, periodLedgers, spentInWindow, amount, ledger, nextReleaseLedger }],
   balances: [{ address, asset: { code, decimals }, before, after }],
@@ -114,7 +120,12 @@ Notice codes from the engine: `protocol` (`{ protocol, builds }`), `no-rpc`,
 `no-transaction`, `fee-bump`, `not-invoke` (`{ operation }`), `no-hint`, and
 `error` (`{ error }`) from the dialog when a provider throws. Verdict reason
 codes: `accepted` (`{ rule, grant }`), `refused` and `refused-over-cap`
-(`{ code, cause }`), `failed` (`{ error }`).
+(`{ code, cause }`), and, with `allowed: null` (verdict unknown),
+`unsigned-others` (the request also needs other parties' signatures, which
+are not there yet; balances and events come from the recording) and `failed`
+(`{ error }`, the enforcing run failed outside this account). Only a verdict
+with `allowed: false` raises a `refused` flag: the account's own contract
+raised the error.
 
 ## The engine (`/preview`)
 

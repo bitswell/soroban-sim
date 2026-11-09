@@ -19,7 +19,7 @@
 //
 // Usage: dialog.previewProvider = createPreview({ rpcUrl, hints });
 
-import { decodeEnvelope, decodeLedgerEntry, decodeAuthEntry, compareAuth, nativeAssetContract, fromB64, toB64, fromStrkey, short, NETWORKS } from '../xdr.js';
+import { decodeEnvelope, decodeLedgerEntry, decodeAuthEntry, compareAuth, nativeAssetContract, fromB64, toB64, fromStrkey, strkeyFor, short, NETWORKS } from '../xdr.js';
 import { CONFIG_KEYS, isNonceKey, nonceKey } from './ledger-keys.js';
 import { perchAdapter } from './perch.js';
 
@@ -62,7 +62,7 @@ class R {
   list(f) { const n = this.u32(); return Array.from({ length: n }, () => f()); }
 }
 
-const OP_PROVIDE = 1, OP_RUN = 3;
+const OP_PROVIDE = 1, OP_RESET = 2, OP_RUN = 3;
 const ST_COMPLETE = 0, ST_NEEDS_STATE = 1, ST_ERROR = 2;
 
 // ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ function loadEngine(protocol, opts) {
       return engine;
     });
     p.catch(() => engines.delete(key));
-    engines.set(key, p);
+    engines.set(key, p.then((engine) => ({ ...engine, turn: Promise.resolve() })));
   }
   return engines.get(key);
 }
@@ -268,126 +268,143 @@ export async function preview(req) {
   signal?.throwIfAborted();
   t.engine = performance.now();
 
-  // Hand the reactor everything known that it has not seen yet.
-  const push = async () => {
-    const fresh = [...known.keys()].filter((k) => !pushed.has(k));
-    if (!fresh.length) return;
-    const present = fresh.filter((k) => known.get(k));
-    const absent = fresh.filter((k) => !known.get(k));
-    const w = new W().u8(OP_PROVIDE).u32(present.length);
-    for (const k of present) { const e = known.get(k); w.blob(fromB64(e.entry)).u32(e.liveUntil == null ? 0 : e.liveUntil + 1); }
-    w.u32(absent.length);
-    for (const k of absent) w.blob(fromB64(k));
-    for (const k of fresh) pushed.add(k);
-    const { out } = await engine.call(w.bytes());
-    if (out[0] !== ST_COMPLETE) throw new Error('the engine refused the ledger entries');
-  };
-  const provide = async (keys) => { await fetchKeys(keys); await push(); };
-  const entries = { get: (k) => known.get(k) ?? undefined };
-  await push();
+  // One preview at a time per engine, each on a reactor store holding only
+  // the entries it pushes.
+  const previous = engine.turn;
+  let release;
+  engine.turn = new Promise((r) => { release = r; });
+  try {
+    await previous;
+    signal?.throwIfAborted();
+    const { out } = await engine.call(new W().u8(OP_RESET).bytes());
+    if (out[0] !== ST_COMPLETE) throw new Error('the engine could not reset its ledger');
 
-  // The base reserve has been 0.5 XLM on every network since protocol 10.
-  const baseReserve = (latest.headerXdr && baseReserveFromHeader(latest.headerXdr)) || 5_000_000;
-  const networkId = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(passphrase)));
-  const envelope = fromB64(req.transaction);
-  const header = () => new W().u8(OP_RUN).u32(protocol).u32(ledger.sequence).u64(latest.closeTime + 5).raw(networkId)
-    .u32(baseReserve).blob(envelope);
-  const run = async (build, recording) => {
-    let ms = 0;
-    for (let i = 0; i < 25; i++) {
-      signal?.throwIfAborted();
-      const r = await engine.call(build());
-      ms += r.ms;
-      const reply = new R(r.out);
-      const status = reply.u8();
-      if (status === ST_ERROR) throw new Error(new TextDecoder().decode(reply.blob()));
-      if (status === ST_NEEDS_STATE) {
-        rounds++;
-        const keys = reply.list(() => toB64(reply.blob()));
-        roundKeys.push(keys);
-        // A recording draws fresh nonces; their keys are absent without asking.
-        for (const k of keys) if (recording && isNonceKey(fromB64(k))) known.set(k, null);
-        await provide(keys);
-        continue;
-      }
-      return { ...parseRun(reply), ms };
-    }
-    throw new Error('ledger state did not converge after 25 rounds');
-  };
-  t.prefetch = performance.now();
-
-  // 3. Recording.
-  const record = await run(() => header().u8(0).bytes(), true);
-  t.record = performance.now();
-
-  // 4. Enforcing, for hinted accounts.
-  let enforce = null;
-  const used = adapters.filter((a) => op.auth.some((e) => e.credentials.address?.str === a.account));
-  if (used.length) {
-    for (const a of used) await a.load(provide, entries);
-    const build = () => {
-      const w = header().u8(1);
-      const stubs = [...new Set(used.flatMap((a) => a.verifiers))];
-      w.u32(stubs.length);
-      for (const v of stubs) w.raw(fromStrkey(v));
-      w.u32(used.length);
-      for (const a of used) {
-        const lists = a.ruleIdLists(op);
-        w.raw(fromStrkey(a.account)).u32(lists.length);
-        for (const ids of lists) { w.u32(ids.length); for (const id of ids) w.u32(id); }
-        w.u32(a.keys.length);
-        for (const k of a.keys) w.raw(fromStrkey(k.verifier)).blob(fromHex(k.key));
-      }
-      return w.bytes();
+    // Hand the reactor everything known that it has not seen yet.
+    const push = async () => {
+      const fresh = [...known.keys()].filter((k) => !pushed.has(k));
+      if (!fresh.length) return;
+      const present = fresh.filter((k) => known.get(k));
+      const absent = fresh.filter((k) => !known.get(k));
+      const w = new W().u8(OP_PROVIDE).u32(present.length);
+      for (const k of present) { const e = known.get(k); w.blob(fromB64(e.entry)).u32(e.liveUntil == null ? 0 : e.liveUntil + 1); }
+      w.u32(absent.length);
+      for (const k of absent) w.blob(fromB64(k));
+      for (const k of fresh) pushed.add(k);
+      const { out } = await engine.call(w.bytes());
+      if (out[0] !== ST_COMPLETE) throw new Error('the engine refused the ledger entries');
     };
-    enforce = await run(build);
-  }
-  t.enforce = performance.now();
+    const provide = async (keys) => { await fetchKeys(keys); await push(); };
+    const entries = { get: (k) => known.get(k) ?? undefined };
+    await push();
 
-  // 5. Shape the result. The enforcing run, when there is one, decides: if
-  // the account refuses, the transaction fails and nothing moves.
-  const effects = enforce ?? record;
-  const nativeSac = await nativeAssetContract(passphrase);
-  const tokens = { [nativeSac]: { code: 'XLM', decimals: 7 }, ...(req.tokens ?? {}) };
-  // Budgets and verdicts count only the entries the transaction consumes:
-  // those the independent recording also produced.
-  const cmp = compareAuth(op.auth, record.auth.map(decodeAuthEntry));
-  const consumed = { ...op, auth: op.auth.filter((_, i) => cmp.entries[i].status === 'match') };
-  const verdicts = [];
-  const budgets = [];
-  for (const a of used) {
-    verdicts.push(a.verdict(consumed, enforce, ledger.sequence));
-    budgets.push(...a.budgets(consumed, ledger.sequence, tokens));
+    // The base reserve has been 0.5 XLM on every network since protocol 10.
+    const baseReserve = (latest.headerXdr && baseReserveFromHeader(latest.headerXdr)) || 5_000_000;
+    const networkId = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(passphrase)));
+    const envelope = fromB64(req.transaction);
+    const header = () => new W().u8(OP_RUN).u32(protocol).u32(ledger.sequence).u64(latest.closeTime + 5).raw(networkId)
+      .u32(baseReserve).blob(envelope);
+    const run = async (build, recording) => {
+      let ms = 0;
+      for (let i = 0; i < 25; i++) {
+        signal?.throwIfAborted();
+        const r = await engine.call(build());
+        ms += r.ms;
+        const reply = new R(r.out);
+        const status = reply.u8();
+        if (status === ST_ERROR) throw new Error(new TextDecoder().decode(reply.blob()));
+        if (status === ST_NEEDS_STATE) {
+          rounds++;
+          const keys = reply.list(() => toB64(reply.blob()));
+          roundKeys.push(keys);
+          // A recording draws fresh nonces; their keys are absent without asking.
+          for (const k of keys) if (recording && isNonceKey(fromB64(k))) known.set(k, null);
+          await provide(keys);
+          continue;
+        }
+        return { ...parseRun(reply), ms };
+      }
+      throw new Error('ledger state did not converge after 25 rounds');
+    };
+    t.prefetch = performance.now();
+
+    // 3. Recording.
+    const record = await run(() => header().u8(0).bytes(), true);
+    t.record = performance.now();
+
+    // 4. Enforcing, for hinted accounts.
+    let enforce = null;
+    const used = adapters.filter((a) => op.auth.some((e) => e.credentials.address?.str === a.account));
+    if (used.length) {
+      for (const a of used) await a.load(provide, entries);
+      const build = () => {
+        const w = header().u8(1);
+        const stubs = [...new Set(used.flatMap((a) => a.verifiers))];
+        w.u32(stubs.length);
+        for (const v of stubs) w.raw(fromStrkey(v));
+        w.u32(used.length);
+        for (const a of used) {
+          const lists = a.ruleIdLists(op);
+          w.raw(fromStrkey(a.account)).u32(lists.length);
+          for (const ids of lists) { w.u32(ids.length); for (const id of ids) w.u32(id); }
+          w.u32(a.keys.length);
+          for (const k of a.keys) w.raw(fromStrkey(k.verifier)).blob(fromHex(k.key));
+        }
+        return w.bytes();
+      };
+      enforce = await run(build);
+    }
+    t.enforce = performance.now();
+
+    // 5. Shape the result.
+    const nativeSac = await nativeAssetContract(passphrase);
+    const tokens = { [nativeSac]: { code: 'XLM', decimals: 7 }, ...(req.tokens ?? {}) };
+    // Budgets and verdicts count only the entries the transaction consumes:
+    // those the independent recording also produced.
+    const cmp = compareAuth(op.auth, record.auth.map(decodeAuthEntry));
+    const consumed = { ...op, auth: op.auth.filter((_, i) => cmp.entries[i].status === 'match') };
+    const verdicts = [];
+    const budgets = [];
+    for (const a of used) {
+      verdicts.push(a.verdict(consumed, enforce, record, ledger.sequence));
+      budgets.push(...a.budgets(consumed, ledger.sequence, tokens));
+    }
+    // The enforcing run decides when an account refuses (nothing moves) or
+    // when it succeeds. When it fails only on other parties' signatures, the
+    // recording shows the effects.
+    const awaitingOthers = verdicts.some((v) => v.reasonCode === 'unsigned-others') && !verdicts.some((v) => v.allowed === false);
+    const effects = enforce && !awaitingOthers ? enforce : record;
+    const unhinted = !used.length && op.auth.some((e) => e.credentials.address?.kind === 'contract');
+    t.end = performance.now();
+    return {
+      ...base,
+      status: 'ok',
+      code: unhinted ? 'no-hint' : undefined,
+      notice: unhinted ? 'No signer hint was given, so the account’s own policy was not evaluated; effects assume every authorization passes.' : undefined,
+      ledger,
+      stateSource: state.describe?.() ?? 'RPC',
+      recordedAuth: record.auth,
+      outcome: { ok: effects.ok, error: effects.ok ? null : effects.error, codes: effects.codes },
+      verdicts,
+      budgets,
+      balances: effects.ok ? balanceChanges(effects.diffs, tokens) : [],
+      events: effects.ok ? effects.events : [],
+      resources: { instructions: effects.instructions },
+      timings: {
+        ledgerMs: t.ledger - t.start, engineLoadMs: t.engine - t.ledger, prefetchMs: t.prefetch - t.engine,
+        recordMs: t.record - t.prefetch, enforceMs: t.enforce - t.record, totalMs: t.end - t.start,
+        reactorRecordMs: record.ms, reactorEnforceMs: enforce?.ms ?? 0, needsStateRounds: rounds, keysFetched: fetched, stateCalls: rpcCalls, roundKeys,
+        engine: engine.init,
+      },
+    };
+  } finally {
+    release();
   }
-  const unhinted = !used.length && op.auth.some((e) => e.credentials.address?.kind === 'contract');
-  t.end = performance.now();
-  return {
-    ...base,
-    status: 'ok',
-    code: unhinted ? 'no-hint' : undefined,
-    notice: unhinted ? 'No signer hint was given, so the account’s own policy was not evaluated; effects assume every authorization passes.' : undefined,
-    ledger,
-    stateSource: state.describe?.() ?? 'RPC',
-    recordedAuth: record.auth,
-    outcome: { ok: effects.ok, error: effects.ok ? null : effects.error, codes: effects.codes },
-    verdicts,
-    budgets,
-    balances: effects.ok ? balanceChanges(effects.diffs, tokens) : [],
-    events: effects.ok ? effects.events : [],
-    resources: { instructions: effects.instructions },
-    timings: {
-      ledgerMs: t.ledger - t.start, engineLoadMs: t.engine - t.ledger, prefetchMs: t.prefetch - t.engine,
-      recordMs: t.record - t.prefetch, enforceMs: t.enforce - t.record, totalMs: t.end - t.start,
-      reactorRecordMs: record.ms, reactorEnforceMs: enforce?.ms ?? 0, needsStateRounds: rounds, keysFetched: fetched, stateCalls: rpcCalls, roundKeys,
-      engine: engine.init,
-    },
-  };
 }
 
 function parseRun(r) {
   const ok = r.u8() === 1;
   const value = r.blob();
-  const codes = r.list(() => r.u32());
+  const codes = r.list(() => { const id = r.blob(); return { contract: id.length ? strkeyFor('contract', id) : null, code: r.u32() }; });
   const auth = r.list(() => toB64(r.blob()));
   const events = r.list(() => toB64(r.blob()));
   const diffs = r.list(() => { const b = r.blob(), a = r.blob(); return { before: b.length ? toB64(b) : null, after: a.length ? toB64(a) : null }; });

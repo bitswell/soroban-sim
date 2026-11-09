@@ -39,7 +39,8 @@ values inside are raw XDR blobs (`u32` length, then bytes).
 | `2` reset | | `0` |
 | `3` run | protocol, sequence, timestamp (`u64`), network id (32 bytes), base reserve, `TransactionEnvelope`, mode (`0` record, `1` enforce), and for enforce: stub verifiers, then per hinted account its rule-id lists and `(verifier, key)` signers | see below |
 
-A run replies `0` (complete) with the invoke result, contract error codes,
+A run replies `0` (complete) with the invoke result, contract error codes
+(each with the id of the contract that raised it, or empty for the host),
 recorded authorization entries, contract events, ledger diffs, instructions,
 memory, `SorobanTransactionData` and a diagnostics tail; `1` (needs state)
 with the ledger keys to fetch; or `2` (error) with a message. Reads of keys
@@ -67,7 +68,11 @@ grant for `transfer` on the native asset contract capped at 10 XLM per 100
 ledgers, 3 XLM already spent. With the stub verifier it must reach the
 verdicts the real-key capture reached (5 XLM accepted, 8 XLM refused with
 contract error 5, 2 XLM accepted), and the recording must leave out the
-unused 4 XLM entry. Run it under both hosts:
+unused 4 XLM entry. `fixtures/multi-party.json` adds a request two parties
+authorize (`fixtures/contracts/preview-two-party`): the hinted account's
+policy accepts, the other party has not signed, so the enforcing run fails
+with no error from the account while the recording succeeds. Its generator is
+the ignored `write_multi_party_fixture` test. Run them under both hosts:
 
 ```sh
 cargo test -p soroban-sim-preview

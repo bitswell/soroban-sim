@@ -189,12 +189,21 @@ export class SorobanSignDialog extends Base {
     if (opts.labels) this.labels = opts.labels;
     if (opts.strings) this.strings = opts.strings;
     if (opts.previewProvider) this.previewProvider = opts.previewProvider;
-    for (const [k, attr] of [['network', 'network'], ['networkPassphrase', 'network'], ['signer', 'signer'], ['dapp', 'dapp'], ['engine', 'engine'], ['rpcUrl', 'rpc-url'], ['theme', 'theme'], ['preview', 'preview']]) {
+    // Per-request fields: what this request leaves out is cleared, so nothing
+    // carries over from the previous one.
+    const perRequest = {
+      network: opts.network ?? opts.networkPassphrase,
+      signer: opts.signer,
+      dapp: opts.dapp,
+      transaction: opts.authEntries?.length ? null : opts.transaction,
+      'auth-entries': opts.authEntries?.join(' '),
+    };
+    for (const [attr, v] of Object.entries(perRequest)) v ? this.setAttribute(attr, v) : this.removeAttribute(attr);
+    // Dialog-level configuration persists until a request sets it again.
+    for (const [k, attr] of [['engine', 'engine'], ['rpcUrl', 'rpc-url'], ['theme', 'theme'], ['preview', 'preview']]) {
       if (opts[k]) this.setAttribute(attr, opts[k]);
     }
     if (opts.strict != null) this.strict = opts.strict;
-    if (opts.transaction) { this.removeAttribute('auth-entries'); this.transaction = opts.transaction; }
-    if (opts.authEntries) { this.removeAttribute('transaction'); this.authEntries = opts.authEntries; }
     this.#reset();
     this.#pending?.resolve({ approved: false, reason: 'superseded' });
     return new Promise((resolve) => {
@@ -298,8 +307,8 @@ export class SorobanSignDialog extends Base {
       for (const e of this.#comparison.entries) if (e.status !== 'match') flags.push({ kind: e.status, entry: e.index });
       for (const i of this.#comparison.missing) flags.push({ kind: 'missing', recorded: i });
     }
-    for (const v of p?.verdicts ?? []) if (!v.allowed) flags.push({ kind: 'refused', address: v.address, code: v.code });
-    if (p?.outcome && !p.outcome.ok && !(p.verdicts ?? []).some((v) => !v.allowed)) flags.push({ kind: 'fails', error: p.outcome.error });
+    for (const v of p?.verdicts ?? []) if (v.allowed === false) flags.push({ kind: 'refused', address: v.address, code: v.code });
+    if (p?.outcome && !p.outcome.ok && !(p.verdicts ?? []).some((v) => v.allowed === false)) flags.push({ kind: 'fails', error: p.outcome.error });
     return flags;
   }
 
@@ -478,8 +487,9 @@ export class SorobanSignDialog extends Base {
     for (const v of p.verdicts ?? []) {
       const params = { account: this.#addr(v.address), rule: v.rule ? esc(v.rule.name ?? v.rule.id) : null };
       const reason = v.reasonCode || v.reason ? this.#coded('reasons', v.reasonCode, v.params, v.reason) : '';
-      parts.push(`<div class="card verdict" part="verdict" data-allowed="${!!v.allowed}"><span class="icon" aria-hidden="true">${v.allowed ? '✓' : '✕'}</span>
-        <div>${this.#t(v.allowed ? 'wouldAccept' : 'wouldRefuse', params)}
+      const known = typeof v.allowed === 'boolean';
+      parts.push(`<div class="card verdict" part="verdict" data-allowed="${known ? v.allowed : 'null'}"><span class="icon" aria-hidden="true">${!known ? '?' : v.allowed ? '✓' : '✕'}</span>
+        <div>${this.#t(!known ? 'verdictUnknown' : v.allowed ? 'wouldAccept' : 'wouldRefuse', params)}
         ${reason ? `<div class="small">${reason}</div>` : v.code != null ? `<div class="small muted">${this.#t('contractError', { code: esc(v.code) })}</div>` : ''}</div></div>`);
     }
     for (const b of p.budgets ?? []) parts.push(this.#budget(b));
@@ -499,7 +509,8 @@ export class SorobanSignDialog extends Base {
       parts.push(`<h3>${this.#t('events')}</h3><ul class="events" part="events">${items}</ul>`);
     }
     if (p.outcome && !p.outcome.ok && !(p.verdicts ?? []).length) {
-      parts.push(`<div class="notice bad">${this.#t('wouldFail', { error: esc(p.outcome.error ?? 'unknown error'), codes: p.outcome.codes?.length ? esc(p.outcome.codes.join(', ')) : null })}</div>`);
+      const codes = (p.outcome.codes ?? []).map((c) => `${esc(c.code)}${c.contract ? ` (${this.#addr(c.contract)})` : ''}`).join(', ');
+      parts.push(`<div class="notice bad">${this.#t('wouldFail', { error: esc(p.outcome.error ?? 'unknown error'), codes: codes || null })}</div>`);
     }
     parts.push(`<p class="small muted">${this.#t('footnote', { ledger: p.ledger ? esc(p.ledger.sequence) : null, protocol: esc(p.ledger?.protocol ?? p.engine?.protocol ?? '?'), source: esc(p.stateSource ?? 'RPC') })}</p>`);
     return section(parts.join(''), ' aria-live="polite"');

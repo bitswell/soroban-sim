@@ -349,7 +349,10 @@ fn run(r: &mut In<'_>, out: &mut Out) -> Result<(), String> {
             out.blob(format!("{:?}", e.error).as_bytes());
         }
     }
-    out.list(&contract_errors(&result.diagnostic_events), |o, c| o.u32(*c));
+    out.list(&contract_errors(&result.diagnostic_events), |o, (contract, code)| {
+        o.blob(contract.as_ref().map_or(&[][..], |c| &c.0 .0[..]));
+        o.u32(*code);
+    });
     out.list(&result.auth, |o, a| o.xdr(a));
     out.list(&result.contract_events, |o, ev| o.xdr(ev));
     out.list(&result.modified_entries, |o, d| {
@@ -446,15 +449,16 @@ fn fill_auth_payload(entry: &mut SorobanAuthorizationEntry, hints: &[Hint], sequ
     Ok(())
 }
 
-/// Contract error codes in a list of diagnostic events.
-fn contract_errors(events: &[DiagnosticEvent]) -> Vec<u32> {
+/// Contract error codes in a list of diagnostic events, each with the
+/// contract whose frame raised it (none for the host's own frames).
+fn contract_errors(events: &[DiagnosticEvent]) -> Vec<(Option<ContractId>, u32)> {
     let mut codes = vec![];
-    let mut visit = |v: &ScVal| {
-        if let ScVal::Error(ScError::Contract(c)) = v {
-            codes.push(*c);
-        }
-    };
     for e in events {
+        let mut visit = |v: &ScVal| {
+            if let ScVal::Error(ScError::Contract(c)) = v {
+                codes.push((e.event.contract_id.clone(), *c));
+            }
+        };
         let ContractEventBody::V0(body) = &e.event.body;
         body.topics.iter().for_each(&mut visit);
         visit(&body.data);
@@ -467,14 +471,8 @@ fn contract_errors(events: &[DiagnosticEvent]) -> Vec<u32> {
     codes
 }
 
-/// The contract error codes and the last two diagnostics, for a failed run.
+/// The last two diagnostics, for a failed run.
 fn diagnostics_tail(events: &[DiagnosticEvent]) -> String {
-    let codes = contract_errors(events);
-    let codes = if codes.is_empty() {
-        String::new()
-    } else {
-        format!(" [contract errors: {}]", codes.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))
-    };
     let last: Vec<String> = events
         .iter()
         .rev()
@@ -488,9 +486,9 @@ fn diagnostics_tail(events: &[DiagnosticEvent]) -> String {
         })
         .collect();
     if last.is_empty() {
-        codes
+        String::new()
     } else {
-        format!(" [diagnostics: {}]{codes}", last.join(" | "))
+        format!(" [diagnostics: {}]", last.join(" | "))
     }
 }
 

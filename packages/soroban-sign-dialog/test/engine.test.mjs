@@ -1,12 +1,14 @@
 // The preview engine end to end: the real reactor builds (dist/preview, from
 // `pnpm build`) against the captured Perch ledger, for the within-cap,
-// over-cap and unused-entry scenarios, plus the protocol gate.
+// over-cap and unused-entry scenarios, a two-party request, and the protocol
+// gate.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { preview, fixtureProvider, BUILDS } from '../src/preview/soroban-sim-preview.js';
+import { perchAdapter } from '../src/preview/perch.js';
 import { compareAuth, decodeAuthEntry, decodeEnvelope } from '../src/xdr.js';
-import { capture, scenario } from './fixture.mjs';
+import { capture, multiParty, scenario } from './fixture.mjs';
 
 const A = capture.addresses;
 const wasmPath = (p) => new URL(`../dist/preview/${BUILDS[p].wasm}`, import.meta.url);
@@ -14,8 +16,8 @@ for (const p of Object.keys(BUILDS)) {
   if (!existsSync(wasmPath(p))) throw new Error(`missing ${wasmPath(p).pathname}: run \`pnpm build\` first`);
 }
 
-const ledger = (protocolVersion) => fixtureProvider({
-  ledger: capture.ledger,
+const ledger = (protocolVersion, extra = []) => fixtureProvider({
+  ledger: [...capture.ledger, ...extra],
   latest: { sequence: capture.network.sequence - 1, protocolVersion, closeTime: capture.network.timestamp - 5 },
 });
 const hints = { [A.account]: { verifier: A.verifier, key: A.appKey, grantId: 1, ruleId: A.spendRuleId } };
@@ -62,6 +64,7 @@ for (const protocol of [29, 30]) {
     assert.equal(r.verdicts[0].allowed, false);
     assert.equal(r.verdicts[0].code, 5);
     assert.equal(r.verdicts[0].reasonCode, 'refused-over-cap');
+    assert.ok(r.outcome.codes.some((c) => c.contract === A.account && c.code === 5), 'the account raised the error');
     assert.deepEqual(r.budgets.map((b) => [b.spentInWindow, b.amount]), [[xlm(3), xlm(8)]]);
     assert.deepEqual(r.balances, [], 'a refused transaction moves nothing');
   });
@@ -104,4 +107,60 @@ test('without a hint, the account is not evaluated and says so', async () => {
 test('bare auth entries and missing state sources fall back', async () => {
   assert.equal((await preview({ networkPassphrase: capture.network.passphrase })).code, 'no-transaction');
   assert.equal((await preview({ transaction: scenario('within-cap').envelope, networkPassphrase: 'Some Private Network' })).code, 'no-rpc');
+});
+
+test('each preview sees only its own state, one at a time per engine', async () => {
+  // One wasm source, so every preview here shares one cached engine.
+  const wasm = (p) => readFileSync(wasmPath(p));
+  const first = await run('within-cap', 29, { wasm });
+  const again = await run('within-cap', 29, { wasm });
+  assert.ok(first.timings.roundKeys.length > 0, 'the recording asks for its fresh nonce keys');
+  assert.deepEqual(again.timings.roundKeys, first.timings.roundKeys, 'the second preview starts from an empty store');
+
+  // Concurrent previews on that engine keep their own verdicts and effects.
+  const slow = fixtureProvider({ ledger: capture.ledger, latency: 5, latest: { sequence: capture.network.sequence - 1, protocolVersion: 29, closeTime: capture.network.timestamp - 5 } });
+  const [over, within] = await Promise.all([run('over-cap', 29, { wasm, stateProvider: slow }), run('within-cap', 29, { wasm, stateProvider: slow })]);
+  assert.equal(over.verdicts[0].reasonCode, 'refused-over-cap');
+  assert.deepEqual(over.balances, []);
+  assert.equal(within.verdicts[0].allowed, true);
+  assert.equal(within.balances.length, 2);
+});
+
+for (const protocol of [29, 30]) {
+  test(`p${protocol}: another party has not signed, so the verdict is unknown and the recording shows the effects`, async () => {
+    const M = multiParty.addresses;
+    const r = await preview({
+      transaction: multiParty.envelope,
+      networkPassphrase: capture.network.passphrase,
+      stateProvider: ledger(protocol, multiParty.ledger),
+      hints: { [M.account]: { verifier: M.verifier, key: M.key } },
+      inline: true,
+      wasm: (p) => readFileSync(wasmPath(p)),
+    });
+    assert.equal(r.status, 'ok');
+    assert.equal(r.recordedAuth.length, 2);
+    assert.equal(r.verdicts.length, 1);
+    assert.equal(r.verdicts[0].allowed, null);
+    assert.equal(r.verdicts[0].reasonCode, 'unsigned-others');
+    assert.ok(r.outcome.ok, 'the outcome is the recording’s');
+    const change = Object.fromEntries(r.balances.map((b) => [b.address, BigInt(b.after) - BigInt(b.before)]));
+    assert.equal(change[M.cosigner], -10_000_000n);
+    assert.equal(change[M.shop], 10_000_000n);
+    assert.equal(r.events.length, 1);
+  });
+}
+
+test('a contract error is the account’s refusal only when the account raised it', () => {
+  const op = decodeEnvelope(scenario('within-cap').envelope).tx.operations[0];
+  const perch = perchAdapter(A.account, hints[A.account]);
+  const failed = (contract, code) => ({ ok: false, error: 'Error(Auth, InvalidAction)', codes: [{ contract, code }] });
+  // Another contract's error 3 is not Perch's "stale grant".
+  const elsewhere = perch.verdict(op, failed(A.nativeSac, 3), { ok: false }, capture.network.sequence);
+  assert.equal(elsewhere.allowed, null);
+  assert.equal(elsewhere.reasonCode, 'failed');
+  const own = perch.verdict(op, failed(A.account, 3), { ok: false }, capture.network.sequence);
+  assert.equal(own.allowed, false);
+  assert.equal(own.code, 3);
+  assert.equal(own.reasonCode, 'refused');
+  assert.equal(own.params.cause, 'a stale grant');
 });

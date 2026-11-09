@@ -305,7 +305,10 @@ engine:
 The account's own code then checks that the key belongs to the selected rule,
 calls the stub, and applies its rules and spending window as it would on
 chain. The dialog reports "would be accepted" or "would be refused", meaning:
-*assuming a valid signature from this key*. Nothing is signed, nothing is
+*assuming a valid signature from this key*. A refusal counts only when the
+account's own contract raised the error. When the request also needs other
+parties who have not signed yet, the verdict is "unknown" and the balances
+and events come from the recording. Nothing is signed, nothing is
 written anywhere but the reactor's memory, and the stub never leaves it.
 
 This works for any account that checks an External signer through a

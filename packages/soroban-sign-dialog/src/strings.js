@@ -82,6 +82,7 @@ export const STRINGS = {
   previewFailed: (p) => `Preview failed: ${p.error}`,
   wouldAccept: (p) => `<b>Would be accepted</b> by ${p.account}${p.rule ? ` under rule <code>${p.rule}</code>` : ''}.`,
   wouldRefuse: (p) => `<b>Would be refused</b> by ${p.account}${p.rule ? ` under rule <code>${p.rule}</code>` : ''}.`,
+  verdictUnknown: (p) => `<b>Verdict unknown</b> for ${p.account}.`,
   contractError: (p) => `Contract error ${p.code}`,
   spendingCap: 'Spending cap',
   capRule: (p) => ` · rule <code>${p.rule}</code>`,
@@ -116,6 +117,7 @@ export const STRINGS = {
     refused: (p) => `The account refuses it${p.cause ? ` because of ${p.cause}` : ''} (contract error ${p.code}).`,
     'refused-over-cap': (p) => `The account refuses it${p.cause ? ` because of ${p.cause}` : ''} (contract error ${p.code}). The request is more than the cap has left in this window.`,
     failed: (p) => `The enforcing simulation failed: ${p.error}.`,
+    'unsigned-others': 'Other parties have not signed yet, so this account’s verdict is unknown.',
   },
 };
 

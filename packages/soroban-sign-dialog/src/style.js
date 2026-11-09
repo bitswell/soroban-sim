@@ -117,6 +117,7 @@ code, .mono { font-family: var(--ssd-mono); font-size: 0.82em; }
 .verdict .icon { font-weight: 700; font-size: 1.1rem; line-height: 1.2; }
 .verdict[data-allowed="true"] .icon { color: var(--ssd-ok); }
 .verdict[data-allowed="false"] .icon { color: var(--ssd-danger); }
+.verdict[data-allowed="null"] .icon { color: var(--ssd-muted); }
 .meter { height: 0.6rem; border-radius: var(--ssd-radius-pill); background: var(--ssd-border); overflow: hidden; display: flex; margin: var(--ssd-space-2) 0 var(--ssd-space-1); }
 .meter span { display: block; height: 100%; width: 0; transition: width var(--ssd-duration) var(--ssd-easing); }
 .meter .spent { background: var(--ssd-muted); }

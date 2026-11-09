@@ -108,8 +108,12 @@ export function perchAdapter(account, hint) {
       return this.entryContexts(op).map((fns) => fns.map((fn, i) => this.ruleFor(fn, i)?.id ?? 0));
     },
 
-    /** op: the transaction with only the entries it consumes. */
-    verdict(op, enforce, sequence) {
+    /**
+     * op: the transaction with only the entries it consumes. A refusal is the
+     * account's only when its own contract raised the error; otherwise the
+     * verdict is unknown (`allowed: null`).
+     */
+    verdict(op, enforce, record, sequence) {
       const fns = this.entryContexts(op).flat();
       const rule = fns.length ? this.ruleFor(fns[0]) : null;
       const r = rule?.id != null ? { id: rule.id, name: rule.name, grant: rule.grant } : undefined;
@@ -119,14 +123,17 @@ export function perchAdapter(account, hint) {
         const under = params.rule ? ` under ${params.grant != null ? `grant ${params.grant}, ` : ''}rule ‘${params.rule}’` : '';
         return { ...v, allowed: true, reasonCode: 'accepted', params, reason: `Accepted${under}, assuming a valid signature from this key.` };
       }
-      const code = enforce?.codes?.[0];
-      if (!PERCH_ERRORS[code]) {
+      const code = enforce?.codes?.find((c) => c.contract === account)?.code;
+      if (code == null) {
+        if (record?.ok && op.auth.some((e) => e.credentials.address && e.credentials.address.str !== account)) {
+          return { ...v, allowed: null, reasonCode: 'unsigned-others', params: {}, reason: 'Other parties have not signed yet, so this account’s verdict is unknown.' };
+        }
         const error = enforce?.error ?? 'unknown error';
-        return { ...v, allowed: false, code, reasonCode: 'failed', params: { error }, reason: `The enforcing simulation failed: ${error}.` };
+        return { ...v, allowed: null, reasonCode: 'failed', params: { error }, reason: `The enforcing simulation failed: ${error}.` };
       }
       const over = this.budgets(op, sequence, {}).some((b) => BigInt(b.amount) > BigInt(b.limit) - BigInt(b.spentInWindow));
-      const params = { code, cause: PERCH_ERRORS[code] };
-      const why = `The account refuses it because of ${params.cause} (contract error ${code}).`;
+      const params = { code, cause: PERCH_ERRORS[code] ?? null };
+      const why = `The account refuses it${params.cause ? ` because of ${params.cause}` : ''} (contract error ${code}).`;
       return { ...v, allowed: false, code, reasonCode: over ? 'refused-over-cap' : 'refused', params,
         reason: over ? `${why} The request is more than the cap has left in this window.` : why };
     },
