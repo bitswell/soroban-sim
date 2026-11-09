@@ -183,6 +183,9 @@ export class SorobanSignDialog extends Base {
   /** `preview` is `auto` (the default), `manual` or `off`. */
   get #previewMode() { return this.getAttribute('preview') ?? 'auto'; }
 
+  /** The preview settled without simulating: an error, a fallback or any status other than ok. */
+  get #unsimulated() { return !['idle', 'loading', 'done'].includes(this.#previewState); }
+
   get #canPreview() { return !!(this.#provider || this.hasAttribute('engine')) && this.#previewMode !== 'off'; }
 
   #autoPreview() {
@@ -315,7 +318,7 @@ export class SorobanSignDialog extends Base {
   #flags() {
     const flags = [];
     const p = this.#preview;
-    if (this.#previewState === 'error' || this.#previewState === 'fallback') flags.push({ kind: 'not-simulated', code: p?.code ?? null });
+    if (this.#unsimulated) flags.push({ kind: 'not-simulated', code: p?.code ?? null });
     if (this.#comparison) {
       for (const e of this.#comparison.entries) if (e.status !== 'match') flags.push({ kind: e.status, entry: e.index });
       for (const i of this.#comparison.missing) flags.push({ kind: 'missing', recorded: i });
@@ -529,7 +532,7 @@ export class SorobanSignDialog extends Base {
     const s = this.#previewState, p = this.#preview;
     if (s === 'loading') return { state: 'checking' };
     if (s === 'idle') return this.#canPreview ? { state: 'idle' } : { state: 'unknown', reason: this.#t('notSimulated') };
-    if (s !== 'done') {
+    if (this.#unsimulated) {
       const reason = p?.code === 'error' ? this.#t('previewFailed', { error: esc(p.params?.error ?? '') }) : this.#coded('notices', p?.code, p?.params, p?.notice ?? this.#t('previewUnavailable'));
       return { state: 'unknown', reason: `${reason} ${this.#t('treeStillExact')}` };
     }

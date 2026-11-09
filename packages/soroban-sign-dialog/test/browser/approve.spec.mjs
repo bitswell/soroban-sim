@@ -20,6 +20,7 @@ const open = (page, { provider, strict = false, strings, clicks = 0 }) => page.e
     pending: () => new Promise(() => {}),
     error: async () => { throw new Error('muxed source'); },
     'fee-bump': async () => ({ status: 'fallback', code: 'fee-bump', params: {} }),
+    unsupported: async () => ({ status: 'unsupported' }),
     protocol: async () => ({ status: 'fallback', code: 'protocol', params: { protocol: 31, builds: [29, 30] } }),
   };
   const previewProvider = provider ? providers[provider] : undefined;
@@ -70,6 +71,13 @@ test('under strict, an error or fallback keeps Approve disabled', async ({ page 
     const s = await open(page, { provider, strict: true });
     expect(s.disabled, provider).toBe(true);
   }
+});
+
+test('a status outside the documented set fails closed', async ({ page }) => {
+  const s = await open(page, { provider: 'unsupported', clicks: 1 });
+  expect(s).toMatchObject({ status: 'unknown', disabled: false, label: 'Approve anyway', labels: ['Confirm: approve anyway'], flags: null });
+  expect(s.warnings).toEqual(['This request could not be simulated. Approve anyway?']);
+  expect((await open(page, { provider: 'unsupported', strict: true })).disabled).toBe(true);
 });
 
 test('without a preview provider, Approve is unchanged', async ({ page }) => {

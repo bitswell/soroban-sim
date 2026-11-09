@@ -81,8 +81,8 @@ and a passkey prompt opened from it keeps its user activation. Calling
 Flags: `{ kind: 'extra', entry }` (the transaction does not use this entry),
 `{ kind: 'differs', entry }`, `{ kind: 'missing', recorded }`,
 `{ kind: 'refused', address, code }`, `{ kind: 'fails', error }`,
-`{ kind: 'not-simulated', code }` (the preview ended in an error or a
-tree-only fallback; `code` is the result's). While any is raised, Approve
+`{ kind: 'not-simulated', code }` (the preview ended in an error, a
+tree-only fallback or any status other than `ok`; `code` is the result's). While any is raised, Approve
 reads "Approve anyway" and needs a second click; with `strict` it is
 disabled. While a preview is running, Approve is disabled.
 
