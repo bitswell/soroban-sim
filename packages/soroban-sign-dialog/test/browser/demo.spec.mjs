@@ -99,7 +99,13 @@ test('a protocol with no build falls back to the tree', async ({ page }) => {
   await expect(status(page)).toContainText('The network is on protocol 31');
   await expect(status(page)).toContainText('still exact');
   await expect(page.locator('soroban-sign-dialog [part="what"] li')).toHaveText(['Send 5 XLM to Corner Café GCUV…5HPY']);
-  await expect(approve(page)).toHaveText('Approve');
+  // Not simulated: Approve stays available behind a second confirmation.
+  await expect(page.locator('soroban-sign-dialog [part="warning"]')).toHaveText('This request could not be simulated. Approve anyway?');
+  await expect(approve(page)).toHaveText('Approve anyway');
+  await approve(page).click();
+  await expect(approve(page)).toHaveText('Confirm: approve anyway');
+  await approve(page).click();
+  await expect(page.locator('#log .ev').first()).toContainText('Signed despite: not-simulated');
 });
 
 test('Escape rejects as dismissed', async ({ page }) => {
