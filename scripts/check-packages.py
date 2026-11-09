@@ -60,6 +60,9 @@ def main():
             workspace += f'{package} = {{ path = "{directory}" }}\n'
         (isolated / "Cargo.toml").write_text(workspace)
         shutil.copyfile(ROOT / "Cargo.lock", isolated / "Cargo.lock")
+        # Drop lock entries only unpublished members use (the reactor's host 30)
+        # without re-resolving anything; the steps below stay --locked.
+        run("cargo", "update", "--workspace", "--offline", cwd=isolated)
         # CARGO_MANIFEST_DIR is embedded in test binaries. A shared target cache
         # can reuse a binary pointing at an earlier, deleted extraction folder.
         env = dict(os.environ, CARGO_TARGET_DIR=str(isolated / "target"))
