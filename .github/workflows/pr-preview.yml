@@ -27,6 +27,12 @@ concurrency:
 
 jobs:
   preview:
+    # Fork PRs get a read-only GITHUB_TOKEN whatever `permissions:` says, so
+    # the gh-pages push and the PR comment would fail with a 403. Skip the
+    # whole job for them (a fork PR never deploys, so its close has nothing
+    # to tear down). pull_request_target is deliberately not used: it would
+    # build untrusted fork code with a write token.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       # Unconditional: the teardown on `closed` also needs a checked-out repo
