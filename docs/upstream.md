@@ -11,6 +11,11 @@ The live Testnet workbench pins:
 - `stellar-xdr = 28.0.0` through upstream crates
 - `soroban-wasmi = 29.0.0`
 
+The CLI also links the protocol-30 host through the `-p30` crates:
+`soroban-env-host`, `soroban-simulation` and `stellar-xdr` 30.0.0. Those crates
+apply transactions with the recording-mode host; there is no isolated
+protocol-30 application host yet.
+
 The source observations later in this document were originally gathered against
 28.0.2; re-check private/internal API details when upgrading the live host.
 

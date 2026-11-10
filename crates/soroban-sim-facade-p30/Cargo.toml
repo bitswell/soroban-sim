@@ -1,0 +1,31 @@
+[package]
+name = "soroban-sim-facade-p30"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "soroban-sim-facade against the protocol-30 Soroban host (a generated copy of its sources)"
+autoexamples = false
+autotests = false
+autobenches = false
+
+# The sources are soroban-sim-facade's (scripts/sync-protocol-twins.py). Their unit tests
+# run here against protocol 30; integration tests and doctests (which name
+# `soroban_sim_facade`) run in soroban-sim-facade.
+[lib]
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2.workspace = true
+# The same dependency names as soroban-sim-facade, so the copied sources
+# build unchanged against the protocol-30 releases.
+soroban-env-host = { version = "=30.0.0", features = ["recording_mode"] }
+soroban-sim-core = { package = "soroban-sim-core-p30", path = "../soroban-sim-core-p30", version = "0.1.0" }
+soroban-simulation = "=30.0.0"
+stellar-xdr = { version = "=30.0.0", features = ["serde", "base64"] }

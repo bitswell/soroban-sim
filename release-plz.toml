@@ -32,3 +32,18 @@ git_release_latest = true
 name = "soroban-sim-component"
 version_group = "sim"
 git_release_latest = false
+
+[[package]]
+name = "soroban-sim-core-p30"
+version_group = "sim"
+git_release_enable = false
+
+[[package]]
+name = "soroban-sim-facade-p30"
+version_group = "sim"
+git_release_enable = false
+
+[[package]]
+name = "soroban-sim-cli-p30"
+version_group = "sim"
+git_release_enable = false

@@ -63,7 +63,10 @@ On Windows, download the `.zip` and compare `Get-FileHash <archive>` in
 PowerShell with the matching line of the `.sha256` file.
 
 The Rust libraries are `soroban-sim-core`, `soroban-sim-facade` and
-`soroban-sim-component` (0.1.0). `soroban-sim-host` (29.0.2) is the isolated
+`soroban-sim-component` (0.1.0). `soroban-sim-core-p30`, `soroban-sim-facade-p30`
+and `soroban-sim-cli-p30` are generated copies of core, the facade and the CLI's
+library against the protocol-30 host, so the one `soroban-sim` binary runs both
+protocols. `soroban-sim-host` (29.0.2) is the isolated
 upstream application host used for exact native metering; its
 [`UPSTREAM.json`](crates/soroban-sim-host/UPSTREAM.json) records which
 `soroban-env-host` release it copies. The TypeScript package
@@ -104,8 +107,10 @@ Implemented spike:
 Pinned upstream:
 
 - `soroban-simulation = 29.0.2`
-- `soroban-env-host = 29.0.2` (protocol 29, matching Testnet and Mainnet)
+- `soroban-env-host = 29.0.2` (protocol 29, Mainnet's)
 - `stellar-xdr = 28.0.0` through upstream crates
+- the CLI also links `soroban-env-host`, `soroban-simulation` and
+  `stellar-xdr` 30.0.0 (protocol 30, Testnet's) through the `-p30` crates
 - `soroban-wasmi = 29.0.0` through `soroban-env-host`
 - fixture contract uses `soroban-sdk = 27.0.5`
 

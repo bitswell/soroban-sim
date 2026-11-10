@@ -34,6 +34,7 @@ and signer adapter.
 | `--fork-ledger N` | The ledger a `checkpoint` fork pins (default: the latest when it opens). |
 | `--network-passphrase P` | Checked against the RPC's `getNetwork`. |
 | `--snapshot FILE` | Fork a snapshot file instead (offline, reproducible). |
+| `--protocol N` | The host protocol (29 or 30). Default: the network's; offline, the oldest host that runs the snapshot and every contract the plan uploads from a file. |
 | `--save-snapshot FILE` | Save every base entry the run read, for offline replays. |
 | `--wasm-dir DIR` | Where `upload` steps find Wasm by hash (repeatable). |
 | `--differential` | Compare each prepared step with RPC `simulateTransaction`. |

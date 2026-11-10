@@ -58,7 +58,7 @@ use report::{
 use tx::Touched;
 
 /// The soroban-env-host release this build links (see the workspace pin).
-pub const ENV_HOST_VERSION: &str = "29.0.2";
+pub const ENV_HOST_VERSION: &str = soroban_env_host::VERSION.pkg;
 pub const MAINNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
 pub const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
 

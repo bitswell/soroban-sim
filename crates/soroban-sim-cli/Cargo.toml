@@ -35,6 +35,8 @@ sha2.workspace = true
 soroban-env-host = { workspace = true, features = ["recording_mode"] }
 soroban-sim-core = { path = "../soroban-sim-core", version = "0.1.0" }
 soroban-sim-facade = { path = "../soroban-sim-facade", version = "0.1.0" }
+# The same engine against the protocol-30 host; the binary picks one per run.
+soroban-sim-cli-p30 = { path = "../soroban-sim-cli-p30", version = "0.1.0" }
 soroban-simulation.workspace = true
 # The XDR crate soroban-env-host links, with serde for plan-file ScVal JSON.
 stellar-xdr = { version = "=28.0.0", features = ["serde", "base64"] }

@@ -140,6 +140,26 @@ supports both modes without feature-dependent application metering. Never
 enable `recording_mode`/`testutils` on the isolated host in an exact-apply
 consumer; the release dependency-graph check rejects that configuration.
 
+## Protocol twin crates
+
+`soroban-sim-core-p30`, `soroban-sim-facade-p30` and `soroban-sim-cli-p30` let
+the `soroban-sim` binary link the protocol-30 host beside the protocol-29 one.
+Their `src/` (and core's `include_bytes!` fixture contracts) are byte copies of
+the protocol-29 crates, written by `scripts/sync-protocol-twins.py`; only their
+manifests differ, pinning the 30.0.0 host, simulation and XDR crates under the
+same dependency names. Edit the original crates, then run the script; the
+`release-inputs` CI job runs it with `--check`. The CLI binary's own modules
+(`src/main.rs`, `src/host.rs`) are not copied.
+
+The twins are in the `sim` version group and publish before the CLI, which
+depends on `soroban-sim-cli-p30`. Their crates.io names need the same
+availability check and owners as the other packages before the first release
+that contains them.
+
+To move a protocol (for example once Mainnet runs 30), change the original
+crates' pins and the twins' manifests together and update `Host` in
+`crates/soroban-sim-cli/src/host.rs`.
+
 ## Binary assets and installation
 
 `build-cli.yml` is reused by CI and the CLI release workflow. It builds nine

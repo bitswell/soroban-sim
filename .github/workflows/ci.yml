@@ -18,6 +18,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: python scripts/sync-package-assets.py --check
+      - run: python scripts/sync-protocol-twins.py --check
       - run: python scripts/check-upstream-host.py
       - run: python scripts/test-release-tools.py
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
@@ -50,7 +51,13 @@ jobs:
       - run: cargo check --workspace --locked
       - run: cargo check -p soroban-sim-component --target wasm32-wasip2 --locked
 
+  # The 9-target binary matrix only runs for release-plz's release PR branch
+  # (default prefix `release-plz-`; release-plz.toml does not override it).
+  # Tag releases still build every binary in cd-soroban-sim.yml.
   binaries:
+    if: >-
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')) ||
+      (github.event_name == 'push' && startsWith(github.ref_name, 'release-plz-'))
     uses: ./.github/workflows/build-cli.yml
 
   sign-dialog:

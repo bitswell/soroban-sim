@@ -5,6 +5,7 @@
 //! submitted to the network.
 
 pub mod checkpoint;
+pub mod cli;
 pub mod differential;
 pub mod meta;
 pub mod plan;

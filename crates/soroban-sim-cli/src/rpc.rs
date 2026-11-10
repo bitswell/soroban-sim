@@ -9,7 +9,7 @@ use soroban_env_host::xdr::{
     LedgerCloseMeta, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerHeader, LedgerKey,
     Limits, ReadXdr, WriteXdr,
 };
-use soroban_sim_core::session::{FetchedBatch, LedgerSource, StoredEntry};
+use soroban_sim_core::session::{host_protocol, FetchedBatch, LedgerSource, StoredEntry};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -57,6 +57,11 @@ pub struct ClosedLedger {
     pub meta: LedgerCloseMeta,
 }
 
+fn latest_protocol(latest: &Value) -> Result<u32> {
+    let p = latest["protocolVersion"].as_u64().ok_or_else(|| anyhow!("getLatestLedger: no protocolVersion"))?;
+    u32::try_from(p).map_err(|_| anyhow!("getLatestLedger: protocolVersion {p} is out of range"))
+}
+
 impl RpcClient {
     pub fn new(url: &str) -> Self {
         Self { url: url.to_string(), calls: Cell::new(0), throttled: Cell::new(0) }
@@ -96,14 +101,28 @@ impl RpcClient {
         response.get("result").cloned().ok_or_else(|| anyhow!("{method}: no result"))
     }
 
+    /// The latest ledger, refused unless it runs this build's host protocol:
+    /// the header's XDR changes with the protocol, so the check comes first.
     pub fn latest_ledger(&self) -> Result<LatestLedger> {
         let r = self.call("getLatestLedger", json!({}))?;
+        let protocol_version = latest_protocol(&r)?;
+        if protocol_version != host_protocol() {
+            bail!("{} is on protocol {protocol_version}, this build's host implements protocol {}", self.url, host_protocol());
+        }
+        let sequence = r["sequence"].as_u64().ok_or_else(|| anyhow!("getLatestLedger: no sequence"))? as u32;
         let header_xdr = r["headerXdr"].as_str().ok_or_else(|| anyhow!("getLatestLedger: no headerXdr (RPC too old?)"))?;
-        Ok(LatestLedger {
-            sequence: r["sequence"].as_u64().ok_or_else(|| anyhow!("getLatestLedger: no sequence"))? as u32,
-            protocol_version: r["protocolVersion"].as_u64().ok_or_else(|| anyhow!("getLatestLedger: no protocolVersion"))? as u32,
-            header: LedgerHeader::from_xdr(B64.decode(header_xdr)?, Limits::none())?,
-        })
+        let header = B64
+            .decode(header_xdr)
+            .context("not base64")
+            .and_then(|bytes| Ok(LedgerHeader::from_xdr(bytes, Limits::none())?))
+            .with_context(|| format!("getLatestLedger: decoding ledger {sequence}'s headerXdr (protocol {protocol_version})"))?;
+        Ok(LatestLedger { sequence, protocol_version, header })
+    }
+
+    /// The protocol the latest ledger runs. Reads no XDR, so it answers for
+    /// any protocol.
+    pub fn protocol_version(&self) -> Result<u32> {
+        latest_protocol(&self.call("getLatestLedger", json!({}))?)
     }
 
     pub fn network_passphrase(&self) -> Result<String> {

@@ -109,7 +109,7 @@ pub fn base_from_name(name: &str, passphrase: Option<String>) -> Result<Base> {
     bail!("unknown network {name:?}: use mainnet, testnet or an RPC URL")
 }
 
-fn base_from_spec(spec: &NetworkSpec) -> Result<Base> {
+pub fn base_from_spec(spec: &NetworkSpec) -> Result<Base> {
     match spec {
         NetworkSpec::Named(n) => base_from_name(n, None),
         NetworkSpec::Custom { rpc, passphrase } => {
@@ -865,7 +865,7 @@ pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> 
             }
             let (header, source): (LedgerHeader, Rc<dyn Fn() -> Box<dyn LedgerSource>>) = match mode {
                 ForkMode::Head => {
-                    let latest = rpc.latest_ledger()?;
+                    let latest = rpc.latest_ledger().with_context(|| format!("forking {name}"))?;
                     let source = rpc.clone();
                     (latest.header, Rc::new(move || Box::new(RpcSource(source.clone()))))
                 }

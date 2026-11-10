@@ -48,6 +48,7 @@ transaction and per `fork_*` call.
 | `--fork-mode head\|checkpoint`, `--fork-ledger N` | Read the network lazily at its latest ledger (default), or pin one ledger and roll every read back to it ([`session.md`, "Fork modes"](session.md#fork-modes)). |
 | `--network-passphrase P` | Checked against the RPC's `getNetwork`. |
 | `--snapshot FILE` | Fork a snapshot file instead (offline). |
+| `--protocol N` | The host protocol (29 or 30). Default: the network's or the snapshot's. |
 | `--host H`, `--port N` | Where to listen (default `127.0.0.1:8000`). Off loopback, anyone who can reach it can read the fork and call `fork_*`. |
 | `--report PREFIX` | Rewrite `PREFIX.json` and `PREFIX.md` after every state change. |
 | `--seconds-per-ledger N` | The close-time step between ledgers (default 5). |

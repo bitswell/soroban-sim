@@ -5,3 +5,6 @@ crates/soroban-sim-host/build.rs linguist-vendored -whitespace
 crates/soroban-sim-*/fixtures/** linguist-generated
 crates/soroban-sim-cli/examples/session/** linguist-generated
 crates/soroban-sim-component/wit/** linguist-generated
+# Protocol twin crates: copies of the protocol-29 crates (scripts/sync-protocol-twins.py).
+crates/soroban-sim-*-p30/src/** linguist-generated
+crates/soroban-sim-*-p30/README.md linguist-generated

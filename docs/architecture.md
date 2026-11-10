@@ -21,7 +21,8 @@ Individual contracts stay normal Soroban core Wasm. The host loads contract code
 - `crates/soroban-sim-core`: Rust simulation core. Owns in-memory snapshots, fixture construction, simulation call, and deterministic output encoding.
 - `crates/soroban-sim-component`: WIT export wrapper for `wasm32-wasip2`.
 - `crates/soroban-sim-facade`: the stellar-rpc and `fork_*` JSON-RPC methods over a network session, without a transport. `soroban-sim serve` and the component's `network-session` resource both use it.
-- `crates/soroban-sim-cli`: the `soroban-sim` CLI (`session run`, `serve`).
+- `crates/soroban-sim-cli`: the `soroban-sim` CLI (`session run`, `serve`). Its library is the engine for one host protocol; the binary (`src/main.rs`, `src/host.rs`) links two engines and picks one per run.
+- `crates/soroban-sim-{core,facade,cli}-p30`: byte-for-byte copies of those crates' sources (`scripts/sync-protocol-twins.py`), built against the protocol-30 host. Cargo builds a package once per dependency graph, so a second host needs second packages.
 - `packages/soroban-sim`: TypeScript package around the Jco output: the simulator driver, state providers, caches, and the network-session API (`src/session/`).
 - `packages/web-demo`: Vite + Playwright browser demo: the workbench, the time-travel debugger, the wallet pre-submit flow and the network-session panel.
 
