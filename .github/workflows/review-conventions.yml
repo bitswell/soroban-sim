@@ -1,0 +1,30 @@
+name: Review conventions
+
+# Checks this PR's title, description and commits against the templates in
+# .github/ and the rules in .github/review-conventions.json (CONTRIBUTING.md
+# "Pull requests and commits"). The checks live in the shared
+# bitswell-hq/review-conventions repository; soroban-sim keeps only its
+# config and templates. `edited` re-runs the check when the title or body is
+# fixed; the job is seconds long, builds nothing and holds no secrets, so it
+# also runs on fork PRs. Release-plz PRs get only the title check (`skip` in
+# the config).
+#
+# @v1 follows the newest v1.x.y; a new required section or default finding
+# is a major version, so it cannot start failing this repository unasked.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-conventions-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-conventions:
+    uses: bitswell-hq/review-conventions/.github/workflows/review-conventions.yml@v1
+    with:
+      mode: warn # the one switch: `block` fails the check on any finding (drafts never fail)

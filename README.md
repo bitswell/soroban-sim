@@ -298,6 +298,7 @@ pnpm --filter @theahaco/soroban-sign-dialog demo   # http://127.0.0.1:4178/demo/
 - `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.
 - `docs/upstream.md` — upstream pins and contribution notes.
 - `packages/soroban-sign-dialog/README.md` — the sign dialog: embedding, frameworks, theming, the preview engine.
+- `CONTRIBUTING.md` — PR and commit templates, and the checks that run on every PR.
 
 ## License
 

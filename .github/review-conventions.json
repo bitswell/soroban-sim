@@ -1,0 +1,87 @@
+{
+  "$comment": "soroban-sim's PR and commit conventions for bitswell-hq/review-conventions (its README \"Config reference\"); CONTRIBUTING.md \"Pull requests and commits\" explains them.",
+  "header": {
+    "scopes": [
+      "cli",
+      "core",
+      "facade",
+      "component",
+      "host",
+      "preview",
+      "twins",
+      "session",
+      "replay",
+      "serve",
+      "snapshot",
+      "differential",
+      "soroban-sign-dialog",
+      "web-demo",
+      "js",
+      "fixtures",
+      "release",
+      "pr-preview",
+      "readme",
+      "deps"
+    ]
+  },
+  "commits": {
+    "trailers": [
+      "Refs",
+      "Closes",
+      "Fixes",
+      "Fidelity",
+      "Security",
+      "Co-authored-by",
+      "Reported-by",
+      "Suggested-by",
+      "Tested-by",
+      "Reviewed-by",
+      "Signed-off-by"
+    ]
+  },
+  "skip": {
+    "authors": [
+      "github-actions[bot]"
+    ],
+    "branches": [
+      "release-plz-"
+    ]
+  },
+  "help": "See CONTRIBUTING.md \"Pull requests and commits\".",
+  "rules": [
+    {
+      "id": "fidelity-sections",
+      "message": "This changes code that can move simulated results, fees or metering; use the fidelity template (gh pr create --template fidelity.md)",
+      "when": {
+        "paths": [
+          "crates/soroban-sim-host/",
+          "crates/soroban-sim-core/src/",
+          "crates/soroban-sim-facade/src/",
+          "crates/soroban-sim-component/src/",
+          "crates/soroban-sim-preview/src/",
+          "crates/soroban-sim-*-p30/Cargo.toml"
+        ]
+      },
+      "requireSections": [
+        "Fidelity impact",
+        "Network comparison"
+      ]
+    },
+    {
+      "id": "fidelity-none-reason",
+      "message": "Name what can move or what was compared",
+      "when": {
+        "sections": {
+          "Fidelity impact": "\\S",
+          "Network comparison": "\\S"
+        }
+      },
+      "section": [
+        "Fidelity impact",
+        "Network comparison"
+      ],
+      "match": "^(?!\\s*(?:none|nothing|unchanged|not applicable)\\b)\\s*\\S",
+      "allowNone": 20
+    }
+  ]
+}
