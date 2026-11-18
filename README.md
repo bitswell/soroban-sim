@@ -243,6 +243,18 @@ STELLAR_SIGN_WITH_KEY=<throwaway> ./your-deploy-script.sh
 
 See `docs/rpc-facade.md`.
 
+Snapshot files fork offline. `session run --save-snapshot` and `serve
+--save-snapshot` keep the base entries a session read (format
+`soroban-sim-snapshot/1`). `fork_exportSnapshot` returns the session's whole
+state (format `soroban-sim-snapshot/2`): a server started from it with `serve --snapshot`
+answers the same reads and applies the next transaction the same way, so a
+setup can run once and each test start from its result on its own server. An
+export of a live fork is partial and still reads the keys it never read from
+that network; an export of a snapshot base is self-contained. `soroban-sim
+snapshot capture --network URL --out FILE` captures a network's settings and
+latest ledger header as a self-contained snapshot. See
+[`docs/rpc-facade.md`, "Snapshots"](docs/rpc-facade.md#snapshots).
+
 Both read a fork either lazily at RPC's latest ledger (`--fork-mode head`, the
 default) or pinned to one ledger with every read rolled back to it through the
 later ledgers' close meta (`--fork-mode checkpoint [--fork-ledger N]`).
