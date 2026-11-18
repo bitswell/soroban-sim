@@ -15,7 +15,7 @@
 //! 4. with nothing to go on, the oldest host.
 
 use anyhow::{bail, Context, Result};
-use clap::{ArgMatches, FromArgMatches};
+use clap::Parser;
 use soroban_sim_cli::cli::{Cli, Command, ReplayCommand, SessionCommand};
 use soroban_sim_cli::plan::Plan;
 use soroban_sim_cli::replay::ReplayFixture;
@@ -23,6 +23,7 @@ use soroban_sim_cli::rpc::RpcClient;
 use soroban_sim_cli::run::{base_from_name, base_from_spec, Base};
 use soroban_sim_cli::snapshot::SnapshotFile;
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::Path;
 
 /// A host this binary links.
@@ -43,11 +44,14 @@ impl Host {
         }
     }
 
-    /// Run the parsed command line with this host's engine.
-    pub fn run(self, matches: &ArgMatches) -> Result<bool> {
+    /// Run the command line with this host's engine. Each engine parses it
+    /// with its own `Cli`: the definitions are copies, but their value types
+    /// (the `ValueEnum`s) are distinct, so one engine can't read the other's
+    /// parsed matches.
+    pub fn run(self, args: &[OsString]) -> Result<bool> {
         match self {
-            Host::P29 => soroban_sim_cli::cli::run(Cli::from_arg_matches(matches)?),
-            Host::P30 => soroban_sim_cli_p30::cli::run(soroban_sim_cli_p30::cli::Cli::from_arg_matches(matches)?),
+            Host::P29 => soroban_sim_cli::cli::run(Cli::try_parse_from(args)?),
+            Host::P30 => soroban_sim_cli_p30::cli::run(soroban_sim_cli_p30::cli::Cli::try_parse_from(args)?),
         }
     }
 

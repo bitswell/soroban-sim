@@ -32,6 +32,10 @@ pub struct ServeConfig {
     pub base: Base,
     /// Close-time step between ledgers; the network's 5 s by default.
     pub seconds_per_ledger: Option<u64>,
+    /// Move ledger time at this clock's pace (seconds) from the fork's close
+    /// time; `None` moves it one step per ledger
+    /// ([`FacadeConfig::wall_clock`]).
+    pub wall_clock: Option<Rc<dyn Fn() -> u64>>,
     /// Apply envelopes a signer of the real network signed, even on mainnet.
     pub allow_real_signers: bool,
     /// Rewrite `PREFIX.json` and `PREFIX.md` after every state change.
@@ -72,6 +76,7 @@ impl Facade {
                 header: forked.header,
                 allow_real_signers: config.allow_real_signers,
                 served_by: "soroban-sim serve".into(),
+                wall_clock: config.wall_clock,
             },
         );
         Ok(Self { inner, rpc: forked.rpc, report_prefix: config.report, progress: config.progress, verbose: config.verbose, seen: 0 })

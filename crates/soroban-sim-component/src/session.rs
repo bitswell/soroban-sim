@@ -56,6 +56,7 @@ impl GuestSession for NetworkSession {
             header,
             allow_real_signers: config.allow_real_signers,
             served_by: config.served_by,
+            wall_clock: None,
         };
         Self {
             base: DeferredBase::new(&config.base_description),
