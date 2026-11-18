@@ -8,7 +8,7 @@ use crate::rpc::RpcClient;
 use crate::run::{base_from_name, Base, ForkMode, RunConfig, Runner};
 use crate::serve::{self, Facade, ServeConfig};
 use anyhow::{bail, Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use soroban_sim_core::session::host_protocol;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -135,10 +135,8 @@ pub struct ServeArgs {
     /// it ahead. step: every ledger closes --seconds-per-ledger after the
     /// last, from the fork's close time, the same every run (what session
     /// run does).
-    // A String, not an enum: the binary parses once and hands the matches to
-    // either host's copy of this crate, whose enum types differ.
-    #[arg(long, value_name = "wall|step", value_parser = ["wall", "step"], default_value = "wall")]
-    pub clock: String,
+    #[arg(long, value_enum, value_name = "wall|step", default_value_t = Clock::Wall)]
+    pub clock: Clock,
     /// Apply envelopes that a signer the real network already has signed.
     /// On mainnet those are valid there as they stand, so by default the
     /// facade refuses them.
@@ -205,6 +203,14 @@ pub struct RunArgs {
     /// No per-step progress on stderr.
     #[arg(long, short)]
     pub quiet: bool,
+}
+
+/// How `serve` moves ledger time (see `ServeArgs::clock`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Clock {
+    // No doc comments: clap would print them in `--help`'s value list.
+    Wall,
+    Step,
 }
 
 fn unix_now() -> u64 {
@@ -300,7 +306,10 @@ pub fn run(cli: Cli) -> Result<bool> {
             let mut facade = Facade::open(ServeConfig {
                 base,
                 seconds_per_ledger: Some(args.seconds_per_ledger),
-                wall_clock: (args.clock == "wall").then(|| Rc::new(unix_now) as Rc<dyn Fn() -> u64>),
+                wall_clock: match args.clock {
+                    Clock::Wall => Some(Rc::new(unix_now) as Rc<dyn Fn() -> u64>),
+                    Clock::Step => None,
+                },
                 allow_real_signers: args.allow_real_signers,
                 report: args.report.clone(),
                 progress: !args.quiet,
@@ -388,9 +397,9 @@ mod tests {
     #[test]
     fn serve_keeps_wall_clock_pace_by_default() {
         let Command::Serve(args) = Cli::parse_from(["soroban-sim", "serve", "--snapshot", "base.json"]).command else { panic!("not serve") };
-        assert_eq!((args.clock.as_str(), args.seconds_per_ledger), ("wall", 5));
+        assert_eq!((args.clock, args.seconds_per_ledger), (Clock::Wall, 5));
         let Command::Serve(args) = Cli::parse_from(["soroban-sim", "serve", "--snapshot", "base.json", "--clock", "step"]).command else { panic!("not serve") };
-        assert_eq!(args.clock, "step");
+        assert_eq!(args.clock, Clock::Step);
         assert!(Cli::try_parse_from(["soroban-sim", "serve", "--snapshot", "base.json", "--clock", "fast"]).is_err());
     }
 }

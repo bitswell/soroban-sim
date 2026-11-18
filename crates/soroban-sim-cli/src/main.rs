@@ -3,16 +3,15 @@
 
 mod host;
 
-use clap::{CommandFactory, FromArgMatches};
+use clap::Parser;
 use soroban_sim_cli::cli::Cli;
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let matches = Cli::command().get_matches();
-    let run = || -> anyhow::Result<bool> {
-        let cli = Cli::from_arg_matches(&matches)?;
-        host::for_cli(&cli)?.run(&matches)
-    };
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let cli = Cli::parse_from(&args);
+    let run = || -> anyhow::Result<bool> { host::for_cli(&cli)?.run(&args) };
     match run() {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
