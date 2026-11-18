@@ -12,13 +12,15 @@ use soroban_env_host::xdr::{
     LedgerEntryData, LedgerEntryExt, LedgerHeader, LedgerKey, LedgerKeyContractData, LedgerKeyTtl, Limits, Memo,
     MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ReadXdr, ScAddress, ScSymbol, ScVal,
     SequenceNumber, SorobanAuthorizationEntry, SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionMeta, TransactionResult, TransactionResultResult, TransactionV1Envelope, Uint256, WriteXdr,
+    TimeBounds, TimePoint, TransactionMeta, TransactionResult, TransactionResultResult, TransactionV1Envelope, Uint256, WriteXdr,
 };
 use soroban_sim_cli::run::{contract_id, Base, MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
 use soroban_sim_cli::serve::{Facade, RpcError, ServeConfig};
 use soroban_sim_cli::snapshot::SnapshotFile;
 use soroban_sim_core::session::{host_protocol, network_id, new_account, transaction_hash, Ed25519Key, ForkPoint, StoredEntry};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// Above every captured config entry's last-modified ledger.
 const FORK_LEDGER: u32 = 10_000_000;
@@ -78,6 +80,7 @@ fn facade(name: &str, passphrase: &str, allow_real_signers: bool) -> (Facade, Pa
     let f = Facade::open(ServeConfig {
         base: Base::Snapshot(base),
         seconds_per_ledger: None,
+        wall_clock: None,
         allow_real_signers,
         report: Some(dir.join("facade")),
         progress: false,
@@ -263,6 +266,116 @@ fn a_stock_client_flow_runs_against_the_fork() {
     // And it was rewritten on disk after the last change.
     let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("facade.json")).unwrap()).unwrap();
     assert_eq!(on_disk["fees"]["applied"], 3);
+}
+
+/// The wall clock as a test sets it.
+fn test_clock(now: &Rc<Cell<u64>>) -> Option<Rc<dyn Fn() -> u64>> {
+    let now = now.clone();
+    Some(Rc::new(move || now.get()))
+}
+
+/// On a fork of a ledger that closed just now, a client sends transactions
+/// so fast that its clock never ticks, each valid for the 300 s stellar-sdk's
+/// `setTimeout(300)` gives it. Returns the first one refused, with the reply.
+fn fast_client(name: &str, wall: bool) -> Option<(i32, Value)> {
+    let dir = scratch(name);
+    let base = snapshot(&dir, TESTNET_PASSPHRASE);
+    let now = Rc::new(Cell::new(FORK_TIME));
+    let wall_clock = if wall { test_clock(&now) } else { None };
+    let mut f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock, allow_real_signers: false, report: None, progress: false, verbose: false }).unwrap();
+    substitute_alice(&mut f);
+    let id = upload_and_deploy(&mut f, TESTNET_PASSPHRASE);
+    for i in 1..=100 {
+        let seq = account_seq(&mut f, &alice()) + 1;
+        let mut tx = raw_tx(&alice(), seq, add(&id, i, 1));
+        tx.cond = Preconditions::Time(TimeBounds { min_time: TimePoint(0), max_time: TimePoint(now.get() + 300) });
+        let tx = prepare(&mut f, tx);
+        let sent = ok(&mut f, "sendTransaction", json!({ "transaction": signed(&tx, TESTNET_PASSPHRASE, &[&alice_throwaway()]) }));
+        if sent["status"] != "PENDING" {
+            return Some((i, sent));
+        }
+    }
+    None
+}
+
+#[test]
+fn a_fast_client_is_not_refused_as_too_late() {
+    // serve's default: ledger time moves no faster than the wall clock.
+    assert_eq!(fast_client("fast-wall", true), None);
+    // A step per ledger from the fork: after the upload and the deploy, the
+    // 59th transaction's ledger closes 305 s after the fork.
+    let (i, sent) = fast_client("fast-step", false).expect("a step clock outruns the time bound");
+    assert!(matches!(result_code(&sent["errorResultXdr"]), TransactionResultResult::TxTooLate), "{sent}");
+    assert_eq!(i, 59);
+}
+
+fn close_time(got: &Value) -> u64 {
+    got["createdAt"].as_str().unwrap().parse().unwrap()
+}
+
+/// A facade on the [`FORK_TIME`] snapshot, opened when the wall clock reads
+/// `opened`, with that clock.
+fn wall_clock_facade(name: &str, opened: u64) -> (Facade, Rc<Cell<u64>>) {
+    let dir = scratch(name);
+    let base = snapshot(&dir, TESTNET_PASSPHRASE);
+    let now = Rc::new(Cell::new(opened));
+    let f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock: test_clock(&now), allow_real_signers: false, report: None, progress: false, verbose: false }).unwrap();
+    (f, now)
+}
+
+#[test]
+fn an_old_snapshot_opens_at_its_own_close_time() {
+    // The snapshot is a year old.
+    let opened = FORK_TIME + 31_536_000;
+    let (mut f, now) = wall_clock_facade("wall-clock-old-snapshot", opened);
+    let info = ok(&mut f, "fork_info", json!({}));
+    assert_eq!((info["clock"].as_str(), info["next"]["closeTime"].as_u64()), (Some("wall"), Some(FORK_TIME + 5)));
+    substitute_alice(&mut f);
+    let id = upload_and_deploy(&mut f, TESTNET_PASSPHRASE);
+    let a = run(&mut f, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    assert_eq!(close_time(&a), FORK_TIME + 5);
+    // From there, a second of wall time is a second of ledger time.
+    now.set(opened + 90);
+    let b = run(&mut f, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    assert_eq!(close_time(&b), FORK_TIME + 90);
+}
+
+#[test]
+fn ledger_time_keeps_wall_clock_pace_and_the_clock_still_moves() {
+    let opened = FORK_TIME + 1_000;
+    let (mut f, now) = wall_clock_facade("wall-clock", opened);
+    substitute_alice(&mut f);
+    assert_eq!(ok(&mut f, "fork_snapshot", json!({}))["id"], 0);
+
+    // Transactions in the same second close ledgers at that second: the
+    // first ledger's, one step after the fork.
+    let id = upload_and_deploy(&mut f, TESTNET_PASSPHRASE);
+    let a = run(&mut f, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    assert_eq!((a["ledger"].as_u64(), close_time(&a)), (Some(FORK_LEDGER as u64 + 3), FORK_TIME + 5));
+    now.set(opened + 10);
+    let b = run(&mut f, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    assert_eq!((b["ledger"].as_u64(), close_time(&b)), (Some(FORK_LEDGER as u64 + 4), FORK_TIME + 10));
+
+    // fork_advanceLedgers moves ahead of the wall clock, and ledger time
+    // stays there until the wall clock catches up.
+    let r = ok(&mut f, "fork_advanceLedgers", json!({ "ledgers": 10 }));
+    assert_eq!((r["next"]["ledger"].as_u64(), r["next"]["closeTime"].as_u64()), (Some(FORK_LEDGER as u64 + 15), Some(FORK_TIME + 60)));
+    now.set(opened + 20);
+    let c = run(&mut f, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    assert_eq!(close_time(&c), FORK_TIME + 60);
+    // fork_setTime lands the next close time exactly.
+    let r = ok(&mut f, "fork_setTime", json!({ "time": FORK_TIME + 3_600 }));
+    assert_eq!(r["next"]["closeTime"], FORK_TIME + 3_600);
+    let d = run(&mut f, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    assert_eq!(close_time(&d), FORK_TIME + 3_600);
+    // Time the wall clock has counted past is the past.
+    now.set(opened + 4_000);
+    let err = f.call("fork_setTime", json!({ "time": FORK_TIME + 3_700 })).unwrap_err();
+    assert!(err.message.contains("cannot move the clock back: the next ledger closes at 1800004000"), "{}", err.message);
+
+    // A revert undoes the ledgers, not the time.
+    let r = ok(&mut f, "fork_revert", json!({ "id": 0 }));
+    assert_eq!((r["next"]["ledger"].as_u64(), r["next"]["closeTime"].as_u64()), (Some(FORK_LEDGER as u64 + 1), Some(FORK_TIME + 4_000)));
 }
 
 #[test]
@@ -456,7 +569,7 @@ fn json_rpc_over_http() {
     // The session is single-threaded: the server thread owns it.
     std::thread::spawn(move || {
         let (server, addr) = soroban_sim_cli::serve::http::bind("127.0.0.1", 0).unwrap();
-        let mut f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, allow_real_signers: false, report: None, progress: false, verbose: false }).unwrap();
+        let mut f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock: None, allow_real_signers: false, report: None, progress: false, verbose: false }).unwrap();
         tx.send(addr).unwrap();
         soroban_sim_cli::serve::http::serve(&mut f, &server);
     });

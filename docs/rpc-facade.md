@@ -51,7 +51,8 @@ transaction and per `fork_*` call.
 | `--protocol N` | The host protocol (29 or 30). Default: the network's or the snapshot's. |
 | `--host H`, `--port N` | Where to listen (default `127.0.0.1:8000`). Off loopback, anyone who can reach it can read the fork and call `fork_*`. |
 | `--report PREFIX` | Rewrite `PREFIX.json` and `PREFIX.md` after every state change. |
-| `--seconds-per-ledger N` | The close-time step between ledgers (default 5). |
+| `--clock wall\|step` | How ledger time moves on from the fork's close time (default `wall`): at the pace of this machine's clock, or by a fixed step per ledger (see [The clock](#the-clock)). |
+| `--seconds-per-ledger N` | The close-time step (default 5) of each ledger `fork_advanceLedgers` and `fork_setTime` close and of the first ledger after the fork; with `--clock step`, of each transaction's ledger too. |
 | `--allow-real-signers` | Accept envelopes a signer of the real network signed (see Safety). |
 | `-v` / `-q` | Log every call / no per-change lines. |
 
@@ -103,7 +104,7 @@ and each call that changes state is a step:
 | `fork_snapshot` | `label` | Returns an `id`. |
 | `fork_revert` | `id` | Undoes every transaction, override and clock move since. Later snapshots are dropped; this one stays, to revert to again. |
 | `fork_report` | | `passed`, `failures`, the JSON report and the Markdown, and the files written. |
-| `fork_info` | | Fork point, clock, counts, snapshots, the safety setting, and `replayable`: how many signatures valid on the real network the session has seen (refused, rejected or applied). A Mainnet session refuses such an envelope even when it would be rejected anyway. |
+| `fork_info` | | Fork point, clock (`clock` is `wall` or `step`), counts, snapshots, the safety setting, and `replayable`: how many signatures valid on the real network the session has seen (refused, rejected or applied). A Mainnet session refuses such an envelope even when it would be rejected anyway. |
 | `fork_allowRealSigners` | `allow` | Apply (or again refuse) envelopes a signer of the real network signed, from now on. A step records the change; the report still fails on any such signature on mainnet. |
 | `fork_steps` | | Every step in order: its report row, what it changed (each entry before and after), its envelope's authorization entries, and whether the debugger can trace it. |
 | `fork_debugContext` | `step` | What a debugger needs to trace a transaction step again: its host function and source, the ledger it applied in, and its footprint's entries just before it. |
@@ -111,6 +112,37 @@ and each call that changes state is a step:
 The clock cannot move back. To go back, revert to a snapshot. In the report,
 reverted steps stay listed and are marked as reverted. The fees, accounts and
 diff describe the session as it ended.
+
+## The clock
+
+Each transaction closes a ledger of its own, so ledger time is set per
+transaction, not once a second as on a real network.
+
+With `--clock wall`, the default, ledger time starts at the fork's close time
+and advances at the pace of this machine's clock. The next ledger closes at
+the later of the last ledger's close time and the fork's close time plus the
+seconds the server has been up; the first ledger closes no earlier than one
+`--seconds-per-ledger` step after the fork. A transaction's ledger closes when
+the transaction arrives, and ledgers closed within the same second share that
+second. On a fork of the latest ledger, time bounds set from the wall clock,
+such as stellar-sdk's `setTimeout(300)` and stellar-cli's, therefore hold
+however fast a client sends. `fork_advanceLedgers` and `fork_setTime` move
+ledger time ahead, and it stays there until the server's uptime catches up.
+The date does not count: a server on an old snapshot or checkpoint opens at
+that fork's close time, not at now, so every server started from one snapshot
+file starts at the same ledger time, on any day. Contracts there see the
+snapshot's time, and a transaction's `minTime` set from the wall clock is
+still in the future. A revert undoes ledgers, but the next ledger still closes
+no earlier than the fork's close time plus the uptime.
+
+With `--clock step`, every ledger, a transaction's included, closes
+`--seconds-per-ledger` after the last, starting from the fork's close time. The
+same calls give the same close times on every run, as in `session run`, which
+always uses this clock. Ledger time runs ahead of the wall clock whenever
+transactions come faster than one per step. From a fork of the latest ledger
+at the default 5 s, the 61st ledger closes 305 s after the fork, so a client
+that sets a 300 s time bound from the wall clock is refused `txTOO_LATE` after
+about 60 quick transactions.
 
 ## Safety
 
@@ -145,6 +177,10 @@ and [`replay.md`](replay.md)). On top of it:
 - History before the fork is not there. `getTransaction` knows only session
   transactions, and `getEvents` starts at the fork.
 - The facade answers one request at a time. A session is one ordered history.
+- With `--clock wall`, consecutive ledgers can share a close time, which
+  stellar-core never lets happen. Transactions in one real ledger share its
+  close time too, so contracts see nothing new; only the ledger sequence
+  numbers differ.
 
 ## Rehearsing the Perch/Nido bootstrap with its own scripts
 

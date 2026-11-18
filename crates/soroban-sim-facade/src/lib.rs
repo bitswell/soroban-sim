@@ -78,6 +78,15 @@ pub struct FacadeConfig {
     /// Who serves the facade, for the report: `soroban-sim serve at URL`, a
     /// browser tab.
     pub served_by: String,
+    /// A wall clock in seconds for ledger time to keep pace with, the way a
+    /// real network's does. Only the time it measures since the facade opened
+    /// counts: the next ledger never closes before the fork's close time plus
+    /// that, and transactions do not move the clock by the per-ledger step.
+    /// Ledger time so starts from the fork's, whatever the date, and does not
+    /// run ahead of the clocks clients set time bounds from.
+    /// `None`: every ledger, a transaction's included, closes one step after
+    /// the last, from the fork's close time, so the clock is the same every run.
+    pub wall_clock: Option<Rc<dyn Fn() -> u64>>,
 }
 
 /// A JSON-RPC error object.
@@ -192,6 +201,8 @@ pub struct Facade {
     header: LedgerHeader,
     served_by: String,
     allow_real_signers: bool,
+    /// The wall clock and what it read when the facade opened.
+    wall_clock: Option<(Rc<dyn Fn() -> u64>, u64)>,
     /// The latest closed ledger and its close time.
     closed: (u32, u64),
     txs: BTreeMap<[u8; 32], Rc<StoredTx>>,
@@ -220,6 +231,10 @@ impl Facade {
             header,
             served_by: config.served_by,
             allow_real_signers: config.allow_real_signers,
+            wall_clock: config.wall_clock.map(|clock| {
+                let opened = clock();
+                (clock, opened)
+            }),
             txs: BTreeMap::new(),
             tx_order: vec![],
             steps: vec![],
@@ -335,6 +350,7 @@ impl Facade {
 
     /// Run one method.
     pub fn call(&mut self, method: &str, params: Value) -> RpcResult {
+        self.follow_wall_clock();
         let p = Params::new(method, params)?;
         match method {
             "getHealth" => Ok(self.get_health()),
@@ -389,6 +405,18 @@ impl Facade {
         h.ledger_seq = seq;
         h.scp_value.close_time = TimePoint(close_time);
         h
+    }
+
+    /// With a wall clock, the next ledger closes no earlier than the fork's
+    /// close time plus the time since the facade opened. Every call starts
+    /// here, so a simulation, a transaction and `fork_info` see the same time.
+    fn follow_wall_clock(&mut self) {
+        if let Some((clock, opened)) = &self.wall_clock {
+            let now = self.session.fork_point().close_time + clock().saturating_sub(*opened);
+            if now > self.session.ledger_info().timestamp {
+                self.session.set_close_time(now);
+            }
+        }
     }
 
     /// Close ledgers up to the session's current one: the last closed ledger
@@ -700,6 +728,11 @@ impl Facade {
         );
         self.tx_order.push(hash);
         self.closed = (record.ledger, record.close_time);
+        if self.wall_clock.is_some() {
+            // The next transaction's ledger closes when it arrives: at this
+            // one's close time, or later once the wall clock has moved on.
+            self.session.set_close_time(record.close_time);
+        }
         for r in &record.replayable {
             self.replayable.push(format!("{label} ({}): {r}", hex(&hash)));
         }
@@ -812,6 +845,7 @@ impl Facade {
             "latestLedgerCloseTime": self.closed.1,
             "next": { "ledger": info.sequence_number, "closeTime": info.timestamp },
             "secondsPerLedger": self.session.options().seconds_per_ledger,
+            "clock": if self.wall_clock.is_some() { "wall" } else { "step" },
             "transactions": self.session.log().len(),
             "overrides": self.session.ledger().overrides().len(),
             "snapshots": snapshots,
@@ -858,6 +892,8 @@ impl Facade {
         for s in self.snapshots.iter_mut().skip(id + 1) {
             *s = None;
         }
+        // The ledgers go back; the time the wall clock has counted cannot.
+        self.follow_wall_clock();
         let (ledger, time) = (self.session.ledger_info().sequence_number, self.session.ledger_info().timestamp);
         self.push_step(step(self.steps.len() + 1, &format!("fork_revert to snapshot {id}"), "revert", ledger, time, "ok", &format!("{reverted} step(s) undone"), None, None), None, no_detail());
         let mut r = self.clock();

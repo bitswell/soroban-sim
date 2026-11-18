@@ -76,6 +76,7 @@ impl Client {
             header: None,
             allow_real_signers: false,
             served_by: "facade tests".into(),
+            wall_clock: None,
         };
         let mut rounds = 0;
         let facade = loop {
