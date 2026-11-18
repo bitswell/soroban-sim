@@ -54,17 +54,31 @@ pub trait LedgerSource {
     fn max_batch(&self) -> usize {
         200
     }
+    /// Every entry, for a source that holds its whole ledger in memory (a
+    /// snapshot file, fixtures). `None` for one read lazily, such as RPC:
+    /// what a key it was never asked about holds is only known by asking.
+    fn entries(&self) -> Option<Vec<StoredEntry>> {
+        None
+    }
+    /// Keys the source answers from a session's exported state, present
+    /// (`Some`) or absent (`None`): they are not reads of a network. It
+    /// claims nothing about any other key.
+    fn known(&self) -> Vec<(LedgerKey, Option<StoredEntry>)> {
+        vec![]
+    }
 }
 
 /// An in-memory base ledger: fixtures, tests, and offline snapshot files.
 pub struct StaticSource {
     ledger: u32,
     entries: BTreeMap<LedgerKey, StoredEntry>,
+    /// The entries are a session's exported state, not a network's.
+    exported: bool,
 }
 
 impl StaticSource {
     pub fn new(ledger: u32, entries: Vec<StoredEntry>) -> Result<Self> {
-        let mut source = Self { ledger, entries: BTreeMap::new() };
+        let mut source = Self { ledger, entries: BTreeMap::new(), exported: false };
         for e in entries {
             source.insert(e)?;
         }
@@ -74,6 +88,13 @@ impl StaticSource {
     pub fn insert(&mut self, entry: StoredEntry) -> Result<()> {
         self.entries.insert(ledger_entry_to_ledger_key(&entry.entry)?, entry);
         Ok(())
+    }
+
+    /// The entries are a session's exported state: reading one is not a
+    /// read of a network, so it is no fork drift.
+    pub fn exported(mut self) -> Self {
+        self.exported = true;
+        self
     }
 }
 
@@ -87,6 +108,65 @@ impl LedgerSource for StaticSource {
 
     fn describe(&self) -> String {
         format!("static snapshot at ledger {} ({} entries)", self.ledger, self.entries.len())
+    }
+
+    fn entries(&self) -> Option<Vec<StoredEntry>> {
+        Some(self.entries.values().cloned().collect())
+    }
+
+    fn known(&self) -> Vec<(LedgerKey, Option<StoredEntry>)> {
+        if !self.exported {
+            return vec![];
+        }
+        self.entries.iter().map(|(k, e)| (k.clone(), Some(e.clone()))).collect()
+    }
+}
+
+/// Known keys (present or absent) over a lazily read base: a partial
+/// snapshot of a live fork. Keys it knows are answered from memory; only the
+/// rest go to `base`.
+pub struct PartialSource {
+    ledger: u32,
+    known: BTreeMap<LedgerKey, Option<StoredEntry>>,
+    base: Box<dyn LedgerSource>,
+}
+
+impl PartialSource {
+    pub fn new(ledger: u32, present: Vec<StoredEntry>, absent: Vec<LedgerKey>, base: Box<dyn LedgerSource>) -> Result<Self> {
+        let mut known = BTreeMap::new();
+        for key in absent {
+            known.insert(key, None);
+        }
+        for e in present {
+            known.insert(ledger_entry_to_ledger_key(&e.entry)?, Some(e));
+        }
+        Ok(Self { ledger, known, base })
+    }
+}
+
+impl LedgerSource for PartialSource {
+    fn fetch(&self, keys: &[LedgerKey]) -> Result<FetchedBatch> {
+        let unknown: Vec<LedgerKey> = keys.iter().filter(|k| !self.known.contains_key(*k)).cloned().collect();
+        let mut entries: Vec<StoredEntry> = keys.iter().filter_map(|k| self.known.get(k).cloned().flatten()).collect();
+        let mut served_at_ledger = self.ledger;
+        if !unknown.is_empty() {
+            let batch = self.base.fetch(&unknown)?;
+            served_at_ledger = batch.served_at_ledger;
+            entries.extend(batch.entries);
+        }
+        Ok(FetchedBatch { served_at_ledger, entries })
+    }
+
+    fn describe(&self) -> String {
+        format!("snapshot at ledger {} ({} known keys) over {}", self.ledger, self.known.len(), self.base.describe())
+    }
+
+    fn known(&self) -> Vec<(LedgerKey, Option<StoredEntry>)> {
+        self.known.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    fn max_batch(&self) -> usize {
+        self.base.max_batch()
     }
 }
 
@@ -235,6 +315,22 @@ pub struct LedgerStats {
     pub local_answers: u32,
 }
 
+/// Everything the session knows of its ledger: what every key it read,
+/// wrote or removed holds now (see [`ForkedLedger::state`]).
+#[derive(Clone, Debug)]
+pub struct LedgerState {
+    pub entries: Vec<StoredEntry>,
+    /// Keys known to be absent: removed, deleted, or read and not found.
+    pub absent: Vec<LedgerKey>,
+    /// Whether the base holds its whole ledger in memory, so `entries`
+    /// include every entry it has and a key in neither list is absent. When
+    /// `false`, such a key is only known by reading the base.
+    pub complete: bool,
+    /// Every account this session or one it continues wrote, with what the
+    /// real network holds for it (`None`: no such account there).
+    pub network_accounts: Vec<(LedgerKey, Option<StoredEntry>)>,
+}
+
 /// The session's writes and overrides at one moment, to return to later.
 #[derive(Clone)]
 pub struct LedgerCheckpoint {
@@ -244,10 +340,13 @@ pub struct LedgerCheckpoint {
 
 pub struct ForkedLedger {
     base: Box<dyn LedgerSource>,
-    fork_ledger: u32,
+    fork_ledger: Cell<u32>,
     base_cache: RefCell<BTreeMap<LedgerKey, Option<StoredEntry>>>,
     overlay: RefCell<BTreeMap<LedgerKey, Option<StoredEntry>>>,
     overrides: RefCell<Vec<Override>>,
+    /// Accounts whose base value a session this one continues wrote, with
+    /// what the real network holds for them.
+    network_accounts: RefCell<BTreeMap<LedgerKey, Option<StoredEntry>>>,
     fetches: RefCell<Vec<FetchRecord>>,
     fetch_calls: Cell<u32>,
     local_answers: Cell<u32>,
@@ -260,10 +359,11 @@ impl ForkedLedger {
     pub fn new(base: Box<dyn LedgerSource>, fork_ledger: u32) -> Self {
         Self {
             base,
-            fork_ledger,
+            fork_ledger: Cell::new(fork_ledger),
             base_cache: Default::default(),
             overlay: Default::default(),
             overrides: Default::default(),
+            network_accounts: Default::default(),
             fetches: Default::default(),
             fetch_calls: Default::default(),
             local_answers: Default::default(),
@@ -273,7 +373,13 @@ impl ForkedLedger {
 
     /// The last closed ledger of the base when the session forked.
     pub fn fork_ledger(&self) -> u32 {
-        self.fork_ledger
+        self.fork_ledger.get()
+    }
+
+    /// The base is a session's exported state over a network that session
+    /// forked at `ledger`: drift is judged against that ledger.
+    pub fn set_fork_ledger(&self, ledger: u32) {
+        self.fork_ledger.set(ledger);
     }
 
     pub fn describe_base(&self) -> String {
@@ -365,8 +471,22 @@ impl ForkedLedger {
         })
     }
 
+    /// The base is a session's exported state: `accounts` are the ones that
+    /// session wrote, with what the real network holds for them.
+    pub fn set_network_accounts(&self, accounts: Vec<(LedgerKey, Option<StoredEntry>)>) {
+        *self.network_accounts.borrow_mut() = accounts.into_iter().collect();
+    }
+
+    /// The account on the real network: the base's value, unless a session
+    /// this one continues wrote that.
     pub fn base_account(&self, id: &AccountId) -> Result<Option<AccountEntry>> {
-        Ok(match self.base(&account_key(id))? {
+        let key = account_key(id);
+        let recorded = self.network_accounts.borrow().get(&key).cloned();
+        let on_network = match recorded {
+            Some(entry) => entry,
+            None => self.base(&key)?,
+        };
+        Ok(match on_network {
             Some(StoredEntry { entry: LedgerEntry { data: LedgerEntryData::Account(a), .. }, .. }) => Some(a),
             _ => None,
         })
@@ -510,21 +630,54 @@ impl ForkedLedger {
         self.fetches.borrow().clone()
     }
 
-    /// Fetched entries the base had modified after the fork ledger: the fork
-    /// is not one consistent snapshot for these keys.
+    /// The fetches the network answered: every one but those for keys the
+    /// base holds in memory.
+    pub fn network_fetches(&self) -> Vec<FetchRecord> {
+        let held: BTreeSet<LedgerKey> = self.base.known().into_iter().map(|(key, _)| key).collect();
+        self.fetches.borrow().iter().filter(|f| !held.contains(&f.key)).cloned().collect()
+    }
+
+    /// Entries the network had modified after the fork ledger when it served
+    /// them: the fork is not one consistent snapshot for these keys.
     pub fn drift(&self) -> Vec<FetchRecord> {
-        self.fetches
-            .borrow()
-            .iter()
-            .filter(|f| f.found && f.last_modified > self.fork_ledger)
-            .cloned()
-            .collect()
+        self.network_fetches().into_iter().filter(|f| f.found && f.last_modified > self.fork_ledger.get()).collect()
     }
 
     /// Every base entry fetched so far: enough to replay the session offline
     /// from a snapshot (keys never fetched read as absent there).
     pub fn base_entries(&self) -> Vec<StoredEntry> {
         self.base_cache.borrow().values().flatten().cloned().collect()
+    }
+
+    /// The ledger as the session sees it now: the base's entries (all of
+    /// them when the base holds its whole ledger, else the ones it holds in
+    /// memory and the ones read), with every session write and removal on
+    /// top.
+    pub fn state(&self) -> Result<LedgerState> {
+        let mut network_accounts = self.network_accounts.borrow().clone();
+        let written: Vec<LedgerKey> =
+            self.overlay.borrow().keys().filter(|k| matches!(k, LedgerKey::Account(_)) && !network_accounts.contains_key(*k)).cloned().collect();
+        for key in written {
+            let on_network = self.base(&key)?;
+            network_accounts.insert(key, on_network);
+        }
+        let mut known = BTreeMap::<LedgerKey, Option<StoredEntry>>::new();
+        let all = self.base.entries();
+        let complete = all.is_some();
+        for e in all.into_iter().flatten() {
+            known.insert(ledger_entry_to_ledger_key(&e.entry)?, Some(e));
+        }
+        known.extend(self.base.known());
+        known.extend(self.base_cache.borrow().iter().map(|(k, v)| (k.clone(), v.clone())));
+        known.extend(self.overlay.borrow().iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut state = LedgerState { entries: vec![], absent: vec![], complete, network_accounts: network_accounts.into_iter().collect() };
+        for (key, value) in known {
+            match value {
+                Some(e) => state.entries.push(e),
+                None => state.absent.push(key),
+            }
+        }
+        Ok(state)
     }
 
     pub fn stats(&self) -> LedgerStats {

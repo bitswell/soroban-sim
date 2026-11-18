@@ -33,9 +33,9 @@ and signer adapter.
 | `--fork-mode head\|checkpoint` | `head` (default) reads RPC's latest ledger lazily; `checkpoint` pins one ledger and rolls every read back to it (see "Fork modes"). |
 | `--fork-ledger N` | The ledger a `checkpoint` fork pins (default: the latest when it opens). |
 | `--network-passphrase P` | Checked against the RPC's `getNetwork`. |
-| `--snapshot FILE` | Fork a snapshot file instead (offline, reproducible). |
+| `--snapshot FILE` | Fork a snapshot file instead (offline, reproducible), including a session state `fork_exportSnapshot` exported (see [`rpc-facade.md`, "Snapshots"](rpc-facade.md#snapshots)). |
 | `--protocol N` | The host protocol (29 or 30). Default: the network's; offline, the oldest host that runs the snapshot and every contract the plan uploads from a file. |
-| `--save-snapshot FILE` | Save every base entry the run read, for offline replays. |
+| `--save-snapshot FILE` | Save every base entry the run read (a version-1 snapshot), for offline replays. Keys the run did not read are absent there. Refused when `--snapshot` is a session's export (`fork_exportSnapshot`), whose entries are that session's and not a network's. |
 | `--wasm-dir DIR` | Where `upload` steps find Wasm by hash (repeatable). |
 | `--differential` | Compare each prepared step with RPC `simulateTransaction`. |
 | `--var NAME=VALUE` | Set a plan variable (repeatable). |

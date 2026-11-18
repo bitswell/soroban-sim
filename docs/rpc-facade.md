@@ -47,10 +47,11 @@ transaction and per `fork_*` call.
 | `--fork mainnet\|testnet\|URL` | The network to fork. |
 | `--fork-mode head\|checkpoint`, `--fork-ledger N` | Read the network lazily at its latest ledger (default), or pin one ledger and roll every read back to it ([`session.md`, "Fork modes"](session.md#fork-modes)). |
 | `--network-passphrase P` | Checked against the RPC's `getNetwork`. |
-| `--snapshot FILE` | Fork a snapshot file instead (offline). |
+| `--snapshot FILE` | Fork a snapshot file instead: offline, unless it is a partial export of a live fork (see [Snapshots](#snapshots)). |
 | `--protocol N` | The host protocol (29 or 30). Default: the network's or the snapshot's. |
 | `--host H`, `--port N` | Where to listen (default `127.0.0.1:8000`). Off loopback, anyone who can reach it can read the fork and call `fork_*`. |
 | `--report PREFIX` | Rewrite `PREFIX.json` and `PREFIX.md` after every state change. |
+| `--save-snapshot FILE` | Keep every base entry the session read in `FILE` (version 1, as `session run --save-snapshot` writes), rewritten whenever it reads more, so a later run forks the same base offline. Refused when `--snapshot` is a session's export: its entries are that session's, not a network's, so save such a session with `fork_exportSnapshot`. |
 | `--clock wall\|step` | How ledger time moves on from the fork's close time (default `wall`): at the pace of this machine's clock, or by a fixed step per ledger (see [The clock](#the-clock)). |
 | `--seconds-per-ledger N` | The close-time step (default 5) of each ledger `fork_advanceLedgers` and `fork_setTime` close and of the first ledger after the fork; with `--clock step`, of each transaction's ledger too. |
 | `--allow-real-signers` | Accept envelopes a signer of the real network signed (see Safety). |
@@ -108,6 +109,7 @@ and each call that changes state is a step:
 | `fork_allowRealSigners` | `allow` | Apply (or again refuse) envelopes a signer of the real network signed, from now on. A step records the change; the report still fails on any such signature on mainnet. |
 | `fork_steps` | | Every step in order: its report row, what it changed (each entry before and after), its envelope's authorization entries, and whether the debugger can trace it. |
 | `fork_debugContext` | `step` | What a debugger needs to trace a transaction step again: its host function and source, the ledger it applied in, and its footprint's entries just before it. |
+| `fork_exportSnapshot` | | The session's state as a version-2 snapshot file (the JSON document itself). `serve --snapshot` and `session run --snapshot` continue from it (see [Snapshots](#snapshots)). Changes nothing. |
 
 The clock cannot move back. To go back, revert to a snapshot. In the report,
 reverted steps stay listed and are marked as reverted. The fees, accounts and
@@ -135,6 +137,16 @@ snapshot's time, and a transaction's `minTime` set from the wall clock is
 still in the future. A revert undoes ledgers, but the next ledger still closes
 no earlier than the fork's close time plus the uptime.
 
+A server opened from an exported session (see [Snapshots](#snapshots)) goes
+on where the exporting server's ledger time stood, on either clock: its next
+ledger closes at the export's next close time. With `--clock wall`, ledger
+time then counts on from the time the exporting server's wall clock had
+reached (`next.wall_clock`), so a server opened from a setup's export keeps
+the setup's time, and time moved ahead with `fork_setTime` holds until the
+clock catches up, as it would have on the exporting server. An export of a
+`--clock step` server has no wall time, and a wall clock counts on from its
+last ledger's close time, as from any fork's.
+
 With `--clock step`, every ledger, a transaction's included, closes
 `--seconds-per-ledger` after the last, starting from the fork's close time. The
 same calls give the same close times on every run, as in `session run`, which
@@ -143,6 +155,90 @@ transactions come faster than one per step. From a fork of the latest ledger
 at the default 5 s, the 61st ledger closes 305 s after the fork, so a client
 that sets a 300 s time bound from the wall clock is refused `txTOO_LATE` after
 about 60 quick transactions.
+
+## Snapshots
+
+A snapshot file is a ledger to fork: `serve --snapshot FILE` and
+`session run --snapshot FILE` read both versions of the format.
+
+- **`soroban-sim-snapshot/1`**: a fork point (ledger, close time, protocol,
+  base fee, base reserve), the passphrase, and base entries. A key the file
+  does not hold reads as absent. `session run --save-snapshot` and
+  `serve --save-snapshot` write it with every base entry the session read: an
+  offline rerun reads the same base, without the session's own changes.
+  Neither writes it over a version-2 export (a session's state is saved with
+  `fork_exportSnapshot`).
+- **`soroban-sim-snapshot/2`**: a session's state, to continue from exactly
+  where it stood. `fork_exportSnapshot` returns it. Besides version 1's
+  fields it holds:
+  - `entries`: every entry the session knows, with everything it changed on
+    top (transactions, `fork_*` overrides);
+  - `absent`: keys known to be absent, removals and deletions included, so a
+    removed entry stays removed;
+  - `fork`: the last closed ledger and its close time; `next`: the ledger the
+    next transaction applies in and its close time (kept whatever `--clock`
+    and `--seconds-per-ledger` the next server runs with) and, from a server
+    on a wall clock, `wall_clock`, the ledger time that clock had reached
+    (see [The clock](#the-clock)); `header`: the last closed ledger's
+    header, so `getLatestLedger` answers the same;
+  - `history`: how many transactions the session applied and submitted,
+    which seed the host's PRNG for the next one;
+  - `network_accounts`: every account the session wrote (overrides,
+    transaction sources), with its value on the real network or none when
+    the network has no such account;
+  - `unread`: what a key in neither `entries` nor `absent` holds (below).
+
+A server started from an export answers every ledger read as the one that
+wrote it did (`getLatestLedger`, `getLedgerEntries`, `getNetwork`,
+`getFeeStats`, the clock in `fork_info`), simulates the same with the same
+fees, and applies the next transaction to the same result. The
+[safety check](#safety) judges the same too: it reads an account's real
+signers from `network_accounts`, so a throwaway signer or an account the
+setup created stays a throwaway on the new server, and a real key the setup
+replaced is still refused on a mainnet fork. An export of that server carries
+the record on. What it does not
+carry is history: earlier transactions (`getTransaction` answers `NOT_FOUND`),
+their events, the steps and report, `fork_snapshot` ids, and the
+`allowRealSigners` setting (a command-line flag). The `oldestLedger` that
+`getHealth` and `getTransaction` report is the new server's fork point.
+
+**Keys never read.** What a session never read depends on its base:
+
+- A snapshot base holds its whole ledger, so the export includes every entry
+  of it, read or not, and says `"unread": "absent"`. The file is
+  self-contained: offline, and a key it does not list is absent, as it was.
+  No network is read, so the report of a server started from it lists no
+  drift.
+- A live fork (`--fork`) was read lazily, so the export holds only the keys
+  the session read or wrote and says `"unread": "base"`, with the RPC, the
+  network ledger the session forked at (`fork_ledger`) and a checkpoint
+  fork's pinned ledger under `base`. The file is partial: a
+  server started from it still reads every key it does not list from that
+  network (`fork_info`'s `base` begins `partial snapshot`), checking the
+  network's passphrase and protocol first. Keys the file lists, present or
+  absent, are never read again, and an export of that server lists them all
+  again. The report's drift section still judges what is read from the
+  network against `fork_ledger`, the ledger the first session forked at. A
+  partial file that names no base is refused rather than read as if its
+  unread keys were absent. To get a self-contained export, start the session
+  from a snapshot, such as a captured one.
+
+**Capturing a network.** `soroban-sim snapshot capture --network URL --out
+FILE` reads a network's settings (every `ConfigSetting` entry) and its latest
+ledger header, and writes a self-contained version-2 snapshot: the network's
+configuration, passphrase and protocol over an otherwise empty ledger, such as
+a fresh local network's. It only reads; nothing runs against the network.
+
+So a setup can run once and every test start from its result, each test with
+its own server:
+
+```sh
+soroban-sim snapshot capture --network http://localhost:8000/rpc --out network.json
+soroban-sim serve --snapshot network.json --port 0      # run the setup against it, then
+curl -s "$URL" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"fork_exportSnapshot"}' | jq .result > setup.json
+soroban-sim serve --snapshot setup.json --port 0        # one per test, in parallel
+```
 
 ## Safety
 

@@ -16,7 +16,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use soroban_sim_cli::cli::{Cli, Command, ReplayCommand, SessionCommand};
+use soroban_sim_cli::cli::{Cli, Command, ReplayCommand, SessionCommand, SnapshotCommand};
 use soroban_sim_cli::plan::Plan;
 use soroban_sim_cli::replay::ReplayFixture;
 use soroban_sim_cli::rpc::RpcClient;
@@ -124,6 +124,7 @@ fn evidence(cli: &Cli) -> Result<Evidence> {
             }
         }
         Command::Replay(ReplayCommand::Fetch(args)) => network(base_from_name(&args.network, None)?)?,
+        Command::Snapshot(SnapshotCommand::Capture(args)) => network(base_from_name(&args.network, None)?)?,
         Command::Replay(ReplayCommand::Run(args)) => {
             let mut protocols = BTreeSet::new();
             for path in &args.fixtures {

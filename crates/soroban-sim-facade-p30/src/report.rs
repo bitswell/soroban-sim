@@ -520,6 +520,7 @@ pub fn build_report(s: &Session, ctx: ReportContext) -> Report {
         }
     }
     let fetches = s.ledger().fetches();
+    let network_fetches = s.ledger().network_fetches();
     let stats = s.ledger().stats();
     let drift = s.ledger().drift();
     let mut failures = ctx.failures;
@@ -556,9 +557,9 @@ pub fn build_report(s: &Session, ctx: ReportContext) -> Report {
         accounts,
         diff: DiffSummary { total: diff.len(), by_type, entries },
         drift: DriftReport {
-            fork_ledger: fork.ledger_seq,
-            served_at_min: fetches.iter().map(|f| f.served_at_ledger).min(),
-            served_at_max: fetches.iter().map(|f| f.served_at_ledger).max(),
+            fork_ledger: s.ledger().fork_ledger(),
+            served_at_min: network_fetches.iter().map(|f| f.served_at_ledger).min(),
+            served_at_max: network_fetches.iter().map(|f| f.served_at_ledger).max(),
             modified_after_fork: drift.iter().map(|f| DriftEntry { key: describe_key(&f.key), last_modified: f.last_modified, served_at: f.served_at_ledger }).collect(),
         },
         fetch: FetchStats {

@@ -16,8 +16,8 @@ the forked network's protocol (`getLatestLedger`), or offline the oldest host
 that runs the snapshot and the plan's contract Wasm (`contractenvmetav0`);
 `--protocol N` overrides both.
 
-Commands include `session check`, `session run`, `replay fetch`, `replay run` and
-`serve`. See the [session](https://github.com/theahaco/soroban-sim/blob/main/docs/session.md),
+Commands include `session check`, `session run`, `replay fetch`, `replay run`,
+`serve` and `snapshot capture`. See the [session](https://github.com/theahaco/soroban-sim/blob/main/docs/session.md),
 [replay](https://github.com/theahaco/soroban-sim/blob/main/docs/replay.md) and
 [RPC facade](https://github.com/theahaco/soroban-sim/blob/main/docs/rpc-facade.md) guides.
 
