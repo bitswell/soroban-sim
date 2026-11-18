@@ -101,6 +101,51 @@ jobs:
       - name: Demo and framework browser tests
         run: pnpm --filter @theahaco/soroban-sign-dialog test:browser
 
+  vitest-harness:
+    runs-on: ubuntu-latest
+    env:
+      # stellar/quickstart:testing (protocol 30, the image the bundled
+      # local-network snapshot was captured from), pinned by digest.
+      QUICKSTART: stellar/quickstart@sha256:d66ab2ea3ac665739e595ab0cebca54619c008485fab547d220bc43b082d13d7
+    steps:
+      - uses: actions/checkout@v6
+      - name: Start a local network (warms up while the CLI builds)
+        run: docker run -d --rm -p 127.0.0.1:8000:8000 --name quickstart "$QUICKSTART" --local --enable rpc
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vitest-harness
+      - run: cargo build --release -p soroban-sim-cli --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.11.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - name: Type check
+        run: pnpm --filter @theahaco/soroban-sim-vitest check
+      - name: Example, isolation and cache suites on soroban-sim
+        run: pnpm --filter @theahaco/soroban-sim-vitest test
+      - name: The same suites again, setup from the cache
+        run: pnpm --filter @theahaco/soroban-sim-vitest test
+      - name: Wait for the local network's friendbot
+        run: |
+          for _ in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8000/friendbot' || true)
+            # friendbot answers 400 (no addr) once it is up; 502 while it starts
+            if [ "$code" = 400 ] || [ "$code" = 200 ]; then exit 0; fi
+            sleep 2
+          done
+          docker logs quickstart | tail -50
+          exit 1
+      - name: The same suites against the local network
+        run: pnpm --filter @theahaco/soroban-sim-vitest test:local
+      - name: Local network logs
+        if: failure()
+        run: docker logs quickstart 2>&1 | tail -200
+
   milestone-0:
     runs-on: macos-latest
     steps:
