@@ -175,6 +175,7 @@ describe("SorobanSession", () => {
   it("knows which bodies can change a session", () => {
     expect(bodyChangesSession('{"method":"getLedgerEntries"}')).toBe(false);
     expect(bodyChangesSession('[{"method":"getNetwork"},{"method":"fork_steps"}]')).toBe(false);
+    expect(bodyChangesSession('{"method":"fork_exportSnapshot"}')).toBe(false);
     expect(bodyChangesSession('{"method":"sendTransaction"}')).toBe(true);
     expect(bodyChangesSession('[{"method":"getNetwork"},{"method":"fork_revert"}]')).toBe(true);
     expect(bodyChangesSession("not json")).toBe(false);

@@ -5,7 +5,7 @@
 //! The request handling is `soroban-sim-facade`, the same code the browser
 //! session answers its virtual RPC with. This module adds what a command line
 //! needs: forking an RPC or snapshot base, HTTP ([`http`]), progress lines,
-//! and the report files rewritten after every state change.
+//! and the report and `--save-snapshot` files rewritten as the session changes.
 //!
 //! The facade keeps the real network passphrase, so every signature it checks
 //! is a real one, and an envelope a real key signed is valid on the real
@@ -27,6 +27,7 @@ pub use soroban_sim_facade::RpcError;
 
 use crate::rpc::RpcClient;
 use crate::run::{fork_base, progress_line, Base};
+use crate::snapshot::SnapshotFile;
 
 pub struct ServeConfig {
     pub base: Base,
@@ -44,6 +45,9 @@ pub struct ServeConfig {
     pub progress: bool,
     /// One line on stderr per call, reads included.
     pub verbose: bool,
+    /// Keep a version-1 snapshot of every base entry read here, rewritten
+    /// whenever the session reads more (`session run --save-snapshot`).
+    pub save_snapshot: Option<PathBuf>,
 }
 
 pub struct Facade {
@@ -54,6 +58,9 @@ pub struct Facade {
     verbose: bool,
     /// Steps already printed and written to the report files.
     seen: usize,
+    save_snapshot: Option<PathBuf>,
+    /// Base keys read when the snapshot file was last written.
+    saved_reads: Option<u32>,
 }
 
 impl Facade {
@@ -65,9 +72,9 @@ impl Facade {
             }
             options.seconds_per_ledger = s;
         }
-        let forked = fork_base(config.base, &options)?;
+        let forked = fork_base(config.base, &options, config.save_snapshot.is_some())?;
         let session = (forked.fresh)().context("forking the network")?;
-        let inner = soroban_sim_facade::Facade::new(
+        let mut inner = soroban_sim_facade::Facade::new(
             session,
             FacadeConfig {
                 network_name: forked.network_name,
@@ -79,7 +86,24 @@ impl Facade {
                 wall_clock: config.wall_clock,
             },
         );
-        Ok(Self { inner, rpc: forked.rpc, report_prefix: config.report, progress: config.progress, verbose: config.verbose, seen: 0 })
+        inner.set_snapshot_base(forked.snapshot_base);
+        let mut facade = Self {
+            inner,
+            rpc: forked.rpc,
+            report_prefix: config.report,
+            progress: config.progress,
+            verbose: config.verbose,
+            seen: 0,
+            save_snapshot: config.save_snapshot,
+            saved_reads: None,
+        };
+        facade.write_snapshot()?;
+        Ok(facade)
+    }
+
+    /// The session's state as a snapshot file (`fork_exportSnapshot`).
+    pub fn export_snapshot(&self) -> Result<SnapshotFile> {
+        self.inner.export_snapshot()
     }
 
     /// The URL clients reach the facade at, for the report.
@@ -156,6 +180,9 @@ impl Facade {
             self.inner.set_rpc_counters(rpc.calls(), rpc.throttled());
         }
         let steps = self.inner.step_reports();
+        if let Err(e) = self.write_snapshot() {
+            eprintln!("warning: {e:#}");
+        }
         if steps.len() == self.seen {
             return;
         }
@@ -168,6 +195,20 @@ impl Facade {
         if let Err(e) = self.write_report() {
             eprintln!("warning: {e:#}");
         }
+    }
+
+    /// Rewrite the `--save-snapshot` file when the session read more of the
+    /// base.
+    fn write_snapshot(&mut self) -> Result<()> {
+        let Some(path) = &self.save_snapshot else { return Ok(()) };
+        let session = self.inner.session();
+        let reads = session.ledger().stats().keys_fetched;
+        if self.saved_reads == Some(reads) {
+            return Ok(());
+        }
+        SnapshotFile::new(self.inner.passphrase(), session.fork_point(), &session.ledger().base_entries())?.save(path)?;
+        self.saved_reads = Some(reads);
+        Ok(())
     }
 
     fn write_report(&self) -> Result<Vec<String>> {

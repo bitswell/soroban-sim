@@ -9,7 +9,8 @@
 //!      ── sendTransaction ──────▶ TxValidator, then Session::submit (one ledger per transaction)
 //!      ── getTransaction ───────▶ the stored result and a rebuilt V4 meta
 //!      ── getLedgerEntries ─────▶ the session's view: overlay, then the lazily read base
-//!      ── fork_* ───────────────▶ overrides, the clock, snapshots, the steps, the report
+//!      ── fork_* ───────────────▶ overrides, the clock, snapshots, the steps, the report,
+//!                                 the state as a snapshot file (fork_exportSnapshot)
 //! ```
 //!
 //! The facade keeps the real network passphrase, so every signature it checks
@@ -24,6 +25,7 @@
 
 pub mod deferred;
 pub mod report;
+pub mod snapshot;
 pub mod tx;
 
 pub use deferred::{open, DeferredBase, Opened};
@@ -51,6 +53,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::rc::Rc;
 
+use snapshot::{SnapshotBase, SnapshotFile};
 use report::{
     build_report, describe_key, hex, session_fidelity, tx_report, NetworkInfo, PlanInfo, Report, ReportContext,
     StepReport, SAFETY_NOTE,
@@ -131,6 +134,7 @@ pub const READ_ONLY_METHODS: &[&str] = &[
     "fork_steps",
     "fork_debugContext",
     "fork_report",
+    "fork_exportSnapshot",
 ];
 
 /// A transaction the facade applied (or applied and saw fail).
@@ -216,6 +220,9 @@ pub struct Facade {
     /// The embedder's base RPC counters, for the report.
     rpc_calls: u32,
     throttled_retries: u32,
+    /// The network a lazily read base reads from, recorded in exported
+    /// snapshots (see [`Facade::set_snapshot_base`]).
+    snapshot_base: Option<SnapshotBase>,
 }
 
 impl Facade {
@@ -242,6 +249,7 @@ impl Facade {
             replayable: vec![],
             rpc_calls: 0,
             throttled_retries: 0,
+            snapshot_base: None,
         }
     }
 
@@ -266,6 +274,19 @@ impl Facade {
     pub fn set_rpc_counters(&mut self, calls: u32, throttled_retries: u32) {
         self.rpc_calls = calls;
         self.throttled_retries = throttled_retries;
+    }
+
+    /// The RPC a lazily read base reads from. An exported snapshot of such a
+    /// base is partial, and names this network for the keys it never read.
+    pub fn set_snapshot_base(&mut self, base: Option<SnapshotBase>) {
+        self.snapshot_base = base;
+    }
+
+    /// The session's state as a snapshot file (version 2): a session forked
+    /// from it answers every ledger read as this one does now and applies
+    /// the next transaction the same way.
+    pub fn export_snapshot(&self) -> Result<SnapshotFile> {
+        SnapshotFile::export(&self.session, &self.passphrase, self.closed, self.wall_clock_time(), &self.header, self.snapshot_base.as_ref())
     }
 
     fn is_mainnet(&self) -> bool {
@@ -376,6 +397,7 @@ impl Facade {
             "fork_steps" => self.fork_steps(),
             "fork_debugContext" => self.fork_debug_context(&p),
             "fork_report" => self.fork_report(),
+            "fork_exportSnapshot" => self.export_snapshot().and_then(|s| Ok(serde_json::to_value(s)?)).map_err(RpcError::internal),
             _ => Err(RpcError { code: RpcError::METHOD_NOT_FOUND, message: format!("method {method:?} not found (soroban-sim facade)") }),
         }
     }
@@ -407,12 +429,20 @@ impl Facade {
         h
     }
 
-    /// With a wall clock, the next ledger closes no earlier than the fork's
-    /// close time plus the time since the facade opened. Every call starts
-    /// here, so a simulation, a transaction and `fork_info` see the same time.
+    /// The ledger time the wall clock has reached: the fork's close time
+    /// plus the time since the facade opened. A session resumed from an
+    /// export counts on from the time the exporting facade's clock had
+    /// reached instead ([`Session::wall_clock_start`]).
+    fn wall_clock_time(&self) -> Option<u64> {
+        let (clock, opened) = self.wall_clock.as_ref()?;
+        Some(self.session.wall_clock_start() + clock().saturating_sub(*opened))
+    }
+
+    /// With a wall clock, the next ledger closes no earlier than the time it
+    /// has reached. Every call starts here, so a simulation, a transaction
+    /// and `fork_info` see the same time.
     fn follow_wall_clock(&mut self) {
-        if let Some((clock, opened)) = &self.wall_clock {
-            let now = self.session.fork_point().close_time + clock().saturating_sub(*opened);
+        if let Some(now) = self.wall_clock_time() {
             if now > self.session.ledger_info().timestamp {
                 self.session.set_close_time(now);
             }

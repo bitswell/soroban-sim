@@ -67,6 +67,7 @@ fn config(base: PathBuf) -> RunConfig {
             ("fixtures".to_string(), repo().join("fixtures/contracts").display().to_string()),
         ]),
         progress: false,
+        save_snapshot: None,
     }
 }
 
@@ -75,7 +76,7 @@ fn the_fixture_rehearsal_passes_with_its_negative_controls() {
     let dir = scratch("rehearsal");
     let base = snapshot(&dir);
     let saved = dir.join("saved.snapshot.json");
-    let report = Runner::new(config(base)).unwrap().run(Some(&saved)).unwrap();
+    let report = Runner::new(RunConfig { save_snapshot: Some(saved.clone()), ..config(base) }).unwrap().run().unwrap();
 
     let failed: Vec<String> = report.steps.iter().filter(|s| !s.passed).map(|s| format!("{} {}: {} {}", s.index, s.name, s.outcome, s.detail)).collect();
     assert!(report.passed, "failures: {:#?}\nsteps: {failed:#?}", report.failures);
@@ -118,7 +119,7 @@ fn the_fixture_rehearsal_passes_with_its_negative_controls() {
     assert_eq!(json["steps"].as_array().unwrap().len(), report.steps.len());
 
     // The snapshot the run saved replays the same session offline.
-    let replay = Runner::new(config(saved)).unwrap().run(None).unwrap();
+    let replay = Runner::new(config(saved)).unwrap().run().unwrap();
     assert!(replay.passed, "{:#?}", replay.failures);
     let charged = |r: &soroban_sim_cli::report::Report| r.steps.iter().map(|s| s.tx.as_ref().map_or(0, |t| t.fee_charged)).collect::<Vec<_>>();
     assert_eq!(charged(&replay), charged(&report));
@@ -146,7 +147,7 @@ steps:
     let mut cfg = config(snapshot(&dir));
     cfg.plan_path = plan;
     cfg.keep_going = false;
-    let report = Runner::new(cfg).unwrap().run(None).unwrap();
+    let report = Runner::new(cfg).unwrap().run().unwrap();
     assert!(!report.passed);
     assert_eq!(report.steps[0].outcome, "rejected", "alice's master key is still the real one: {}", report.steps[0].detail);
     assert_eq!(report.steps[1].outcome, "not run");
@@ -194,7 +195,7 @@ steps:
     .unwrap();
     let mut cfg = config(snapshot(&dir));
     cfg.plan_path = plan;
-    let report = Runner::new(cfg).unwrap().run(None).unwrap();
+    let report = Runner::new(cfg).unwrap().run().unwrap();
     assert!(report.passed, "{}: {:#?}", report.steps[0].detail, report.failures);
 }
 
@@ -269,9 +270,10 @@ fn the_two_step_example_runs_over_the_recorded_testnet_fork() {
         keep_going: false,
         vars: BTreeMap::new(),
         progress: false,
+        save_snapshot: None,
     })
     .unwrap()
-    .run(None)
+    .run()
     .unwrap();
     assert!(report.passed, "{:#?}", report.failures);
     let outcomes: Vec<&str> = report.steps.iter().map(|s| s.outcome.as_str()).collect();

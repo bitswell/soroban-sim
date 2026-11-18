@@ -26,7 +26,7 @@ use crate::plan::{
 use crate::checkpoint::{CheckpointLedger, CheckpointSource};
 use crate::report::*;
 use crate::rpc::{RpcClient, RpcSource};
-use crate::snapshot::SnapshotFile;
+use crate::snapshot::{SnapshotBase, SnapshotFile};
 use crate::differential;
 
 pub const MAINNET_RPC: &str = "https://mainnet.sorobanrpc.com";
@@ -88,6 +88,8 @@ pub struct RunConfig {
     pub vars: BTreeMap<String, String>,
     /// Print one line per step to stderr.
     pub progress: bool,
+    /// Save every base entry the run read here, as a version-1 snapshot.
+    pub save_snapshot: Option<PathBuf>,
 }
 
 pub fn network_preset(name: &str) -> Option<(&'static str, &'static str)> {
@@ -162,6 +164,7 @@ pub struct Runner {
     differential: bool,
     keep_going: bool,
     progress: bool,
+    save_snapshot: Option<PathBuf>,
     steps: Vec<StepReport>,
     differentials: Vec<DifferentialReport>,
     failures: Vec<String>,
@@ -183,7 +186,9 @@ impl Runner {
         if let Some(a) = plan.options.auth_expiration_ledgers {
             options.auth_expiration_ledgers = a;
         }
-        let Forked { network_name, passphrase, rpc, description: base_description, fresh, .. } = fork_base(base, &options)?;
+        // A partial snapshot reads RPC too, but its state is not the network's.
+        let rpc_fork = matches!(base, Base::Rpc { .. });
+        let Forked { network_name, passphrase, rpc, description: base_description, fresh, .. } = fork_base(base, &options, config.save_snapshot.is_some())?;
         let session = fresh().context("forking the network")?;
 
         let mut keys = BTreeMap::new();
@@ -201,7 +206,7 @@ impl Runner {
             },
             None => None,
         };
-        let differential = config.differential && rpc.is_some();
+        let differential = config.differential && rpc_fork;
         let mut runner = Self {
             plan,
             plan_path: config.plan_path,
@@ -220,6 +225,7 @@ impl Runner {
             differential,
             keep_going: config.keep_going,
             progress: config.progress,
+            save_snapshot: config.save_snapshot,
             steps: vec![],
             differentials: vec![],
             failures: vec![],
@@ -235,7 +241,7 @@ impl Runner {
     }
 
     /// Run setup and every step, then build the report.
-    pub fn run(mut self, save_snapshot: Option<&Path>) -> Result<Report> {
+    pub fn run(mut self) -> Result<Report> {
         let setup = std::mem::take(&mut self.plan.setup);
         for (i, o) in setup.iter().enumerate() {
             self.apply_override(o, &format!("setup #{}", i + 1)).with_context(|| format!("setup override #{}", i + 1))?;
@@ -288,7 +294,7 @@ impl Runner {
             }
             self.steps.push(report);
         }
-        if let Some(path) = save_snapshot {
+        if let Some(path) = &self.save_snapshot {
             let snap = SnapshotFile::new(&self.passphrase, self.session.fork_point(), &self.session.ledger().base_entries())?;
             snap.save(path)?;
         }
@@ -848,12 +854,17 @@ pub(crate) struct Forked {
     pub(crate) passphrase: String,
     pub(crate) rpc: Option<Rc<RpcClient>>,
     pub(crate) description: String,
-    /// The base's latest ledger header when it forked (RPC bases only).
+    /// The base's latest ledger header when it forked (RPC bases and
+    /// snapshots that carry one).
     pub(crate) header: Option<LedgerHeader>,
+    /// The network a lazily read base reads from, for exported snapshots.
+    pub(crate) snapshot_base: Option<SnapshotBase>,
     pub(crate) fresh: Box<dyn Fn() -> Result<Session>>,
 }
 
-pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> {
+/// Open `base`. `save_snapshot`: the base entries read will be saved as a
+/// version-1 snapshot, which a session's export cannot be the base of.
+pub(crate) fn fork_base(base: Base, options: &SessionOptions, save_snapshot: bool) -> Result<Forked> {
     match base {
         Base::Rpc { name, url, passphrase, mode } => {
             let rpc = Rc::new(RpcClient::new(&url));
@@ -888,26 +899,88 @@ pub(crate) fn fork_base(base: Base, options: &SessionOptions) -> Result<Forked> 
             let mut options = options.clone();
             options.network_passphrase = actual.clone();
             let description = source().describe();
+            let checkpoint = matches!(mode, ForkMode::Checkpoint(_)).then_some(header.ledger_seq);
             Ok(Forked {
                 network_name: name,
                 passphrase: actual,
                 description,
                 rpc: Some(rpc),
+                snapshot_base: Some(SnapshotBase { rpc: url, fork_ledger: header.ledger_seq, checkpoint }),
                 header: Some(header),
                 fresh: Box::new(move || Session::new(source(), fork.clone(), options.clone())),
             })
         }
         Base::Snapshot(path) => {
-            let snap = SnapshotFile::load(&path)?;
+            let snap = Rc::new(SnapshotFile::load(&path)?);
+            if save_snapshot && snap.is_export() {
+                bail!(
+                    "{} is a session's exported state, and --save-snapshot keeps only base entries: save a session opened from an export with fork_exportSnapshot instead",
+                    path.display()
+                );
+            }
             let mut options = options.clone();
             options.network_passphrase = snap.network_passphrase.clone();
+            let header = snap.ledger_header()?;
+            let mut description = format!("snapshot {} ({} entries)", path.display(), snap.entries.len());
+            let open = |base: Box<dyn LedgerSource>, snap: &SnapshotFile, options: &SessionOptions| -> Result<Session> {
+                let mut session = Session::new(base, snap.fork_point(), options.clone())?;
+                session.ledger().set_network_accounts(snap.network_accounts()?);
+                if let Some(base) = &snap.base {
+                    session.ledger().set_fork_ledger(base.fork_ledger);
+                }
+                if let Some(resume) = snap.resume() {
+                    session.resume(&resume)?;
+                }
+                Ok(session)
+            };
+            if !snap.is_partial() {
+                return Ok(Forked {
+                    network_name: format!("snapshot {}", path.display()),
+                    passphrase: snap.network_passphrase.clone(),
+                    description,
+                    rpc: None,
+                    header,
+                    snapshot_base: None,
+                    fresh: Box::new(move || open(Box::new(snap.source()?), &snap, &options)),
+                });
+            }
+            // Partial: the keys the file does not hold are read from the
+            // network the session that wrote it forked.
+            let base = snap.required_base().with_context(|| format!("opening {}", path.display()))?.clone();
+            let rpc = Rc::new(RpcClient::new(&base.rpc));
+            let actual = rpc.network_passphrase().with_context(|| format!("{} is a partial snapshot: keys it does not hold are read from {}", path.display(), base.rpc))?;
+            if actual != snap.network_passphrase {
+                bail!("{} is a partial snapshot of {:?}, but {} serves {actual:?}", path.display(), snap.network_passphrase, base.rpc);
+            }
+            let (network_protocol, network): (u32, Rc<dyn Fn() -> Box<dyn LedgerSource>>) = match base.checkpoint {
+                None => {
+                    let latest = rpc.latest_ledger().with_context(|| format!("opening {} over {}", path.display(), base.rpc))?;
+                    let rpc = rpc.clone();
+                    (latest.header.ledger_version, Rc::new(move || Box::new(RpcSource(rpc.clone()))))
+                }
+                Some(ledger) => {
+                    let pinned = CheckpointSource::open(rpc.clone(), Some(ledger))?;
+                    let source = pinned.source.clone();
+                    (pinned.header.ledger_version, Rc::new(move || Box::new(CheckpointLedger(source.clone()))))
+                }
+            };
+            if network_protocol != snap.fork.protocol_version {
+                bail!(
+                    "{} is a partial snapshot taken on protocol {}, but {} is on protocol {network_protocol}: the keys it does not hold cannot be read from it",
+                    path.display(),
+                    snap.fork.protocol_version,
+                    base.rpc
+                );
+            }
+            description = format!("partial {description}, over {}", network().describe());
             Ok(Forked {
-                network_name: format!("snapshot {}", path.display()),
+                network_name: format!("snapshot {} over {}", path.display(), base.rpc),
                 passphrase: snap.network_passphrase.clone(),
-                description: format!("snapshot {} ({} entries)", path.display(), snap.entries.len()),
-                rpc: None,
-                header: None,
-                fresh: Box::new(move || Session::new(Box::new(snap.source()?), snap.fork_point(), options.clone())),
+                description,
+                rpc: Some(rpc),
+                header,
+                snapshot_base: Some(base),
+                fresh: Box::new(move || open(Box::new(snap.partial_source(network())?), &snap, &options)),
             })
         }
     }

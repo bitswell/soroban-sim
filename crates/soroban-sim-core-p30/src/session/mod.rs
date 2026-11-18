@@ -27,8 +27,8 @@ mod validator;
 pub use applier::{Applied, Applier, Failure, Metrics, OpFailure, EXACT_APPLY};
 pub use ledger::{
     account_key, ed25519_account_id, new_account, strkey_ed25519, Change, DiffEntry, EntryState,
-    FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerCheckpoint, LedgerSource, LedgerStats,
-    Override, OverrideKind, StaticSource, StoredEntry,
+    FetchRecord, FetchedBatch, ForkView, ForkedLedger, LedgerCheckpoint, LedgerSource, LedgerState, LedgerStats,
+    Override, OverrideKind, PartialSource, StaticSource, StoredEntry,
 };
 pub use signers::{
     auth_payload, base64url, oz_digest, sign_auth_entry, webauthn_sig_data, AuthSigner,
@@ -303,6 +303,22 @@ pub struct SubmitOptions {
     pub prng_seed: Option<[u8; 32]>,
 }
 
+/// Where a session's clock and counters stand, to carry them into a new
+/// session forked from its exported state (the fork point is its last closed
+/// ledger): the next ledger's close time, the ledger time a wall clock had
+/// reached, and the transaction counts that seed the host's PRNG.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Resume {
+    pub next_close_time: u64,
+    /// The ledger time the other session's wall clock had reached, if it
+    /// kept one (see [`Session::wall_clock_start`]).
+    pub wall_clock: Option<u64>,
+    /// Transactions applied (successfully or not).
+    pub applied: u32,
+    /// Transactions submitted, rejected ones included.
+    pub submitted: u32,
+}
+
 /// Everything [`Session::restore`] needs to undo what happened since.
 #[derive(Clone)]
 pub struct SessionCheckpoint {
@@ -321,6 +337,10 @@ pub struct Session {
     limits: TxLimits,
     applier: Applier,
     log: Vec<TxRecord>,
+    /// Transactions submitted before the session resumed (see [`Resume`]).
+    submitted_before: u32,
+    /// See [`Session::wall_clock_start`].
+    wall_clock_start: u64,
 }
 
 /// The protocol the linked soroban-env-host implements.
@@ -365,7 +385,8 @@ impl Session {
         };
         network_config.fill_config_fields_in_ledger_info(&mut info);
         let applier = Applier::new(&network_config)?;
-        Ok(Self { ledger, info, fork, options, network_config, limits, applier, log: vec![] })
+        let wall_clock_start = fork.close_time;
+        Ok(Self { ledger, info, fork, options, network_config, limits, applier, log: vec![], submitted_before: 0, wall_clock_start })
     }
 
     pub fn ledger(&self) -> &ForkedLedger {
@@ -440,6 +461,38 @@ impl Session {
         Ok(())
     }
 
+    /// The clock and counters to [`Session::resume`] a session forked from
+    /// this one's exported state with. A session keeps no wall clock, so
+    /// `wall_clock` is `None`: the embedder that keeps one fills it in.
+    pub fn resume_point(&self) -> Resume {
+        Resume { next_close_time: self.info.timestamp, wall_clock: None, applied: self.applier.tx_index, submitted: self.submitted_before + self.log.len() as u32 }
+    }
+
+    /// Continue where another session stood (see [`Resume`]): the next
+    /// transaction applies at the same close time and draws the same PRNG
+    /// seed as it would have there. For a session that has run nothing yet.
+    pub fn resume(&mut self, r: &Resume) -> Result<()> {
+        if !self.log.is_empty() {
+            bail!("only a session that has run nothing can resume another");
+        }
+        self.info.timestamp = r.next_close_time;
+        if let Some(time) = r.wall_clock {
+            self.wall_clock_start = time;
+        }
+        self.applier.tx_index = r.applied;
+        self.submitted_before = r.submitted;
+        Ok(())
+    }
+
+    /// The ledger time a wall clock kept beside this session counts on from:
+    /// the fork's close time, or, in a session resumed from one that kept a
+    /// wall clock, the time that clock had reached. A session resumed from
+    /// one without (its fork point being the other's last closed ledger)
+    /// counts from that ledger's close time, as from any fork's.
+    pub fn wall_clock_start(&self) -> u64 {
+        self.wall_clock_start
+    }
+
     /// Set the close time of the ledger the next transaction applies in (for
     /// replaying a real ledger at its real time).
     pub fn set_close_time(&mut self, time: u64) {
@@ -501,7 +554,7 @@ impl Session {
         auth: RecordingInvocationAuthMode,
         adjustment: &SimulationAdjustmentConfig,
     ) -> Result<InvokeHostFunctionSimulationResult> {
-        let seed = prng_seed(b"simulate", self.info.sequence_number, self.log.len() as u32);
+        let seed = prng_seed(b"simulate", self.info.sequence_number, self.submitted_before + self.log.len() as u32);
         let result = simulate_invoke_host_function_op(
             Rc::new(ForkView(self.ledger.clone())),
             &self.network_config,

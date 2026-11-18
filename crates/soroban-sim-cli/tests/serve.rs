@@ -14,11 +14,12 @@ use soroban_env_host::xdr::{
     SequenceNumber, SorobanAuthorizationEntry, SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
     TimeBounds, TimePoint, TransactionMeta, TransactionResult, TransactionResultResult, TransactionV1Envelope, Uint256, WriteXdr,
 };
-use soroban_sim_cli::run::{contract_id, Base, MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
+use soroban_sim_cli::run::{contract_id, Base, ForkMode, RunConfig, Runner, MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
 use soroban_sim_cli::serve::{Facade, RpcError, ServeConfig};
 use soroban_sim_cli::snapshot::SnapshotFile;
 use soroban_sim_core::session::{host_protocol, network_id, new_account, transaction_hash, Ed25519Key, ForkPoint, StoredEntry};
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -85,6 +86,7 @@ fn facade(name: &str, passphrase: &str, allow_real_signers: bool) -> (Facade, Pa
         report: Some(dir.join("facade")),
         progress: false,
         verbose: false,
+        save_snapshot: None,
     })
     .unwrap();
     (f, dir)
@@ -282,7 +284,7 @@ fn fast_client(name: &str, wall: bool) -> Option<(i32, Value)> {
     let base = snapshot(&dir, TESTNET_PASSPHRASE);
     let now = Rc::new(Cell::new(FORK_TIME));
     let wall_clock = if wall { test_clock(&now) } else { None };
-    let mut f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock, allow_real_signers: false, report: None, progress: false, verbose: false }).unwrap();
+    let mut f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock, allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot: None }).unwrap();
     substitute_alice(&mut f);
     let id = upload_and_deploy(&mut f, TESTNET_PASSPHRASE);
     for i in 1..=100 {
@@ -319,7 +321,7 @@ fn wall_clock_facade(name: &str, opened: u64) -> (Facade, Rc<Cell<u64>>) {
     let dir = scratch(name);
     let base = snapshot(&dir, TESTNET_PASSPHRASE);
     let now = Rc::new(Cell::new(opened));
-    let f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock: test_clock(&now), allow_real_signers: false, report: None, progress: false, verbose: false }).unwrap();
+    let f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock: test_clock(&now), allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot: None }).unwrap();
     (f, now)
 }
 
@@ -569,7 +571,7 @@ fn json_rpc_over_http() {
     // The session is single-threaded: the server thread owns it.
     std::thread::spawn(move || {
         let (server, addr) = soroban_sim_cli::serve::http::bind("127.0.0.1", 0).unwrap();
-        let mut f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock: None, allow_real_signers: false, report: None, progress: false, verbose: false }).unwrap();
+        let mut f = Facade::open(ServeConfig { base: Base::Snapshot(base), seconds_per_ledger: None, wall_clock: None, allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot: None }).unwrap();
         tx.send(addr).unwrap();
         soroban_sim_cli::serve::http::serve(&mut f, &server);
     });
@@ -600,4 +602,503 @@ fn json_rpc_over_http() {
     assert_eq!(status(ureq::post(&url).set("content-type", "application/json; charset=utf-8").set("origin", "http://evil.example").send_string(body)), 403);
     assert_eq!(status(ureq::get(&url).set("origin", "http://evil.example").call()), 403);
     assert_eq!(status(ureq::post(&url).set("content-type", "Application/JSON; charset=utf-8").send_string(r#"{"jsonrpc":"2.0","id":1,"method":"getHealth"}"#)), 200);
+}
+
+// --- exported snapshots ---
+
+/// Accounts on the "network" besides alice, at the fork ledger.
+fn account_entry(key: &Ed25519Key, xlm: i64) -> StoredEntry {
+    StoredEntry {
+        entry: LedgerEntry {
+            last_modified_ledger_seq: FORK_LEDGER - 10,
+            data: LedgerEntryData::Account(new_account(key.account_id(), xlm * 10_000_000, FORK_LEDGER - 10)),
+            ext: LedgerEntryExt::V0,
+        },
+        live_until: None,
+    }
+}
+
+fn carol() -> Ed25519Key {
+    Ed25519Key::throwaway("carol")
+}
+
+fn dave() -> Ed25519Key {
+    Ed25519Key::throwaway("dave")
+}
+
+/// The test base plus carol's and dave's accounts.
+fn network_snapshot(dir: &Path) -> PathBuf {
+    let path = snapshot(dir, TESTNET_PASSPHRASE);
+    let mut snap = SnapshotFile::load(&path).unwrap();
+    let fork = snap.fork_point();
+    let mut entries = snap.present().unwrap();
+    entries.extend([account_entry(&carol(), 50), account_entry(&dave(), 70)]);
+    snap = SnapshotFile::new(TESTNET_PASSPHRASE, &fork, &entries).unwrap();
+    snap.save(&path).unwrap();
+    path
+}
+
+fn open(base: Base, save_snapshot: Option<PathBuf>) -> Facade {
+    Facade::open(ServeConfig { base, seconds_per_ledger: None, wall_clock: None, allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot }).unwrap()
+}
+
+/// A stand-in for a live network's RPC: a facade over `base`, over HTTP.
+fn network_rpc(base: PathBuf) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (server, addr) = soroban_sim_cli::serve::http::bind("127.0.0.1", 0).unwrap();
+        let mut f = open(Base::Snapshot(base), None);
+        tx.send(addr).unwrap();
+        soroban_sim_cli::serve::http::serve(&mut f, &server);
+    });
+    format!("http://{}", rx.recv().unwrap())
+}
+
+fn rpc_base(url: &str) -> Base {
+    Base::Rpc { name: url.into(), url: url.into(), passphrase: Some(TESTNET_PASSPHRASE.into()), mode: ForkMode::Head }
+}
+
+fn account(key: &Ed25519Key) -> String {
+    b64(&LedgerKey::Account(soroban_env_host::xdr::LedgerKeyAccount { account_id: key.account_id() }))
+}
+
+fn export(f: &mut Facade, path: &Path) -> Value {
+    let snap = ok(f, "fork_exportSnapshot", json!({}));
+    std::fs::write(path, serde_json::to_string(&snap).unwrap()).unwrap();
+    snap
+}
+
+/// What a client reads the same from two servers in the same state.
+fn reads(f: &mut Facade, keys: &[String]) -> Vec<Value> {
+    let mut info = ok(f, "fork_info", json!({}));
+    vec![
+        ok(f, "getLatestLedger", json!({})),
+        ok(f, "getNetwork", json!({})),
+        ok(f, "getFeeStats", json!({})),
+        ok(f, "getVersionInfo", json!({})),
+        ok(f, "getLedgerEntries", json!({ "keys": keys })),
+        json!({ "next": info["next"].take(), "latest": info["latestLedger"].take(), "latestTime": info["latestLedgerCloseTime"].take() }),
+    ]
+}
+
+#[test]
+fn an_exported_session_continues_identically() {
+    let dir = scratch("export");
+    let mut a = open(Base::Snapshot(network_snapshot(&dir)), None);
+    substitute_alice(&mut a);
+    let id = upload_and_deploy(&mut a, TESTNET_PASSPHRASE);
+    assert_eq!(return_value(&run(&mut a, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 2, 3))), ScVal::I32(5));
+    let bob = Ed25519Key::throwaway("bob");
+    ok(&mut a, "fork_setBalance", json!({ "account": bob.strkey(), "xlm": "100" }));
+    ok(&mut a, "fork_removeLedgerEntry", json!({ "key": account(&carol()), "label": "carol leaves" }));
+    ok(&mut a, "fork_advanceLedgers", json!({ "ledgers": 3, "seconds": 100 }));
+
+    let path = dir.join("state.json");
+    let snap = export(&mut a, &path);
+    assert_eq!(snap["format"], "soroban-sim-snapshot/2");
+    assert_eq!(snap["unread"], "absent", "a snapshot base holds its whole ledger");
+    assert!(snap["absent"].as_array().unwrap().contains(&json!(account(&carol()))), "the removal is explicit");
+
+    let mut b = open(Base::Snapshot(path.clone()), None);
+    // The next ledger's close time is the file's, whatever the clock's step.
+    let mut faster = Facade::open(ServeConfig { base: Base::Snapshot(path.clone()), seconds_per_ledger: Some(1), wall_clock: None, allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot: None }).unwrap();
+    assert_eq!(ok(&mut faster, "fork_info", json!({}))["next"], ok(&mut a, "fork_info", json!({}))["next"]);
+    let ScAddress::Contract(cid) = &id else { unreachable!() };
+    let instance = b64(&LedgerKey::ContractData(LedgerKeyContractData {
+        contract: ScAddress::Contract(cid.clone()),
+        key: ScVal::LedgerKeyContractInstance,
+        durability: soroban_env_host::xdr::ContractDataDurability::Persistent,
+    }));
+    // Read through the session, never read, removed, created by an override.
+    let keys = [account(&alice()), account(&dave()), account(&carol()), account(&bob), instance];
+    let got = reads(&mut b, &keys);
+    assert_eq!(got, reads(&mut a, &keys));
+    let entries = got[4]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 4, "carol stays removed: {entries:?}");
+    assert!(!entries.iter().any(|e| e["key"] == json!(account(&carol()))));
+
+    // The same follow-up simulates the same, fees included...
+    let seq = account_seq(&mut a, &alice()) + 1;
+    let follow_up = raw_tx(&alice(), seq, add(&id, 40, 2));
+    let sim = |f: &mut Facade| ok(f, "simulateTransaction", json!({ "transaction": b64(&envelope(&follow_up)) }));
+    let (sim_a, sim_b) = (sim(&mut a), sim(&mut b));
+    assert!(sim_a.get("error").is_none(), "{sim_a}");
+    assert_eq!(sim_a, sim_b);
+    // ...and one envelope applies the same on both.
+    let tx = prepare(&mut a, follow_up);
+    let envelope = signed(&tx, TESTNET_PASSPHRASE, &[&alice_throwaway()]);
+    let apply = |f: &mut Facade| {
+        let sent = ok(f, "sendTransaction", json!({ "transaction": envelope }));
+        assert_eq!(sent["status"], "PENDING", "{sent}");
+        let mut got = ok(f, "getTransaction", json!({ "hash": sent["hash"] }));
+        // The window of ledgers each server keeps starts at its own fork.
+        for field in ["oldestLedger", "oldestLedgerCloseTime"] {
+            got.as_object_mut().unwrap().remove(field);
+        }
+        got
+    };
+    let (applied_a, applied_b) = (apply(&mut a), apply(&mut b));
+    assert_eq!(applied_a["status"], "SUCCESS", "{applied_a}");
+    assert_eq!(return_value(&applied_a), ScVal::I32(42));
+    assert_eq!(applied_a, applied_b);
+    assert_eq!(reads(&mut a, &keys), reads(&mut b, &keys));
+
+    // And both now export the same ledger.
+    let (mut after_a, mut after_b) = (export(&mut a, &dir.join("a.json")), export(&mut b, &dir.join("b.json")));
+    for v in [&mut after_a, &mut after_b] {
+        v.as_object_mut().unwrap().remove("absent");
+    }
+    assert_eq!(after_a, after_b);
+}
+
+fn open_clocked(base: Base, wall_clock: Option<Rc<dyn Fn() -> u64>>) -> Facade {
+    Facade::open(ServeConfig { base, seconds_per_ledger: None, wall_clock, allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot: None }).unwrap()
+}
+
+/// Let `secs` of wall time pass on both servers' clocks, then send each the
+/// same transaction. Returns the time both closed it at.
+fn in_step(a: (&mut Facade, &Cell<u64>), b: (&mut Facade, &Cell<u64>), secs: u64, id: &ScAddress) -> u64 {
+    a.1.set(a.1.get() + secs);
+    b.1.set(b.1.get() + secs);
+    let x = run(a.0, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(id, 1, 2));
+    let y = run(b.0, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(id, 1, 2));
+    assert_eq!(close_time(&x), close_time(&y));
+    close_time(&x)
+}
+
+#[test]
+fn a_wall_clock_export_goes_on_from_the_time_its_clock_reached() {
+    let dir = scratch("export-wall-clock");
+    let opened = FORK_TIME + 1_000;
+    let now = Rc::new(Cell::new(opened));
+    let mut a = open_clocked(Base::Snapshot(network_snapshot(&dir)), test_clock(&now));
+    substitute_alice(&mut a);
+    let id = upload_and_deploy(&mut a, TESTNET_PASSPHRASE);
+    // The setup's ledgers close one step after the fork; the export comes
+    // 100 s later.
+    now.set(opened + 100);
+    let path = dir.join("wall.json");
+    let snap = export(&mut a, &path);
+    assert_eq!(snap["fork"]["close_time"], FORK_TIME + 5);
+    assert_eq!((snap["next"]["close_time"].as_u64(), snap["next"]["wall_clock"].as_u64()), (Some(FORK_TIME + 100), Some(FORK_TIME + 100)));
+
+    // A server opened from it a day later, on a wall clock, goes on from
+    // there at the clock's pace, as the server that wrote it does.
+    let later = opened + 86_400;
+    let b_now = Rc::new(Cell::new(later));
+    let mut b = open_clocked(Base::Snapshot(path.clone()), test_clock(&b_now));
+    let info = ok(&mut b, "fork_info", json!({}));
+    assert_eq!((info["clock"].as_str(), info["next"]["closeTime"].as_u64()), (Some("wall"), Some(FORK_TIME + 100)));
+    assert_eq!(in_step((&mut a, &now), (&mut b, &b_now), 30, &id), FORK_TIME + 130);
+
+    // Moved ahead of its clock, ledger time holds on both until the clock
+    // catches up.
+    ok(&mut a, "fork_setTime", json!({ "time": FORK_TIME + 1_000 }));
+    let ahead = dir.join("ahead.json");
+    export(&mut a, &ahead);
+    let c_now = Rc::new(Cell::new(later));
+    let mut c = open_clocked(Base::Snapshot(ahead), test_clock(&c_now));
+    assert_eq!(in_step((&mut a, &now), (&mut c, &c_now), 60, &id), FORK_TIME + 1_000);
+    assert_eq!(in_step((&mut a, &now), (&mut c, &c_now), 1_000, &id), FORK_TIME + 1_190);
+
+    // On a step clock the same file's next ledger closes at its close time,
+    // and each after it one step later.
+    let mut d = open_clocked(Base::Snapshot(path), None);
+    assert_eq!(ok(&mut d, "fork_info", json!({}))["clock"], "step");
+    let x = run(&mut d, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    let y = run(&mut d, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    assert_eq!((close_time(&x), close_time(&y)), (FORK_TIME + 100, FORK_TIME + 105));
+}
+
+#[test]
+fn a_step_clock_export_opens_on_a_wall_clock_at_its_last_ledger() {
+    let dir = scratch("export-step-clock");
+    let mut a = open(Base::Snapshot(network_snapshot(&dir)), None);
+    substitute_alice(&mut a);
+    let id = upload_and_deploy(&mut a, TESTNET_PASSPHRASE);
+    let path = dir.join("step.json");
+    let snap = export(&mut a, &path);
+    assert_eq!((snap["fork"]["close_time"].as_u64(), snap["next"]["close_time"].as_u64()), (Some(FORK_TIME + 10), Some(FORK_TIME + 15)));
+    assert!(snap["next"].get("wall_clock").is_none(), "a step clock reaches no wall time: {snap}");
+
+    // A wall clock counts on from the last closed ledger's close time, as
+    // from any fork's: the next ledger closes one step after it, and later
+    // ones at the clock's pace, whatever the date.
+    let now = Rc::new(Cell::new(FORK_TIME + 50_000));
+    let mut b = open_clocked(Base::Snapshot(path), test_clock(&now));
+    let x = run(&mut b, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    now.set(now.get() + 30);
+    let y = run(&mut b, TESTNET_PASSPHRASE, &alice(), &alice_throwaway(), add(&id, 1, 2));
+    assert_eq!((close_time(&x), close_time(&y)), (FORK_TIME + 15, FORK_TIME + 40));
+}
+
+#[test]
+fn an_export_keeps_real_and_throwaway_signers_apart_on_mainnet() {
+    let dir = scratch("export-signers");
+    let mut a = open(Base::Snapshot(snapshot(&dir, MAINNET_PASSPHRASE)), None);
+    substitute_alice(&mut a);
+    let bob = Ed25519Key::throwaway("bob");
+    ok(&mut a, "fork_setBalance", json!({ "account": bob.strkey(), "xlm": "100" }));
+    let upload = || HostFunction::UploadContractWasm(wasm().try_into().unwrap());
+
+    // What the safety check decides on a server, as the writing one decides it.
+    let judge = |f: &mut Facade| {
+        // Throwaway signers: the substitute on a real account, and the master
+        // key of an account the setup created.
+        for (source, signer) in [(alice(), alice_throwaway()), (bob.clone(), bob.clone())] {
+            let applied = run(f, MAINNET_PASSPHRASE, &source, &signer, upload());
+            assert_eq!(applied["status"], "SUCCESS", "{applied}");
+        }
+        assert!(f.report().safety.replayable.is_empty(), "{:?}", f.report().safety.replayable);
+        // The real key the setup replaced still signs for alice on mainnet.
+        let seq = account_seq(f, &alice()) + 1;
+        let tx = prepare(f, raw_tx(&alice(), seq, upload()));
+        let err = f.call("sendTransaction", json!({ "transaction": signed(&tx, MAINNET_PASSPHRASE, &[&alice()]) })).unwrap_err();
+        assert_eq!(err.code, RpcError::REFUSED, "{err:?}");
+        let report = f.report();
+        assert!(!report.passed);
+        assert_eq!(report.safety.replayable.len(), 1, "{:?}", report.safety.replayable);
+    };
+
+    let first = dir.join("setup.json");
+    export(&mut a, &first);
+    judge(&mut a);
+    let mut b = open(Base::Snapshot(first), None);
+    // An export of the reloaded server carries the same record on.
+    let second = dir.join("again.json");
+    export(&mut b, &second);
+    judge(&mut b);
+    judge(&mut open(Base::Snapshot(second), None));
+}
+
+#[test]
+fn a_partial_export_reads_what_it_never_read_from_its_network() {
+    let dir = scratch("partial");
+    let url = network_rpc(network_snapshot(&dir));
+    let mut a = open(rpc_base(&url), None);
+    substitute_alice(&mut a);
+    ok(&mut a, "fork_removeLedgerEntry", json!({ "key": account(&carol()), "label": "carol leaves" }));
+    let path = dir.join("partial.json");
+    let snap = export(&mut a, &path);
+    assert_eq!(snap["unread"], "base", "a live fork's base is only partly read");
+    assert_eq!(snap["base"], json!({ "rpc": url, "fork_ledger": FORK_LEDGER }));
+    let held: Vec<_> = SnapshotFile::load(&path)
+        .unwrap()
+        .present()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.entry.data {
+            LedgerEntryData::Account(a) => Some(a.account_id),
+            _ => None,
+        })
+        .collect();
+    assert!(held.contains(&alice().account_id()), "the account the session wrote is in the file");
+    assert!(!held.contains(&dave().account_id()), "an account the session never read is not");
+
+    let mut b = open(Base::Snapshot(path.clone()), None);
+    let info = ok(&mut b, "fork_info", json!({}));
+    assert!(info["base"].as_str().unwrap().starts_with("partial snapshot"), "{info}");
+    let keys = [account(&alice()), account(&carol()), account(&dave())];
+    let got = reads(&mut b, &keys);
+    assert_eq!(got, reads(&mut a, &keys));
+    let entries = got[4]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "dave is read from the network, carol stays removed although the network has her: {entries:?}");
+    assert!(entries.iter().any(|e| e["key"] == json!(account(&dave()))));
+
+    // An export of the server on the partial file still lists what the file
+    // held, although that server read none of it again.
+    let mut fresh = open(Base::Snapshot(path.clone()), None);
+    let again_path = dir.join("again.json");
+    let again = export(&mut fresh, &again_path);
+    assert_eq!(again["unread"], "base");
+    assert_eq!(again["entries"], snap["entries"]);
+    assert_eq!(again["absent"], snap["absent"]);
+    let mut c = open(Base::Snapshot(again_path), None);
+    assert_eq!(reads(&mut c, &keys), got);
+
+    // A partial file of another protocol than its network's is refused.
+    let mut other = snap.clone();
+    other["fork"]["protocol_version"] = json!(snap["fork"]["protocol_version"].as_u64().unwrap() + 1);
+    let other_path = dir.join("other-protocol.json");
+    std::fs::write(&other_path, other.to_string()).unwrap();
+    let err = Facade::open(ServeConfig { base: Base::Snapshot(other_path), seconds_per_ledger: None, wall_clock: None, allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot: None })
+        .err()
+        .unwrap();
+    assert!(format!("{err:#}").contains("is on protocol"), "{err:#}");
+
+    // A partial file that does not say where the rest is cannot be opened.
+    let mut nameless = snap.clone();
+    nameless.as_object_mut().unwrap().remove("base");
+    let nameless_path = dir.join("nameless.json");
+    std::fs::write(&nameless_path, nameless.to_string()).unwrap();
+    let err = Facade::open(ServeConfig { base: Base::Snapshot(nameless_path), seconds_per_ledger: None, wall_clock: None, allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot: None })
+        .err()
+        .unwrap();
+    assert!(format!("{err:#}").contains("names no base"), "{err:#}");
+}
+
+#[test]
+fn an_export_does_not_report_its_own_writes_as_drift() {
+    let dir = scratch("export-drift");
+    let network = network_snapshot(&dir);
+    let url = network_rpc(network.clone());
+    let bob = Ed25519Key::throwaway("bob");
+    // Self-contained (a snapshot base) and partial (a live fork): the setup
+    // writes bob in the ledger after the last closed one, then exports.
+    for (name, base) in [("self-contained", Base::Snapshot(network)), ("partial", rpc_base(&url))] {
+        let mut a = open(base, None);
+        ok(&mut a, "fork_setBalance", json!({ "account": bob.strkey(), "xlm": "100" }));
+        let path = dir.join(format!("{name}.json"));
+        export(&mut a, &path);
+        let mut b = open(Base::Snapshot(path), None);
+        let read = ok(&mut b, "getLedgerEntries", json!({ "keys": [account(&bob)] }));
+        assert_eq!(read["entries"].as_array().unwrap().len(), 1, "{name}: {read}");
+        let drift = b.report().drift;
+        assert!(drift.modified_after_fork.is_empty(), "{name}: {:?}", drift.modified_after_fork);
+    }
+}
+
+#[test]
+fn a_partial_export_judges_drift_against_the_network_fork_ledger() {
+    let dir = scratch("partial-drift");
+    // The network changed erin after the ledger the setup forks it at.
+    let erin = Ed25519Key::throwaway("erin");
+    let network = network_snapshot(&dir);
+    let snap = SnapshotFile::load(&network).unwrap();
+    let mut entries = snap.present().unwrap();
+    let mut changed = account_entry(&erin, 30);
+    changed.entry.last_modified_ledger_seq = FORK_LEDGER + 5;
+    entries.push(changed);
+    SnapshotFile::new(TESTNET_PASSPHRASE, &snap.fork_point(), &entries).unwrap().save(&network).unwrap();
+    let url = network_rpc(network);
+
+    // The setup never reads erin, and closes ledgers past her change.
+    let mut a = open(rpc_base(&url), None);
+    substitute_alice(&mut a);
+    ok(&mut a, "fork_advanceLedgers", json!({ "ledgers": 20 }));
+    let first = dir.join("setup.json");
+    let exported = export(&mut a, &first);
+    assert_eq!(exported["base"]["fork_ledger"], FORK_LEDGER);
+    assert!(exported["fork"]["ledger"].as_u64().unwrap() > (FORK_LEDGER + 5) as u64);
+
+    // Reading alice (held by the file, written by the setup) and erin (read
+    // from the network): only erin drifted.
+    let drifted = |f: &mut Facade| {
+        ok(f, "getLedgerEntries", json!({ "keys": [account(&alice()), account(&erin)] }));
+        let drift = f.report().drift;
+        assert_eq!(drift.fork_ledger, FORK_LEDGER);
+        assert_eq!((drift.served_at_min, drift.served_at_max), (Some(FORK_LEDGER), Some(FORK_LEDGER)), "only the network's ledgers");
+        drift.modified_after_fork.iter().map(|e| e.last_modified).collect::<Vec<_>>()
+    };
+    assert_eq!(drifted(&mut open(Base::Snapshot(first.clone()), None)), [FORK_LEDGER + 5]);
+    // An export of a server on the file carries the fork ledger on.
+    let second = dir.join("again.json");
+    export(&mut open(Base::Snapshot(first), None), &second);
+    assert_eq!(drifted(&mut open(Base::Snapshot(second), None)), [FORK_LEDGER + 5]);
+}
+
+#[test]
+fn serve_saves_the_base_it_read_for_an_offline_rerun() {
+    let dir = scratch("save");
+    let url = network_rpc(network_snapshot(&dir));
+    let saved = dir.join("base.json");
+    let mut a = open(rpc_base(&url), Some(saved.clone()));
+    substitute_alice(&mut a);
+    ok(&mut a, "getLedgerEntries", json!({ "keys": [account(&dave())] }));
+    // The same file `session run --save-snapshot` writes: base entries only.
+    let text = std::fs::read_to_string(&saved).unwrap();
+    let file: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(file["format"], "soroban-sim-snapshot/1");
+    assert_eq!(file["fork"]["ledger"], FORK_LEDGER);
+    let mut offline = open(Base::Snapshot(saved), None);
+    let base = |f: &mut Facade| ok(f, "getLedgerEntries", json!({ "keys": [account(&alice()), account(&dave())] }))["entries"].clone();
+    assert_eq!(base(&mut offline).as_array().unwrap().len(), 2);
+    // Offline the base is the network's: alice's real key, not the override.
+    let mut network = open(Base::Snapshot(dir.join("base.snapshot.json")), None);
+    assert_eq!(base(&mut offline), base(&mut network));
+}
+
+#[test]
+fn save_snapshot_refuses_a_session_export_as_its_base() {
+    let dir = scratch("save-export");
+    let mut a = open(Base::Snapshot(snapshot(&dir, MAINNET_PASSPHRASE)), None);
+    substitute_alice(&mut a);
+    let exported = dir.join("setup.json");
+    export(&mut a, &exported);
+    let saved = dir.join("saved.json");
+    let refused = |err: anyhow::Error| {
+        assert!(format!("{err:#}").contains("fork_exportSnapshot"), "{err:#}");
+        assert!(!saved.exists(), "nothing is written");
+    };
+
+    // serve --snapshot EXPORT --save-snapshot FILE
+    let serve = |save_snapshot| {
+        Facade::open(ServeConfig { base: Base::Snapshot(exported.clone()), seconds_per_ledger: None, wall_clock: None, allow_real_signers: false, report: None, progress: false, verbose: false, save_snapshot })
+    };
+    refused(serve(Some(saved.clone())).err().unwrap());
+    // session run --snapshot EXPORT --save-snapshot FILE
+    let session_run = |save_snapshot| {
+        Runner::new(RunConfig {
+            plan_path: repo().join("examples/session/two-step-add.yaml"),
+            base: Some(Base::Snapshot(exported.clone())),
+            fork_mode: ForkMode::Head,
+            wasm_dirs: vec![],
+            differential: false,
+            keep_going: false,
+            vars: BTreeMap::new(),
+            progress: false,
+            save_snapshot,
+        })
+    };
+    refused(session_run(Some(saved.clone())).err().unwrap());
+
+    // Without the flag both open the export.
+    assert!(serve(None).is_ok());
+    assert!(session_run(None).is_ok());
+}
+
+#[test]
+fn a_captured_network_snapshot_loads() {
+    let dir = scratch("capture");
+    let network = network_snapshot(&dir);
+    let url = network_rpc(network.clone());
+    let snap = soroban_sim_cli::snapshot::capture(&soroban_sim_cli::rpc::RpcClient::new(&url), Some(TESTNET_PASSPHRASE)).unwrap();
+    assert_eq!(snap.format, "soroban-sim-snapshot/2");
+    assert!(!snap.is_partial());
+    let settings = SnapshotFile::load(&network).unwrap().present().unwrap().into_iter().filter(|e| matches!(e.entry.data, LedgerEntryData::ConfigSetting(_))).count();
+    assert_eq!(snap.entries.len(), settings, "every setting and nothing else");
+    assert_eq!(snap.fork.ledger, FORK_LEDGER);
+    let path = dir.join("captured.json");
+    snap.save(&path).unwrap();
+    assert!(soroban_sim_cli::snapshot::capture(&soroban_sim_cli::rpc::RpcClient::new(&url), Some(MAINNET_PASSPHRASE)).is_err(), "the passphrase is checked");
+
+    let mut f = open(Base::Snapshot(path), None);
+    let mut z = open(Base::Snapshot(network), None);
+    assert_eq!(ok(&mut f, "getLatestLedger", json!({})), ok(&mut z, "getLatestLedger", json!({})));
+    assert!(ok(&mut f, "getLedgerEntries", json!({ "keys": [account(&alice())] }))["entries"].as_array().unwrap().is_empty(), "only the settings");
+    // A fresh ledger with the network's settings: fund an account and use it.
+    let bob = Ed25519Key::throwaway("bob");
+    ok(&mut f, "fork_setBalance", json!({ "account": bob.strkey(), "xlm": "100" }));
+    let up = run(&mut f, TESTNET_PASSPHRASE, &bob, &bob, HostFunction::UploadContractWasm(wasm().try_into().unwrap()));
+    assert_eq!(up["status"], "SUCCESS", "{up}");
+}
+
+#[test]
+fn version_1_snapshots_still_load() {
+    let dir = scratch("v1");
+    let path = snapshot(&dir, TESTNET_PASSPHRASE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut v1: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v1["format"], "soroban-sim-snapshot/1");
+    assert_eq!(v1.as_object().unwrap().keys().collect::<Vec<_>>(), ["entries", "fork", "format", "network_passphrase"]);
+    let mut f = open(Base::Snapshot(path.clone()), None);
+    assert_eq!(ok(&mut f, "getLatestLedger", json!({}))["sequence"], FORK_LEDGER);
+    assert_eq!(account_seq(&mut f, &alice()), new_account(alice().account_id(), 0, FORK_LEDGER - 50).seq_num.0);
+    // Version 2 fields need the version-2 label, and unknown versions are refused.
+    v1["unread"] = json!("absent");
+    assert!(format!("{:#}", SnapshotFile::parse(&v1.to_string()).unwrap_err()).contains("label the file"));
+    v1["format"] = json!("soroban-sim-snapshot/2");
+    assert!(SnapshotFile::parse(&v1.to_string()).is_ok());
+    v1["format"] = json!("soroban-sim-snapshot/9");
+    assert!(SnapshotFile::parse(&v1.to_string()).is_err());
 }

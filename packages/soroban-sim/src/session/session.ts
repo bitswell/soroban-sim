@@ -105,6 +105,7 @@ export const READ_ONLY_SESSION_METHODS: readonly string[] = [
   "fork_steps",
   "fork_debugContext",
   "fork_report",
+  "fork_exportSnapshot",
 ];
 
 /** The methods a JSON-RPC body (a call or a batch) calls. */

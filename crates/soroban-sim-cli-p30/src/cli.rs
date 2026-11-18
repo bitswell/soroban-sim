@@ -7,6 +7,7 @@ use crate::replay::{self, ReplayFixture};
 use crate::rpc::RpcClient;
 use crate::run::{base_from_name, Base, ForkMode, RunConfig, Runner};
 use crate::serve::{self, Facade, ServeConfig};
+use crate::snapshot;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use soroban_sim_core::session::host_protocol;
@@ -40,6 +41,31 @@ pub enum Command {
     /// stellar-sdk) and scripts rehearse against it unchanged. Nothing is sent
     /// to the network.
     Serve(ServeArgs),
+    /// Snapshot files to fork offline.
+    #[command(subcommand)]
+    Snapshot(SnapshotCommand),
+}
+
+#[derive(Subcommand)]
+pub enum SnapshotCommand {
+    /// Capture a network's settings (every ConfigSetting entry) and latest
+    /// ledger header as a self-contained snapshot: its configuration,
+    /// passphrase and protocol over an otherwise empty ledger. Read-only:
+    /// nothing runs against the network.
+    Capture(CaptureArgs),
+}
+
+#[derive(Args)]
+pub struct CaptureArgs {
+    /// mainnet, testnet, or an RPC URL (a local network's, for example).
+    #[arg(long)]
+    pub network: String,
+    /// The network passphrase, checked against the RPC.
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
+    /// The snapshot file to write.
+    #[arg(long)]
+    pub out: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -123,6 +149,13 @@ pub struct ServeArgs {
     /// Rewrite PREFIX.json and PREFIX.md after every state change.
     #[arg(long, value_name = "PREFIX")]
     pub report: Option<PathBuf>,
+    /// Keep every base entry the session read in FILE (a version-1
+    /// snapshot, as `session run --save-snapshot` writes), so a later run
+    /// replays offline. Rewritten whenever the session reads more. Refused
+    /// when --snapshot is a session's export: save that with
+    /// fork_exportSnapshot.
+    #[arg(long, value_name = "FILE")]
+    pub save_snapshot: Option<PathBuf>,
     /// Close-time step between ledgers, in seconds: of each ledger
     /// fork_advanceLedgers and fork_setTime close, and, with --clock step,
     /// of each transaction's.
@@ -180,7 +213,9 @@ pub struct RunArgs {
     /// Fork a snapshot file instead of a live network (offline, reproducible).
     #[arg(long)]
     pub snapshot: Option<PathBuf>,
-    /// Save every base entry the run read, as a snapshot file for offline replays.
+    /// Save every base entry the run read, as a snapshot file for offline
+    /// replays. Refused when --snapshot is a session's export: save that
+    /// with fork_exportSnapshot.
     #[arg(long)]
     pub save_snapshot: Option<PathBuf>,
     /// Directories to search for Wasm by hash (file names containing the hash).
@@ -314,6 +349,7 @@ pub fn run(cli: Cli) -> Result<bool> {
                 report: args.report.clone(),
                 progress: !args.quiet,
                 verbose: args.verbose,
+                save_snapshot: args.save_snapshot.clone(),
             })?;
             let url = format!("http://{addr}");
             facade.set_url(&url);
@@ -327,7 +363,29 @@ pub fn run(cli: Cli) -> Result<bool> {
             if let Some(p) = &args.report {
                 eprintln!("  report: {}.json and {}.md, rewritten after every state change", p.display(), p.display());
             }
+            if let Some(p) = &args.save_snapshot {
+                eprintln!("  base entries read: {} (rewritten whenever the session reads more)", p.display());
+            }
             serve::http::serve(&mut facade, &server);
+            Ok(true)
+        }
+        Command::Snapshot(SnapshotCommand::Capture(args)) => {
+            let Base::Rpc { url, passphrase, .. } = base_from_name(&args.network, args.network_passphrase.clone())? else {
+                bail!("snapshot capture needs an RPC network");
+            };
+            let rpc = RpcClient::new(&url);
+            let snap = snapshot::capture(&rpc, passphrase.as_deref())?;
+            snap.save(&args.out)?;
+            eprintln!(
+                "wrote {}: {} network settings at ledger {} (protocol {}, base fee {}, base reserve {}), {:?}",
+                args.out.display(),
+                snap.entries.len(),
+                snap.fork.ledger,
+                snap.fork.protocol_version,
+                snap.fork.base_fee,
+                snap.fork.base_reserve,
+                snap.network_passphrase
+            );
             Ok(true)
         }
         Command::Session(SessionCommand::Check { plan }) => {
@@ -366,8 +424,9 @@ pub fn run(cli: Cli) -> Result<bool> {
                 keep_going: args.keep_going,
                 vars: args.vars.into_iter().collect::<BTreeMap<_, _>>(),
                 progress: !args.quiet,
+                save_snapshot: args.save_snapshot,
             })?;
-            let report = runner.run(args.save_snapshot.as_deref())?;
+            let report = runner.run()?;
             let json = PathBuf::from(format!("{}.json", prefix.display()));
             let md = PathBuf::from(format!("{}.md", prefix.display()));
             std::fs::write(&json, report.to_json()?).with_context(|| format!("writing {}", json.display()))?;

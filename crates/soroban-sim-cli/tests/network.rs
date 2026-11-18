@@ -22,9 +22,10 @@ fn perch_nido_bootstrap_on_a_mainnet_fork() {
         keep_going: false,
         vars: BTreeMap::new(),
         progress: true,
+        save_snapshot: None,
     })
     .unwrap()
-    .run(None)
+    .run()
     .unwrap();
 
     assert!(report.passed, "{:#?}", report.failures);
@@ -79,9 +80,10 @@ steps:
             keep_going: false,
             vars: BTreeMap::new(),
             progress: false,
+            save_snapshot: None,
         })
         .unwrap()
-        .run(None)
+        .run()
         .unwrap();
         assert!(report.passed, "{:#?}", report.failures);
         assert!(report.drift.modified_after_fork.is_empty());
