@@ -1,10 +1,19 @@
 # Keep the unchanged compatibility host distinct from maintained release code.
 crates/soroban-sim-host/src/** linguist-vendored -whitespace
 crates/soroban-sim-host/build.rs linguist-vendored -whitespace
-# Package copies are generated from the repository's authoring sources.
-crates/soroban-sim-*/fixtures/** linguist-generated
+# Package copies are generated from the repository's authoring sources
+# (scripts/sync-package-assets.py). The preview crate's fixtures are captures,
+# not copies, so they stay reviewable like the root fixtures/.
+crates/soroban-sim-core/fixtures/** linguist-generated
+crates/soroban-sim-facade/fixtures/** linguist-generated
+crates/soroban-sim-cli/fixtures/** linguist-generated
+crates/soroban-sim-component/fixtures/** linguist-generated
 crates/soroban-sim-cli/examples/session/** linguist-generated
 crates/soroban-sim-component/wit/** linguist-generated
 # Protocol twin crates: copies of the protocol-29 crates (scripts/sync-protocol-twins.py).
 crates/soroban-sim-*-p30/src/** linguist-generated
+crates/soroban-sim-*-p30/fixtures/** linguist-generated
 crates/soroban-sim-*-p30/README.md linguist-generated
+# Lockfiles (cargo, pnpm).
+Cargo.lock linguist-generated
+pnpm-lock.yaml linguist-generated
