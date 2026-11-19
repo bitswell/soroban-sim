@@ -33,6 +33,14 @@ describe('configuration', () => {
     expect(c.local.friendbotUrl).toBe('http://127.0.0.1:8010/friendbot')
   })
 
+  test('reads the wait bound and the cache explanation switch', () => {
+    expect(resolveConfig({}).waitSeconds).toBe(60)
+    expect(resolveConfig({}).sim.explain).toBe(false)
+    const c = resolveConfig({ SOROBAN_TEST_WAIT_SECONDS: '15', SOROBAN_TEST_CACHE_EXPLAIN: '1' })
+    expect([c.waitSeconds, c.sim.explain]).toEqual([15, true])
+    expect(() => resolveConfig({ SOROBAN_TEST_WAIT_SECONDS: 'soon' })).toThrow(/SOROBAN_TEST_WAIT_SECONDS/)
+  })
+
   test('refuses values it does not know', () => {
     expect(() => resolveConfig({ SOROBAN_TEST_ENV: 'testnet' })).toThrow(/SOROBAN_TEST_ENV/)
     expect(() => resolveConfig({ SOROBAN_TEST_CACHE: 'no' })).toThrow(/SOROBAN_TEST_CACHE/)

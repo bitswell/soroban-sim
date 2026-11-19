@@ -1,10 +1,18 @@
 import { Address, Asset, Operation, contract, nativeToScVal, rpc, scValToNative, xdr } from '@stellar/stellar-sdk'
 import { Account, attach } from './account.ts'
-import { clientOptions, mapSignAndSend, type BindingsClass, type ContractClient } from './clients.ts'
+import {
+  clientOptions,
+  isDefinition,
+  mapSignAndSend,
+  type BindingsClass,
+  type ContractClient,
+  type ContractDefinition,
+} from './clients.ts'
 import { resolveConfig, SEED, type Config, type EnvironmentKind } from './config.ts'
 import { SandboxOnlyError } from './errors.ts'
-import { ACCOUNTS, ADMIN, ADOPT, BINDINGS, DEPLOYS } from './internal.ts'
+import { ACCOUNTS, ADMIN, ADOPT, BINDINGS, CLOSED, DEPLOYS } from './internal.ts'
 import { RUN_NONCE, deriveKeypair } from './keys.ts'
+import type { StellarAssetClient } from './sac.ts'
 import { rpcCall, startServer } from './server.ts'
 
 /** Every account starts with this balance on both environments (friendbot's amount). */
@@ -51,6 +59,9 @@ export class Worker {
   readonly networkPassphrase: string
   /** The RPC client, for anything the worker does not wrap. */
   readonly rpc: rpc.Server
+  /** How long `signAndSend` waits for a sent transaction's result (SOROBAN_TEST_WAIT_SECONDS). */
+  readonly waitSeconds: number
+  readonly #closing = new AbortController()
   readonly #backend: Backend
   readonly #seed: string
   readonly #accounts = new Map<string, Account>();
@@ -64,8 +75,16 @@ export class Worker {
   /** The deployer sends one transaction at a time: each deploy waits for the one before it. */
   #deploys: Promise<unknown> = Promise.resolve()
 
-  private constructor(environment: EnvironmentKind, backend: Backend, client: rpc.Server, passphrase: string, seed: string) {
+  private constructor(
+    environment: EnvironmentKind,
+    backend: Backend,
+    client: rpc.Server,
+    passphrase: string,
+    seed: string,
+    waitSeconds: number,
+  ) {
     this.environment = environment
+    this.waitSeconds = waitSeconds
     this.sandbox = environment === 'soroban-sim'
     this.rpcUrl = backend.url
     this.networkPassphrase = passphrase
@@ -83,7 +102,7 @@ export class Worker {
       const client = new rpc.Server(backend.url, { allowHttp: backend.url.startsWith('http:') })
       const { passphrase } = await client.getNetwork()
       const seed = options.seed ?? (local ? `${SEED}/local/${RUN_NONCE}/worker-${localWorkers++}` : SEED)
-      return new Worker(config.environment, backend, client, passphrase, seed)
+      return new Worker(config.environment, backend, client, passphrase, seed, config.waitSeconds)
     } catch (e) {
       await backend.stop()
       throw e
@@ -119,14 +138,15 @@ export class Worker {
   /**
    * An SDK client for a contract already on the network, by its `C…`
    * address, with nobody signing (for reads; `account.client(it)` signs).
-   * Given generated bindings, a client of that class.
+   * Given a `defineContract` declaration or a generated class, a client of that class.
    */
-  async contract<C extends contract.Client = ContractClient>(id: string, Bindings?: BindingsClass<C>): Promise<C> {
+  async contract<C extends contract.Client = ContractClient>(id: string, kind?: ContractDefinition<C> | BindingsClass<C>): Promise<C> {
+    const Bindings = isDefinition(kind) ? kind.client : kind
     return (await attach(this, id, Bindings)) as unknown as C
   }
 
   /** An SDK client for the native asset (XLM) contract, deployed first if the network does not have it yet. */
-  xlm(): Promise<ContractClient> {
+  xlm(): Promise<StellarAssetClient> {
     return this.assetContract(Asset.native())
   }
 
@@ -135,7 +155,7 @@ export class Worker {
    * the network does not have it yet (an issued asset's admin is its
    * issuer: `issuer.client(token).mint(…)`).
    */
-  async assetContract(asset: Asset): Promise<ContractClient> {
+  async assetContract(asset: Asset): Promise<StellarAssetClient> {
     const key = asset.toString()
     let id = this.#assets.get(key)
     if (!id) {
@@ -143,7 +163,7 @@ export class Worker {
       this.#deploys = id.catch(() => this.#assets.delete(key))
       this.#assets.set(key, id)
     }
-    return attach(this, await id, undefined, undefined, null)
+    return (await attach(this, await id, undefined, undefined, null)) as unknown as StellarAssetClient
   }
 
   #assetDeployer(): Promise<Account> {
@@ -167,7 +187,7 @@ export class Worker {
         method: target.method,
         parseResultXdr: (result: xdr.ScVal) => result,
       })
-      mapSignAndSend(tx, target)
+      mapSignAndSend(tx, target, this)
       await tx.signAndSend()
     } catch (e) {
       // Another worker on the same local network may have deployed it first.
@@ -248,7 +268,13 @@ export class Worker {
 
   /** Stops the worker's soroban-sim server (nothing to stop on a local network). */
   tearDown(): Promise<void> {
+    this.#closing.abort()
     return this.#backend.stop()
+  }
+
+  /** Aborted by tearDown: a wait for a transaction still running is cancelled. */
+  get [CLOSED](): AbortSignal {
+    return this.#closing.signal
   }
 
   /** A soroban-sim admin method; a local network refuses it. */

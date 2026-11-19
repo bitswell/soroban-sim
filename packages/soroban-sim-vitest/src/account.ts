@@ -5,6 +5,7 @@ import {
   boundOf,
   buildClient,
   clientOptions,
+  isDefinition,
   mapSignAndSend,
   mapping,
   rememberSpec,
@@ -12,6 +13,7 @@ import {
   wasmHashOf,
   type BindingsClass,
   type ContractClient,
+  type ContractDefinition,
 } from './clients.ts'
 import { ADMIN, BINDINGS, DEPLOYS, MARKER } from './internal.ts'
 import { toPath } from './paths.ts'
@@ -67,15 +69,20 @@ export class Account {
   }
 
   /**
-   * Uploads `wasm` (a path, URL or bytes), creates a contract from it with
-   * `args` for its constructor, and returns a client for it with this
-   * account signing. Given `client` (generated bindings), a client of that
-   * class.
+   * Uploads the contract's Wasm, creates a contract from it with `args` for
+   * its constructor, and returns a client for it with this account signing.
+   * Given a `defineContract` declaration, a client of its generated class,
+   * typed; given a path, URL or bytes, the generated class in `client`, or
+   * the spec-built `contract.Client`.
    */
-  async deploy<B extends BindingsClass | undefined = undefined>(
-    wasm: string | URL | Uint8Array,
-    options: DeployOptions<B> = {},
-  ): Promise<Deployed<B>> {
+  deploy<C extends contract.Client>(contract: ContractDefinition<C>, options?: Omit<DeployOptions, 'client'>): Promise<C>
+  deploy<B extends BindingsClass | undefined = undefined>(wasm: string | URL | Uint8Array, options?: DeployOptions<B>): Promise<Deployed<B>>
+  async deploy(
+    what: string | URL | Uint8Array | ContractDefinition<contract.Client>,
+    given: DeployOptions<BindingsClass | undefined> = {},
+  ): Promise<contract.Client> {
+    const wasm = isDefinition(what) ? what.file : what
+    const options = isDefinition(what) ? { ...given, client: what.client } : given
     const code = wasm instanceof Uint8Array ? wasm : await readFile(toPath(wasm))
     const wasmHash = createHash('sha256').update(code).digest('hex')
     const allowed = this.worker[DEPLOYS]
@@ -104,7 +111,7 @@ export class Account {
         parseResultXdr: (result: xdr.ScVal) => result,
       })
       const uploadTarget = { contract: 'the network', method: 'uploadContractWasm' }
-      mapSignAndSend(upload, uploadTarget)
+      mapSignAndSend(upload, uploadTarget, this.worker)
       if (!(await mapping(uploadTarget, upload, async () => upload.isReadCall))) await upload.signAndSend()
     }
 
@@ -116,9 +123,9 @@ export class Account {
       salt: Buffer.from(salt),
     })) as contract.AssembledTransaction<unknown>
     const target = { contract: id, method: '__constructor', spec }
-    mapSignAndSend(created, target)
+    mapSignAndSend(created, target, this.worker)
     await created.signAndSend()
-    return buildClient(this.worker, id, spec, wasmHash, this, options.client ?? paired) as Deployed<B>
+    return buildClient(this.worker, id, spec, wasmHash, this, options.client ?? paired)
   }
 
   /**

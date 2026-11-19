@@ -105,7 +105,7 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
     const cfg = await config()
     const { first } = suites()
     const wasm = [await readFile(storage)]
-    const key = (def = first, c = cfg, w = wasm) => cacheKey(def as never, c, w)
+    const key = async (def = first, c = cfg, w = wasm) => (await cacheKey(def as never, c, w)).key
     const original = await key()
     expect(await key()).toBe(original)
     expect(await key(first, cfg, [Buffer.concat([wasm[0], Buffer.from([0])])])).not.toBe(original)
@@ -169,5 +169,29 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
       },
     }
     await expect(prepareSimSetup(suite, cfg)).rejects.toThrow(/does not pair with it/)
+  })
+
+  test('cacheInputs are part of the key, each by name', async () => {
+    const cfg = await config()
+    const wasm = [await readFile(storage)]
+    const suite = (inputs?: Record<string, unknown>) => ({ ...suites().first, cacheInputs: inputs })
+    const key = async (inputs?: Record<string, unknown>) => (await cacheKey(suite(inputs) as never, cfg, wasm)).key
+    const supply = await key({ initialSupply: 1_000n, featureFlag: 'on' })
+    expect(await key({ initialSupply: 1_000n, featureFlag: 'on' })).toBe(supply)
+    expect(await key({ initialSupply: 2_000n, featureFlag: 'on' })).not.toBe(supply)
+    expect(await key({ initialSupply: 1_000n, featureFlag: 'off' })).not.toBe(supply)
+    expect(await key()).not.toBe(supply)
+    await expect(key({ when: new Date(0) })).rejects.toThrow(/^cacheInputs\.when is a Date/)
+  })
+
+  test('with explain on, a run says whether setup came from the cache and what changed', async () => {
+    const base = await config()
+    const cfg = { ...base, sim: { ...base.sim, explain: true } }
+    const { first } = suites()
+    const withSupply = (initialSupply: bigint) => ({ ...first, cacheInputs: { initialSupply } })
+    const explained = async (def: SuiteDefinition<{ value: number }>) => (await prepareSimSetup(def, cfg)).explanation
+    expect(await explained(withSupply(1n))).toMatch(/cache miss for "cache" .*: no earlier entry for this suite$/)
+    expect(await explained(withSupply(1n))).toMatch(/cache hit for "cache" .*: setup did not run$/)
+    expect(await explained(withSupply(2n))).toMatch(/cache miss for "cache" .*: changed since the last entry: cacheInputs\.initialSupply$/)
   })
 })

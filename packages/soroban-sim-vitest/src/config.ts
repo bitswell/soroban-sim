@@ -12,6 +12,8 @@ export interface SimConfig {
   /** `off` runs setup every time and leaves the cache alone. */
   cache: 'on' | 'off'
   cacheDir: string
+  /** Say on stderr, for each suite, whether its setup came from the cache and, on a miss, what changed. */
+  explain: boolean
 }
 
 export interface LocalConfig {
@@ -21,6 +23,8 @@ export interface LocalConfig {
 
 export interface Config {
   environment: EnvironmentKind
+  /** How long to wait for a sent transaction's result, in seconds; separate from its time bound. */
+  waitSeconds: number
   sim: SimConfig
   local: LocalConfig
 }
@@ -48,13 +52,19 @@ export function resolveConfig(env: Env = process.env): Config {
     throw new Error(`SOROBAN_TEST_CACHE must be "on" or "off", not ${JSON.stringify(cache)}`)
   }
   const rpcUrl = env.SOROBAN_TEST_RPC_URL || 'http://localhost:8000/rpc'
+  const waitSeconds = Number(env.SOROBAN_TEST_WAIT_SECONDS || 60)
+  if (!(waitSeconds > 0)) {
+    throw new Error(`SOROBAN_TEST_WAIT_SECONDS must be a number of seconds above 0, not ${JSON.stringify(env.SOROBAN_TEST_WAIT_SECONDS)}`)
+  }
   return {
     environment,
+    waitSeconds,
     sim: {
       bin: env.SOROBAN_SIM_BIN || 'soroban-sim',
       snapshot: path.resolve(env.SOROBAN_SIM_SNAPSHOT || DEFAULT_SNAPSHOT),
       cache,
       cacheDir: path.resolve(env.SOROBAN_TEST_CACHE_DIR || defaultCacheDir()),
+      explain: ['1', 'on', 'true'].includes(env.SOROBAN_TEST_CACHE_EXPLAIN ?? ''),
     },
     local: {
       rpcUrl,

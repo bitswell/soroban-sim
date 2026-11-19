@@ -57,18 +57,46 @@ export class ContractError extends InvocationError {
   }
 }
 
-/** The network refused or failed a transaction for a reason other than the contract call (a sequence number, a fee). */
+/** Where a transaction stood when it failed or the wait for it ended. */
+export interface TransactionDetails {
+  /** The transaction's hash, once it was sent. */
+  hash?: string
+  /** `soroban-sim` or `local`. */
+  environment?: string
+  /** The last status the network reported for it (`PENDING`, `NOT_FOUND`…). */
+  lastStatus?: string
+}
+
+/**
+ * The network refused or failed a transaction for a reason other than the
+ * contract call (a sequence number, a fee), or the wait for it ended first.
+ */
 export class TransactionError extends Error {
-  /** `ERROR` (refused by sendTransaction) or `FAILED` (applied and failed). */
+  /**
+   * `ERROR` (refused by sendTransaction), `FAILED` (applied and failed),
+   * `NOT_FOUND` (not applied within the wait) or `CANCELLED` (the worker was
+   * torn down while waiting).
+   */
   readonly status: string
   /** The transaction result code, such as `txBadSeq`. */
   readonly result: string | undefined
+  readonly hash: string | undefined
+  readonly environment: string | undefined
+  readonly lastStatus: string | undefined
 
-  constructor(what: string, status: string, result: string | undefined) {
-    super(`${what}: ${status}${result ? ` (${result})` : ''}`)
+  constructor(what: string, status: string, result: string | undefined, details: TransactionDetails = {}, why?: string) {
+    const where = [
+      details.hash ? `transaction ${details.hash}` : undefined,
+      details.environment ? `on ${details.environment}` : undefined,
+      details.lastStatus ? `last status ${details.lastStatus}` : undefined,
+    ].filter(Boolean)
+    super(`${what}: ${why ?? `${status}${result ? ` (${result})` : ''}`}${where.length ? ` (${where.join(', ')})` : ''}`)
     this.name = 'TransactionError'
     this.status = status
     this.result = result
+    this.hash = details.hash
+    this.environment = details.environment
+    this.lastStatus = details.lastStatus
   }
 }
 

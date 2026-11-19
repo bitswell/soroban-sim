@@ -3,17 +3,18 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cacheKey, readEntry, writeEntry, type StoredSetup } from './cache.ts'
+import { cacheKey, explainCache, readEntry, writeEntry, type StoredSetup } from './cache.ts'
 import { SEED, type Config } from './config.ts'
 import { attach } from './account.ts'
-import type { BindingsClass } from './clients.ts'
-import { ACCOUNTS, ADMIN, ADOPT, BINDINGS, DEPLOYS, MARKER } from './internal.ts'
+import { isDefinition, type ContractDefinition } from './clients.ts'
+import { ACCOUNTS, ADMIN, ADOPT, BINDINGS, DEPLOYS } from './internal.ts'
 import { RUN_NONCE } from './keys.ts'
 import { toPath } from './paths.ts'
+import { decode, encode, type Stored } from './setup-values.ts'
 import { Worker } from './worker.ts'
 
-/** A Wasm file, or a Wasm file with the client generated for it (`stellar contract bindings typescript`). */
-export type WasmEntry = string | URL | { file: string | URL; client: BindingsClass<any> }
+/** A Wasm file, or a contract declared with `defineContract` (its Wasm and, optionally, its generated client). */
+export type WasmEntry = string | URL | ContractDefinition<any>
 
 export interface SuiteDefinition<S> {
   /** Names the suite in messages and cache entries. */
@@ -31,9 +32,17 @@ export interface SuiteDefinition<S> {
    */
   cacheFiles?: readonly (string | URL)[]
   /**
-   * Creates accounts, deploys, writes; returns what the tests need. The
-   * result must be JSON values, accounts and contract clients: each test
-   * gets its own copy, with the accounts and clients on its own network.
+   * Values setup depends on that no file holds: environment variables it
+   * reads, arguments of a factory that builds the suite. Each is part of the
+   * cache key, by name, so a change to one reruns setup. Stored as setup's
+   * result is (JSON values, bigints, bytes).
+   */
+  cacheInputs?: Record<string, unknown>
+  /**
+   * Creates accounts, deploys, writes; returns what the tests need: JSON
+   * values, bigints, bytes, accounts and contract clients. Each test gets
+   * its own copy, with the accounts and clients on its own network; any
+   * other value is refused, naming where in the result it is.
    */
   setup: (worker: Worker) => Promise<S>
 }
@@ -56,7 +65,7 @@ export function environmentFor<S>(def: SuiteDefinition<S>, config: Config): Envi
   return config.environment === 'local' ? localEnvironment(def, config) : simEnvironment(def, config)
 }
 
-const fileOf = (entry: WasmEntry) => (typeof entry === 'string' || entry instanceof URL ? entry : entry.file)
+const fileOf = (entry: WasmEntry) => (isDefinition(entry) ? entry.file : entry)
 
 async function loadWasm(def: AnySuite): Promise<Buffer[]> {
   return Promise.all((def.wasm ?? []).map((entry) => readFile(toPath(fileOf(entry)))))
@@ -68,7 +77,7 @@ const hashes = (wasm: Buffer[]) => new Set(wasm.map(sha256))
 /** Tells `worker` which generated client each of the suite's Wasm files has. */
 function pairBindings(def: AnySuite, worker: Worker, wasm: Buffer[]): void {
   ;(def.wasm ?? []).forEach((entry, i) => {
-    if (typeof entry === 'object' && !(entry instanceof URL)) worker[BINDINGS].set(sha256(wasm[i]), entry.client)
+    if (isDefinition(entry) && entry.client) worker[BINDINGS].set(sha256(wasm[i]), entry.client)
   })
 }
 
@@ -77,9 +86,13 @@ async function runSetup(def: AnySuite, worker: Worker, wasm: Buffer[]): Promise<
   worker[DEPLOYS] = hashes(wasm)
   try {
     const value = await def.setup(worker)
-    const text = value === undefined ? undefined : JSON.stringify(value)
-    if (value !== undefined && text === undefined) throw new Error(`${def.name}: setup must return JSON values, accounts and contract clients`)
-    return { result: text === undefined ? undefined : JSON.parse(text), accounts: worker[ACCOUNTS]() }
+    let result: Stored | undefined
+    try {
+      result = encode(value)
+    } catch (e) {
+      throw new Error(`${def.name}: setup's ${(e as Error).message}`)
+    }
+    return { result, accounts: worker[ACCOUNTS]() }
   } finally {
     worker[DEPLOYS] = undefined
   }
@@ -88,18 +101,11 @@ async function runSetup(def: AnySuite, worker: Worker, wasm: Buffer[]): Promise<
 /** A stored setup result with its accounts and contract clients bound to `worker`, each client with the same signer. */
 async function revive<S>(stored: StoredSetup, worker: Worker): Promise<S> {
   worker[ADOPT](stored.accounts)
-  const walk = async (value: unknown): Promise<unknown> => {
-    if (Array.isArray(value)) return Promise.all(value.map(walk))
-    if (value === null || typeof value !== 'object') return value
-    const marked = value as Record<string, unknown>
-    if (marked[MARKER] === 'account') return worker.account(marked.name as string)
-    if (marked[MARKER] === 'contract') {
-      const signer = marked.signer === null ? undefined : worker.account(marked.signer as string)
-      return attach(worker, marked.id as string, undefined, signer, marked.wasmHash as string | null)
-    }
-    return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([k, v]) => [k, await walk(v)])))
-  }
-  return (await walk(stored.result)) as S
+  return (await decode(stored.result as Stored | undefined, (marker) => {
+    if (marker.name !== undefined && marker.id === undefined) return worker.account(marker.name as string)
+    const signer = marker.signer === null ? undefined : worker.account(marker.signer as string)
+    return attach(worker, marker.id as string, undefined, signer, marker.wasmHash as string | null)
+  })) as S
 }
 
 // --- soroban-sim ---
@@ -109,6 +115,8 @@ export interface PreparedSetup extends StoredSetup {
   snapshot: string
   /** True when the snapshot came from the cache and setup did not run. */
   cached: boolean
+  /** With the cache on: whether it was a hit, and on a miss which inputs changed since this suite's last entry. */
+  explanation?: string
 }
 
 let scratch: string | undefined
@@ -130,13 +138,20 @@ function scratchDir(): string {
  */
 export async function prepareSimSetup(def: AnySuite, config: Config, testFile?: string): Promise<PreparedSetup> {
   const wasm = await loadWasm(def)
-  const key = await cacheKey(def, config, wasm, testFile)
-  const { cache, cacheDir } = config.sim
+  const { key, parts } = await cacheKey(def, config, wasm, testFile)
+  const { cache, cacheDir, explain } = config.sim
   if (cache === 'on') {
     const hit = await readEntry(cacheDir, key)
-    if (hit) return { ...hit, cached: true }
+    const explanation = await explainCache(cacheDir, def, testFile, key, parts, hit !== undefined)
+    if (explain) process.stderr.write(`${explanation}\n`)
+    if (hit) return { ...hit, cached: true, explanation }
+    return { ...(await runAndExport(def, config, wasm, key)), explanation }
   }
+  return runAndExport(def, config, wasm, key)
+}
 
+async function runAndExport(def: AnySuite, config: Config, wasm: Buffer[], key: string): Promise<PreparedSetup> {
+  const { cache, cacheDir } = config.sim
   const worker = await Worker.init({ config: { ...config, environment: 'soroban-sim' }, snapshot: config.sim.snapshot, seed: SEED })
   pairBindings(def, worker, wasm)
   let stored: StoredSetup

@@ -13,3 +13,5 @@ export const DEPLOYS = Symbol('soroban-sim-vitest/deploys')
 export const MARKER = '@soroban-sim-vitest'
 /** `worker[BINDINGS]`: generated bindings clients by the hash of the Wasm they are for, from the suite's `wasm`. */
 export const BINDINGS = Symbol('soroban-sim-vitest/bindings')
+/** `worker[CLOSED]`: aborted when the worker is torn down, cancelling any wait for a transaction. */
+export const CLOSED = Symbol('soroban-sim-vitest/closed')

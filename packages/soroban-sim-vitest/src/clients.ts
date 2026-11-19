@@ -1,6 +1,6 @@
 import { contract } from '@stellar/stellar-sdk'
 import { TransactionError, invocationError, type CallTarget } from './errors.ts'
-import { MARKER } from './internal.ts'
+import { CLOSED, MARKER } from './internal.ts'
 import { STELLAR_ASSET_SPEC } from './sac.ts'
 import type { Account } from './account.ts'
 import type { Worker } from './worker.ts'
@@ -19,13 +19,60 @@ export type BindingsClass<C extends contract.Client = contract.Client> = new (op
  */
 export type ContractClient = contract.Client & { [method: string]: any }
 
+/** A contract's Wasm, and the client generated for it when there is one: declared once, used everywhere. */
+export interface ContractDefinition<C extends contract.Client = ContractClient> {
+  readonly file: string | URL
+  readonly client: BindingsClass<C> | undefined
+}
+
+/**
+ * Declares a contract once: its Wasm file and, optionally, the client
+ * `stellar contract bindings typescript` generated for it. List it in a
+ * suite's `wasm`, deploy it with `account.deploy(Storage)`, attach to it
+ * with `worker.contract(id, Storage)`: each gives that client, typed.
+ */
+export function defineContract(file: string | URL): ContractDefinition<ContractClient>
+export function defineContract<C extends contract.Client>(file: string | URL, client: BindingsClass<C>): ContractDefinition<C>
+export function defineContract(file: string | URL, client?: BindingsClass): ContractDefinition<contract.Client> {
+  return Object.freeze({ file, client })
+}
+
+export function isDefinition(value: unknown): value is ContractDefinition<any> {
+  return typeof value === 'object' && value !== null && !(value instanceof URL) && !(value instanceof Uint8Array) && 'file' in value
+}
+
+/** The options `signAndSend` takes. */
+export type SendOptions = NonNullable<Parameters<contract.AssembledTransaction<unknown>['signAndSend']>[0]>
+
+/**
+ * Signs and sends a call, and waits for its result: `await
+ * send(storage.put_persist({ key: 1, val: 7 }))` is `await (await
+ * storage.put_persist(…)).signAndSend()`. Returns the SDK's
+ * SentTransaction, its `result` typed as the method's.
+ */
+export async function send<T>(
+  tx: contract.AssembledTransaction<T> | Promise<contract.AssembledTransaction<T>>,
+  options?: SendOptions,
+): Promise<contract.SentTransaction<T>> {
+  return (await tx).signAndSend(options)
+}
+
 /**
  * The upper time bound of the transactions a client builds (the SDK's
  * default is 300 s from the wall clock). Far ahead, so moving ledger time
- * forward (setTime) never makes them too late; a transaction still returns
- * as soon as it is applied.
+ * forward (setTime) never makes them too late. How long to wait for a sent
+ * transaction is separate: the worker's `waitSeconds`.
  */
 export const CLIENT_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600
+
+/** How long to wait for sent transactions, where, and what cancels the wait. */
+export interface WaitContext {
+  environment: string
+  /** At most this long polling for a sent transaction's result. */
+  waitSeconds: number
+  /** Aborted when the worker is torn down: any wait still running is cancelled. */
+  readonly [CLOSED]: AbortSignal
+}
 
 const BOUND = Symbol('soroban-sim-vitest/client')
 
@@ -102,7 +149,7 @@ export function buildClient(
   for (const fn of client.spec.funcs()) {
     const method = fn.name.toString()
     if (method === '__constructor' || typeof client[method] !== 'function') continue
-    client[method] = typedErrors(client[method], { contract: contractId, method, spec: client.spec })
+    client[method] = typedErrors(client[method], { contract: contractId, method, spec: client.spec }, worker)
   }
   return client
 }
@@ -120,11 +167,11 @@ type Method = (...args: any[]) => Promise<contract.AssembledTransaction<unknown>
  * (the SDK's error stays as `cause`). Everything else is the SDK's: it
  * builds, simulates, signs and sends.
  */
-function typedErrors(original: Method, target: CallTarget): Method {
+function typedErrors(original: Method, target: CallTarget, wait: WaitContext): Method {
   return async (...params: any[]) => {
     const tx = await original(...params)
     mapResult(tx, target)
-    mapSignAndSend(tx, target)
+    mapSignAndSend(tx, target, wait)
     return tx
   }
 }
@@ -145,18 +192,67 @@ function mapResult(tx: contract.AssembledTransaction<unknown>, target: CallTarge
   })
 }
 
-export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, target: CallTarget): void {
+const CANCELLED = Symbol('cancelled')
+
+/**
+ * `tx.signAndSend`, still the SDK's, with its failures typed and its wait
+ * bounded on its own: the transaction is signed with the client's far time
+ * bound (so time travel never makes it too late), and once it is sent the
+ * SDK polls for at most `wait.waitSeconds`. Tearing the worker down cancels
+ * the wait. A transaction not applied in time is a TransactionError with
+ * its hash, method, environment and last status.
+ */
+export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, target: CallTarget, wait: WaitContext): void {
   const signAndSend = tx.signAndSend.bind(tx)
-  tx.signAndSend = async (...args: Parameters<typeof signAndSend>) => {
-    const sent = await mapping(target, tx, () => signAndSend(...args))
+  const what = `${target.method} on ${target.contract}`
+  tx.signAndSend = async ({ watcher, ...options }: Parameters<typeof signAndSend>[0] = {}) => {
+    const validity = tx.options.timeoutInSeconds
+    const details = { environment: wait.environment, hash: undefined as string | undefined, lastStatus: 'not sent' }
+    const bounded: contract.Watcher = {
+      onSubmitted(response) {
+        details.hash = response?.hash
+        details.lastStatus = response?.status ?? details.lastStatus
+        // Signed by now, with the far time bound; from here the SDK only polls, as long as this says.
+        tx.options.timeoutInSeconds = wait.waitSeconds
+        watcher?.onSubmitted?.(response)
+      },
+      onProgress(response) {
+        details.lastStatus = response?.status ?? details.lastStatus
+        watcher?.onProgress?.(response)
+      },
+    }
+    const sending = mapping(target, tx, () => signAndSend({ ...options, watcher: bounded }))
+    sending.catch(() => {})
+    let sent: contract.SentTransaction<unknown>
+    try {
+      sent = await Promise.race([sending, cancelled(wait[CLOSED])])
+    } catch (e) {
+      if (e === CANCELLED) {
+        throw new TransactionError(what, 'CANCELLED', undefined, details, 'the wait for its result was cancelled: the worker was torn down')
+      }
+      if (e instanceof contract.SentTransaction.Errors.TransactionStillPending) {
+        const why = `not applied within ${wait.waitSeconds} s of waiting`
+        throw Object.assign(new TransactionError(what, 'NOT_FOUND', undefined, details, why), { cause: e })
+      }
+      throw e
+    } finally {
+      tx.options.timeoutInSeconds = validity
+    }
     const response = sent.getTransactionResponse
     if (response?.status === 'FAILED') {
       const events = response.diagnosticEventsXdr ?? []
       if (events.length) throw invocationError(target, '', events)
-      throw new TransactionError(`${target.method} on ${target.contract}`, 'FAILED', response.resultXdr.result.type)
+      throw new TransactionError(what, 'FAILED', response.resultXdr.result.type, { ...details, lastStatus: 'FAILED' })
     }
     return sent
   }
+}
+
+function cancelled(signal: AbortSignal): Promise<never> {
+  return new Promise((_, reject) => {
+    if (signal.aborted) reject(CANCELLED)
+    else signal.addEventListener('abort', () => reject(CANCELLED), { once: true })
+  })
 }
 
 /** Runs `step`, turning the SDK's simulation and send failures into InvocationError, ContractError and TransactionError. */
@@ -176,7 +272,9 @@ function typedError(target: CallTarget, tx: contract.AssembledTransaction<unknow
   }
   if (e instanceof contract.SentTransaction.Errors.SendFailed) {
     const result = /"result":\s*"(\w+)"/.exec(e.message)?.[1]
-    return Object.assign(new TransactionError(`${target.method} on ${target.contract}`, 'ERROR', result), { cause: e })
+    const hash = /"hash":\s*"(\w+)"/.exec(e.message)?.[1]
+    const what = `${target.method} on ${target.contract}`
+    return Object.assign(new TransactionError(what, 'ERROR', result, { hash, lastStatus: 'ERROR' }), { cause: e })
   }
   return e
 }
