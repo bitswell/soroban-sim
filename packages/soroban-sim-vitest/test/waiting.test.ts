@@ -15,7 +15,7 @@ function fakeTransaction(outcome: 'pending' | 'hang' | 'refused') {
     async signAndSend({ watcher }: { watcher?: contract.Watcher } = {}) {
       seen.signedWith = tx.options.timeoutInSeconds
       if (outcome === 'refused') {
-        const refusal = { status: 'ERROR', hash: 'abc123', errorResult: { result: 'txTooLate' } }
+        const refusal = { status: 'ERROR', hash: 'abc123', errorResult: { result: 'tx_too_late' } }
         throw new contract.SentTransaction.Errors.SendFailed(`Sending the transaction to the network failed!\n${JSON.stringify(refusal, null, 2)}`)
       }
       watcher?.onSubmitted?.({ hash: 'abc123', status: 'PENDING' } as never)
@@ -57,7 +57,7 @@ test('a transaction the network refuses reports where it was sent, like one that
   mapSignAndSend(tx, target, wait())
   const error = await tx.signAndSend().catch((e: unknown) => e)
   expect(error).toBeInstanceOf(TransactionError)
-  expect(error).toMatchObject({ status: 'ERROR', result: 'txTooLate', hash: 'abc123', environment: 'local', lastStatus: 'ERROR' })
-  expect((error as Error).message).toBe('put_persist on CABC: ERROR (txTooLate) (transaction abc123, on local, last status ERROR)')
+  expect(error).toMatchObject({ status: 'ERROR', result: 'tx_too_late', hash: 'abc123', environment: 'local', lastStatus: 'ERROR' })
+  expect((error as Error).message).toBe('put_persist on CABC: ERROR (tx_too_late) (transaction abc123, on local, last status ERROR)')
   expect((error as Error).cause).toBeInstanceOf(contract.SentTransaction.Errors.SendFailed)
 })

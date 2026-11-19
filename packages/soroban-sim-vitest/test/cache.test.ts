@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { cacheKey } from '../src/cache.ts'
-import { Worker, clearCache, prepareSimSetup, resolveConfig, type Config, type SuiteDefinition } from '../src/index.ts'
+import { Worker, clearCache, defineContract, prepareSimSetup, resolveConfig, type Config, type SuiteDefinition } from '../src/index.ts'
 
 const env = resolveConfig()
 const storage = new URL('../../../fixtures/contracts/storage.wasm', import.meta.url)
@@ -155,6 +155,36 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
       },
     }
     await expect(prepareSimSetup(suite, cfg)).rejects.toThrow(/does not list in `wasm`/)
+  })
+
+  test('setup may use a declaration with a generated client only when the suite lists that declaration', async () => {
+    const cfg = await config()
+    const { Client: StorageClient } = await import('./bindings/storage.ts')
+    class OtherClient extends StorageClient {}
+    const Storage = defineContract(storage, StorageClient)
+    const refused = /declaration with a generated client for .*storage\.wasm, which the suite does not list in `wasm`: list that declaration/
+    const deploys = (wasm: SuiteDefinition<undefined>['wasm']): SuiteDefinition<undefined> => ({
+      name: 'unpaired',
+      wasm,
+      async setup(worker) {
+        const admin = await worker.createAccount('admin')
+        await admin.deploy(Storage)
+      },
+    })
+    await expect(prepareSimSetup(deploys([storage]), cfg)).rejects.toThrow(refused)
+    await expect(prepareSimSetup(deploys([defineContract(storage, OtherClient)]), cfg)).rejects.toThrow(refused)
+    expect((await prepareSimSetup(deploys([Storage]), cfg)).cached).toBe(false)
+
+    const attaches: SuiteDefinition<undefined> = {
+      name: 'unpaired attach',
+      wasm: [storage],
+      async setup(worker) {
+        const admin = await worker.createAccount('admin')
+        const deployed = await admin.deploy(storage)
+        await worker.contract(deployed.options.contractId, Storage)
+      },
+    }
+    await expect(prepareSimSetup(attaches, cfg)).rejects.toThrow(/declaration with a generated client for C\w+, which the suite does not list/)
   })
 
   test('cacheInputs are part of the key, each by name', async () => {

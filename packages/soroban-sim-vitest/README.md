@@ -160,7 +160,10 @@ test's accounts.
   makes every client for that code, in setup and in the tests, of that
   class. Their contents are part of the cache key, and setup may deploy no
   others (it throws, naming the file), so a changed contract always reruns
-  setup. Tests may deploy anything.
+  setup. Setup also throws when it deploys, or attaches to, a declaration
+  with a generated client that `wasm` does not list (it lists the bare
+  file, or another declaration): a test gets its clients back by this list
+  alone. Tests may deploy anything.
 - **`cacheFiles`**: files setup depends on besides the Wasm and the test
   file itself (see the cache key below).
 - **`cacheInputs`**: values setup depends on that no file holds, such as an

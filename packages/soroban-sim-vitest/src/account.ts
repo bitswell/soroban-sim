@@ -84,6 +84,7 @@ export class Account {
       const what = wasm instanceof Uint8Array ? `Wasm ${wasmHash.slice(0, 12)}…` : String(wasm)
       throw new Error(`setup deploys ${what}, which the suite does not list in \`wasm\`: list it so the setup cache key covers it`)
     }
+    const Bindings = classFor(this.worker, wasmHash, declared, String(wasm))
     rememberSpec(wasmHash, code)
     const salt = options.salt ?? randomBytes(32)
     const id = contractId(this.worker.networkPassphrase, this.address, salt)
@@ -112,7 +113,7 @@ export class Account {
     const target = { contract: id, method: '__constructor', spec }
     mapSignAndSend(created, target, this.worker)
     await created.signAndSend()
-    return buildClient(this.worker, id, spec, wasmHash, this, declared ?? this.worker[BINDINGS].get(wasmHash))
+    return buildClient(this.worker, id, spec, wasmHash, this, Bindings)
   }
 
   /**
@@ -158,8 +159,24 @@ export async function attach(
 ): Promise<ContractClient> {
   const wasmHash = knownHash === undefined ? await wasmHashOf(worker, id) : (knownHash ?? undefined)
   const spec = await specFor(worker, wasmHash)
+  return buildClient(worker, id, spec, wasmHash, signer, classFor(worker, wasmHash, Bindings, id))
+}
+
+/**
+ * The class of a client for the code `wasmHash` names: the declaration's
+ * generated client, else the one the suite's `wasm` pairs with that code.
+ * While setup runs the two must be the same, since a test gets a client back
+ * by the suite's pairing alone.
+ */
+function classFor(worker: Worker, wasmHash: string | undefined, declared: BindingsClass | undefined, what: string): BindingsClass | undefined {
   const paired = wasmHash ? worker[BINDINGS].get(wasmHash) : undefined
-  return buildClient(worker, id, spec, wasmHash, signer, Bindings ?? paired)
+  if (worker[DEPLOYS] && declared && declared !== paired) {
+    throw new Error(
+      `setup uses a defineContract declaration with a generated client for ${what}, which the suite does not list in \`wasm\`: ` +
+        'list that declaration in `wasm`, so every test gets the same class back',
+    )
+  }
+  return declared ?? paired
 }
 
 /** The address of the contract `deployer` creates with `salt`. */
