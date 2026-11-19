@@ -34,7 +34,7 @@ case "$1" in
 
 - The latest release (soroban-sim-cli-v0.1.0) predates \`fork_exportSnapshot\`, which the harness needs, so the CLI is built once from this commit in \`vitest-cli\` (with the Rust cache restored) and downloaded here; "Built from source" adds that job's time and leaves out the download.
 - Times are wall-clock between marks in the job; Total runs from the job's first step to this summary, so it includes checkout, Node and \`pnpm install\` but not runner start-up.
-- Memory is the summed resident memory of every \`soroban-sim\` server process, sampled every 100 ms with \`ps\` (a spike shorter than that can be missed); the Node test runner is not counted.
+- Memory is the summed resident memory of every \`soroban-sim\` server process, sampled with \`ps\` in a loop with no pause (a peak between two samples is missed, so this is a lower bound); the Node test runner is not counted.
 TABLE
 )
     ;;
