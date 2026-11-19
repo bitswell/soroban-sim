@@ -1,6 +1,6 @@
 import { Address, Asset, Operation, contract, nativeToScVal, rpc, scValToNative, xdr } from '@stellar/stellar-sdk'
 import { Account, attach } from './account.ts'
-import { clientOptions, mapSignAndSend, mapping, type BindingsClass, type ContractClient } from './clients.ts'
+import { clientOptions, mapSignAndSend, type BindingsClass, type ContractClient } from './clients.ts'
 import { resolveConfig, SEED, type Config, type EnvironmentKind } from './config.ts'
 import { SandboxOnlyError } from './errors.ts'
 import { ACCOUNTS, ADMIN, ADOPT, BINDINGS, DEPLOYS } from './internal.ts'
@@ -168,7 +168,7 @@ export class Worker {
         parseResultXdr: (result: xdr.ScVal) => result,
       })
       mapSignAndSend(tx, target)
-      await mapping(target, tx, () => tx.simulate())
+      await tx.simulate()
       await tx.signAndSend()
     } catch (e) {
       // Another worker on the same local network may have deployed it first.

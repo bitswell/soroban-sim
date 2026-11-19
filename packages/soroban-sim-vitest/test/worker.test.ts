@@ -1,9 +1,13 @@
 // The plain `test`: a worker of the test's own, no suite setup.
 import { Asset, contract } from '@stellar/stellar-sdk'
 import { expect } from 'vitest'
-import { test } from '../src/index.ts'
+import { InvocationError, test } from '../src/index.ts'
 
 const storageWasm = new URL('../../../fixtures/contracts/storage.wasm', import.meta.url)
+const verifierWasm = new URL('../../../fixtures/contracts/verifier.wasm', import.meta.url)
+// A module with a contract spec (one empty error enum) and nothing else: the host refuses to upload it.
+const emptyErrorEnum = [0, 0, 0, 4, ...new Array(16).fill(0)]
+const refusedWasm = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0, 35, 14, ...Buffer.from('contractspecv0'), ...emptyErrorEnum])
 
 test('accounts by name deploy, write and read through SDK clients', async ({ worker }) => {
   const alice = await worker.createAccount('alice')
@@ -50,4 +54,16 @@ test('one worker deploys several asset contracts, also when asked for them at on
   for (const token of [first, second, third]) {
     expect((await token.admin()).result).toBe(issuer.address)
   }
+})
+
+test('a deploy whose constructor traps throws an InvocationError', async ({ worker }) => {
+  const alice = await worker.createAccount('alice')
+  const error = await alice.deploy(verifierWasm).catch((e) => e)
+  expect(error).toBeInstanceOf(InvocationError)
+  expect(error.hostError).toMatch(/^Error\(/)
+})
+
+test('a deploy of code the host refuses to upload throws an InvocationError', async ({ worker }) => {
+  const alice = await worker.createAccount('alice')
+  await expect(alice.deploy(refusedWasm)).rejects.toBeInstanceOf(InvocationError)
 })
