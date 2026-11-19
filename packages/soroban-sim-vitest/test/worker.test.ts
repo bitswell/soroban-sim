@@ -39,3 +39,15 @@ test('a Stellar asset contract takes its admin functions by name', async ({ work
   expect((await token.admin()).result).toBe(issuer.address)
   expect((await token.authorized({ id })).result).toBe(true)
 })
+
+test('one worker deploys several asset contracts, also when asked for them at once', async ({ worker }) => {
+  const issuer = await worker.createAccount('issuer')
+  const first = await worker.assetContract(new Asset('ONE', issuer.address))
+  const [second, third] = await Promise.all([
+    worker.assetContract(new Asset('TWO', issuer.address)),
+    worker.assetContract(new Asset('THREE', issuer.address)),
+  ])
+  for (const token of [first, second, third]) {
+    expect((await token.admin()).result).toBe(issuer.address)
+  }
+})

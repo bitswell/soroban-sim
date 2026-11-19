@@ -59,6 +59,10 @@ export class Worker {
   /** Generated bindings clients by Wasm hash, from the suite's `wasm`: a client for that code is of that class. */
   readonly [BINDINGS] = new Map<string, BindingsClass>()
   readonly #assets = new Map<string, Promise<string>>()
+  /** Pays for asset contract deploys: funded on first use, outside the accounts tests see. */
+  #deployer: Promise<Account> | undefined
+  /** The deployer sends one transaction at a time: each deploy waits for the one before it. */
+  #deploys: Promise<unknown> = Promise.resolve()
 
   private constructor(environment: EnvironmentKind, backend: Backend, client: rpc.Server, passphrase: string, seed: string) {
     this.environment = environment
@@ -135,19 +139,27 @@ export class Worker {
     const key = asset.toString()
     let id = this.#assets.get(key)
     if (!id) {
-      id = this.#deployAsset(asset)
-      id.catch(() => this.#assets.delete(key))
+      id = this.#deploys.then(() => this.#deployAsset(asset))
+      this.#deploys = id.catch(() => this.#assets.delete(key))
       this.#assets.set(key, id)
     }
     return attach(this, await id, undefined, undefined, null)
   }
 
+  #assetDeployer(): Promise<Account> {
+    if (!this.#deployer) {
+      const account = new Account(this, '\0native-asset-deployer', deriveKeypair(this.#seed, '\0native-asset-deployer'))
+      const funded = this.#backend.fund(account.address).then(() => account)
+      funded.catch(() => (this.#deployer = undefined))
+      this.#deployer = funded
+    }
+    return this.#deployer
+  }
+
   async #deployAsset(asset: Asset): Promise<string> {
     const id = asset.contractId(this.networkPassphrase)
     if (await this.#exists(id)) return id
-    // Anyone may deploy it; a key of the worker's own pays, outside the accounts tests see.
-    const deployer = new Account(this, '\0native-asset-deployer', deriveKeypair(this.#seed, '\0native-asset-deployer'))
-    await this.#backend.fund(deployer.address)
+    const deployer = await this.#assetDeployer()
     const target = { contract: id, method: 'createStellarAssetContract' }
     try {
       const tx = await contract.AssembledTransaction.buildWithOp(Operation.createStellarAssetContract({ asset }), {

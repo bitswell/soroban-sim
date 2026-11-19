@@ -106,7 +106,7 @@ export class Account {
       const uploadTarget = { contract: 'the network', method: 'uploadContractWasm' }
       mapSignAndSend(upload, uploadTarget)
       await mapping(uploadTarget, upload, () => upload.simulate())
-      await upload.signAndSend()
+      if (!upload.isReadCall) await upload.signAndSend()
     }
 
     const spec = await specFor(this.worker, wasmHash)
