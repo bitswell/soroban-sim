@@ -269,7 +269,7 @@ and wait until friendbot answers.
 | `SOROBAN_TEST_CACHE_DIR` | Where cached setups live | `node_modules/.cache/soroban-sim-vitest` |
 | `SOROBAN_TEST_RPC_URL` | The local network's RPC | `http://localhost:8000/rpc` |
 | `SOROBAN_TEST_FRIENDBOT_URL` | Its friendbot | `/friendbot` on the RPC's host |
-| `SOROBAN_TEST_WAIT_SECONDS` | How long `signAndSend` waits for a sent transaction's result | `60` |
+| `SOROBAN_TEST_WAIT_SECONDS` | How long `signAndSend` waits for a sent transaction's result, in seconds: above 0 and at most 2,147,481 (the longest a timer can run) | `60` |
 | `SOROBAN_TEST_CACHE_EXPLAIN` | `1` says on stderr, for each suite, whether its setup came from the cache and, on a miss, what changed | off |
 
 The bundled snapshot holds the settings and latest header of a fresh

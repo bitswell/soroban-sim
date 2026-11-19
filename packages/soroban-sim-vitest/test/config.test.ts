@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { resolveConfig } from '../src/config.ts'
+import { MAX_WAIT_SECONDS, WAIT_MARGIN_MS, resolveConfig } from '../src/config.ts'
 import { deriveKeypair } from '../src/keys.ts'
 
 describe('account keys', () => {
@@ -38,7 +38,18 @@ describe('configuration', () => {
     expect(resolveConfig({}).sim.explain).toBe(false)
     const c = resolveConfig({ SOROBAN_TEST_WAIT_SECONDS: '15', SOROBAN_TEST_CACHE_EXPLAIN: '1' })
     expect([c.waitSeconds, c.sim.explain]).toEqual([15, true])
-    expect(() => resolveConfig({ SOROBAN_TEST_WAIT_SECONDS: 'soon' })).toThrow(/SOROBAN_TEST_WAIT_SECONDS/)
+  })
+
+  test('the wait bound is a finite number of seconds above 0 that a timer can hold', () => {
+    const waitSeconds = (value: string) => resolveConfig({ SOROBAN_TEST_WAIT_SECONDS: value }).waitSeconds
+    expect(waitSeconds('0.5')).toBe(0.5)
+    expect(waitSeconds(String(MAX_WAIT_SECONDS))).toBe(MAX_WAIT_SECONDS)
+    expect(MAX_WAIT_SECONDS * 1000 + WAIT_MARGIN_MS).toBeLessThanOrEqual(2 ** 31 - 1)
+    for (const refused of ['soon', '0', '-5', 'Infinity', '3000000', String(MAX_WAIT_SECONDS + 1)]) {
+      expect(() => waitSeconds(refused), refused).toThrow(
+        `SOROBAN_TEST_WAIT_SECONDS must be a number of seconds above 0 and at most ${MAX_WAIT_SECONDS} (the longest a timer can run), not "${refused}"`,
+      )
+    }
   })
 
   test('refuses values it does not know', () => {

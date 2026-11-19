@@ -35,6 +35,12 @@ export const DEFAULT_SNAPSHOT = fileURLToPath(new URL('../snapshots/local-networ
 /** Mixed into every signer's key derivation. */
 export const SEED = 'soroban-sim-vitest'
 
+/** The harness's own wait timer runs this much past `waitSeconds`, so the SDK's poll, bounded the same, reports first. */
+export const WAIT_MARGIN_MS = 2_000
+
+/** The longest wait a Node timer can hold (2^31 - 1 ms), less the margin. */
+export const MAX_WAIT_SECONDS = Math.floor((2 ** 31 - 1 - WAIT_MARGIN_MS) / 1000)
+
 export function defaultCacheDir(cwd = process.cwd()): string {
   return path.join(cwd, 'node_modules', '.cache', 'soroban-sim-vitest')
 }
@@ -53,8 +59,11 @@ export function resolveConfig(env: Env = process.env): Config {
   }
   const rpcUrl = env.SOROBAN_TEST_RPC_URL || 'http://localhost:8000/rpc'
   const waitSeconds = Number(env.SOROBAN_TEST_WAIT_SECONDS || 60)
-  if (!(waitSeconds > 0)) {
-    throw new Error(`SOROBAN_TEST_WAIT_SECONDS must be a number of seconds above 0, not ${JSON.stringify(env.SOROBAN_TEST_WAIT_SECONDS)}`)
+  if (!(waitSeconds > 0 && waitSeconds <= MAX_WAIT_SECONDS)) {
+    throw new Error(
+      `SOROBAN_TEST_WAIT_SECONDS must be a number of seconds above 0 and at most ${MAX_WAIT_SECONDS} ` +
+        `(the longest a timer can run), not ${JSON.stringify(env.SOROBAN_TEST_WAIT_SECONDS)}`,
+    )
   }
   return {
     environment,

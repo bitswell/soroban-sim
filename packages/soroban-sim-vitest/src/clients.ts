@@ -1,4 +1,5 @@
 import { contract } from '@stellar/stellar-sdk'
+import { WAIT_MARGIN_MS } from './config.ts'
 import { TransactionError, invocationError, type CallTarget } from './errors.ts'
 import { CLOSED, MARKER } from './internal.ts'
 import { STELLAR_ASSET_SPEC } from './sac.ts'
@@ -195,9 +196,6 @@ function mapResult(tx: contract.AssembledTransaction<unknown>, target: CallTarge
 
 const CANCELLED = Symbol('cancelled')
 const EXPIRED = Symbol('expired')
-
-/** The harness's own timer runs this much past `waitSeconds`, so the SDK's poll, bounded the same, reports first. */
-const WAIT_MARGIN_MS = 2_000
 
 /**
  * `tx.signAndSend`, still the SDK's, with its failures typed and its wait
