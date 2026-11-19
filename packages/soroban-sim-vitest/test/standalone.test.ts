@@ -24,3 +24,16 @@ test('a worker started outside Vitest funds an account', async () => {
   const { stdout } = await run(process.execPath, ['--input-type=module', '-e', script], { cwd: packageDir, env: process.env })
   expect(stdout.trim()).toBe('100000000000')
 })
+
+test('a worker started outside Vitest gives the asset contract its generated client', async () => {
+  const script = `
+    const { Worker } = await import('@theahaco/soroban-sim-vitest/worker')
+    const worker = await Worker.init()
+    const alice = await worker.createAccount('alice')
+    const xlm = alice.client(await worker.xlm())
+    const read = await xlm.balance({ id: alice.address })
+    console.log(String(read.result), String(xlm.fromJSON.balance(read.toJSON()).result))
+    await worker.tearDown()`
+  const { stdout } = await run(process.execPath, ['--input-type=module', '-e', script], { cwd: packageDir, env: process.env })
+  expect(stdout.trim()).toBe('100000000000 100000000000')
+})

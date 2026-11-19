@@ -4,7 +4,7 @@ import { Address, xdr } from '@stellar/stellar-sdk'
 import { expect, test } from 'vitest'
 import { ContractError } from '../src/index.ts'
 import { invocationError } from '../src/errors.ts'
-import { STELLAR_ASSET_SPEC } from '../src/sac.ts'
+import { StellarAssetClient } from '../src/sac.ts'
 
 const VAULT = 'CA7742EZELDVK5IFOELP7EBOYSFZFU5RO7S5MX4RVUJCYT7U3ZYGMUSV'
 const TOKEN = 'CDMLFMKMMD7MWZP3FKUBZPVHTUEDLSX4BYGYKH4GCESXYHS3IHQ4EIG4'
@@ -29,7 +29,13 @@ function errorIn(contract: string, error: number | xdr.ScError): xdr.DiagnosticE
 }
 
 // The vault's own enum names code 10 here; the token's names it BalanceError.
-const vault = { contract: VAULT, method: 'withdraw', spec: STELLAR_ASSET_SPEC }
+const { spec } = new StellarAssetClient({
+  contractId: VAULT,
+  networkPassphrase: 'Standalone Network ; February 2017',
+  rpcUrl: 'http://127.0.0.1:1',
+  allowHttp: true,
+})
+const vault = { contract: VAULT, method: 'withdraw', spec }
 const paths: [string, string][] = [
   ['simulation', 'HostError: Error(Contract, #10)'],
   ['on the ledger', ''],

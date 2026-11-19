@@ -125,8 +125,9 @@ jobs:
         run: pnpm --filter @theahaco/soroban-sim-vitest check
 
   # The harness's table of the asset contract's errors is emitted from the
-  # host's own enum (crates/soroban-sim-asset-errors); this fails when the
-  # committed table differs from what the emitter writes.
+  # host's own enum, and its bindings for that contract are stellar-cli's,
+  # rewritten for plain Node (crates/soroban-sim-asset-errors); this fails
+  # when a committed file is not what the emitter writes.
   vitest-generated:
     runs-on: ubuntu-latest
     steps:
@@ -135,7 +136,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: vitest-generated
-      - name: The asset contract's error table is up to date
+      - name: The asset contract's error table and bindings are up to date
         run: cargo run -p soroban-sim-asset-errors --locked -- --check
 
   # The latest release (soroban-sim-cli-v0.1.0) predates fork_exportSnapshot,

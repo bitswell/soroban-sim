@@ -36,8 +36,14 @@ describe('configuration', () => {
   test('reads the wait bound and the cache explanation switch', () => {
     expect(resolveConfig({}).waitSeconds).toBe(60)
     expect(resolveConfig({}).sim.explain).toBe(false)
-    const c = resolveConfig({ SOROBAN_TEST_WAIT_SECONDS: '15', SOROBAN_TEST_CACHE_EXPLAIN: '1' })
+    const c = resolveConfig({ SOROBAN_TEST_WAIT_SECONDS: '15', SOROBAN_TEST_CACHE_EXPLAIN: 'on' })
     expect([c.waitSeconds, c.sim.explain]).toEqual([15, true])
+    expect(resolveConfig({ SOROBAN_TEST_CACHE_EXPLAIN: 'off' }).sim.explain).toBe(false)
+    for (const refused of ['1', 'true']) {
+      expect(() => resolveConfig({ SOROBAN_TEST_CACHE_EXPLAIN: refused }), refused).toThrow(
+        `SOROBAN_TEST_CACHE_EXPLAIN must be "on" or "off", not "${refused}"`,
+      )
+    }
   })
 
   test('the wait bound is a finite number of seconds above 0 that a timer can hold', () => {

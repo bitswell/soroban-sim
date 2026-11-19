@@ -16,6 +16,7 @@ import {
   type ContractDefinition,
 } from './clients.ts'
 import { ADMIN, BINDINGS, DEPLOYS, MARKER } from './internal.ts'
+import { StellarAssetClient } from './sac.ts'
 import { toPath } from './paths.ts'
 import type { Worker } from './worker.ts'
 
@@ -59,7 +60,7 @@ export class Account {
     const bound = boundOf(contract)
     if (!bound) throw new Error('account.client takes a client from this package (deploy, worker.contract or worker.xlm)')
     if (bound.worker !== this.worker) throw new Error(`that client is on another worker's network than ${this.name}`)
-    return buildClient(this.worker, contract.options.contractId, contract.spec, bound.wasmHash, this, bound.Bindings) as unknown as C
+    return buildClient(this.worker, contract.options.contractId, bound.wasmHash, this, bound.Bindings ?? contract.spec) as unknown as C
   }
 
   /**
@@ -113,7 +114,7 @@ export class Account {
     const target = { contract: id, method: '__constructor', spec }
     mapSignAndSend(created, target, this.worker)
     await created.signAndSend()
-    return buildClient(this.worker, id, spec, wasmHash, this, Bindings)
+    return buildClient(this.worker, id, wasmHash, this, Bindings ?? spec)
   }
 
   /**
@@ -149,7 +150,7 @@ export class Account {
   }
 }
 
-/** An unsigned client for the contract at `id` (reads only), of the bindings class when given. */
+/** An unsigned client for the contract at `id` (reads only): of the bindings class when given, and a Stellar asset contract's is a StellarAssetClient. */
 export async function attach(
   worker: Worker,
   id: string,
@@ -158,8 +159,9 @@ export async function attach(
   knownHash?: string | null,
 ): Promise<ContractClient> {
   const wasmHash = knownHash === undefined ? await wasmHashOf(worker, id) : (knownHash ?? undefined)
-  const spec = await specFor(worker, wasmHash)
-  return buildClient(worker, id, spec, wasmHash, signer, classFor(worker, wasmHash, Bindings, id))
+  const declared = classFor(worker, wasmHash, Bindings, id)
+  const from = declared ?? (wasmHash === undefined ? StellarAssetClient : await specFor(worker, wasmHash))
+  return buildClient(worker, id, wasmHash, signer, from)
 }
 
 /**

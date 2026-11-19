@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Emits the Stellar asset contract's error table for @theahaco/soroban-sim-vitest from the host's own enum"
+description = "Emits the Stellar asset contract's error table and bindings for @theahaco/soroban-sim-vitest"
 
 [dependencies]
 # What the host's contract_error.rs, compiled here as a module, itself uses.

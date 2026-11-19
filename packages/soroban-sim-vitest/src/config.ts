@@ -12,7 +12,7 @@ export interface SimConfig {
   /** `off` runs setup every time and leaves the cache alone. */
   cache: 'on' | 'off'
   cacheDir: string
-  /** Say on stderr, for each suite, whether its setup came from the cache and, on a miss, what changed. */
+  /** `on` says on stderr, for each suite, whether its setup came from the cache and, on a miss, what changed. */
   explain: boolean
 }
 
@@ -57,6 +57,10 @@ export function resolveConfig(env: Env = process.env): Config {
   if (cache !== 'on' && cache !== 'off') {
     throw new Error(`SOROBAN_TEST_CACHE must be "on" or "off", not ${JSON.stringify(cache)}`)
   }
+  const explain = env.SOROBAN_TEST_CACHE_EXPLAIN || 'off'
+  if (explain !== 'on' && explain !== 'off') {
+    throw new Error(`SOROBAN_TEST_CACHE_EXPLAIN must be "on" or "off", not ${JSON.stringify(explain)}`)
+  }
   const rpcUrl = env.SOROBAN_TEST_RPC_URL || 'http://localhost:8000/rpc'
   const waitSeconds = Number(env.SOROBAN_TEST_WAIT_SECONDS || 60)
   if (!(waitSeconds > 0 && waitSeconds <= MAX_WAIT_SECONDS)) {
@@ -73,7 +77,7 @@ export function resolveConfig(env: Env = process.env): Config {
       snapshot: path.resolve(env.SOROBAN_SIM_SNAPSHOT || DEFAULT_SNAPSHOT),
       cache,
       cacheDir: path.resolve(env.SOROBAN_TEST_CACHE_DIR || defaultCacheDir()),
-      explain: ['1', 'on', 'true'].includes(env.SOROBAN_TEST_CACHE_EXPLAIN ?? ''),
+      explain: explain === 'on',
     },
     local: {
       rpcUrl,

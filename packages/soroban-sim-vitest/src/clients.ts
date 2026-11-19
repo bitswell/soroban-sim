@@ -2,7 +2,6 @@ import { contract } from '@stellar/stellar-sdk'
 import { WAIT_MARGIN_MS } from './config.ts'
 import { TransactionError, invocationError, type CallTarget } from './errors.ts'
 import { CLOSED, MARKER } from './internal.ts'
-import { STELLAR_ASSET_SPEC } from './sac.ts'
 import type { Account } from './account.ts'
 import type { Worker } from './worker.ts'
 
@@ -99,9 +98,8 @@ export async function wasmHashOf(worker: Worker, contractId: string): Promise<st
   return executable.type === 'contractExecutableWasm' ? Buffer.from(executable.wasmHash.value).toString('hex') : undefined
 }
 
-/** The spec of the code `wasmHash` names (from the network if this process has not seen it), or the asset contract's. */
-export function specFor(worker: Worker, wasmHash: string | undefined): Promise<contract.Spec> {
-  if (wasmHash === undefined) return Promise.resolve(STELLAR_ASSET_SPEC)
+/** The spec of the code `wasmHash` names (from the network if this process has not seen it). */
+export function specFor(worker: Worker, wasmHash: string): Promise<contract.Spec> {
   let found = specs.get(wasmHash)
   if (!found) {
     found = worker.rpc.getContractWasmByHash(wasmHash, 'hex').then((wasm) => contract.Spec.fromWasm(Buffer.from(wasm)))
@@ -131,17 +129,17 @@ export function clientOptions(
   }
 }
 
-/** Builds the client: the generated class when given one, else `contract.Client` from the spec. */
+/** Builds the client from a generated class, or `contract.Client` from a spec. */
 export function buildClient(
   worker: Worker,
   contractId: string,
-  spec: contract.Spec,
   wasmHash: string | undefined,
   signer: Account | undefined,
-  Bindings: BindingsClass | undefined,
+  from: BindingsClass | contract.Spec,
 ): ContractClient {
   const options = clientOptions(worker, contractId, signer)
-  const client = (Bindings ? new Bindings(options) : new contract.Client(spec, options)) as ContractClient
+  const Bindings = typeof from === 'function' ? from : undefined
+  const client = (typeof from === 'function' ? new from(options) : new contract.Client(from, options)) as ContractClient
   const bound: Bound = { worker, wasmHash, signer, Bindings }
   Object.defineProperty(client, BOUND, { value: bound })
   // In a setup's result the client is stored as a marker, and each test gets it back on its own network.
