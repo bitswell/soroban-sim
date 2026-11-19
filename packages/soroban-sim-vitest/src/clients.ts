@@ -194,13 +194,18 @@ function mapResult(tx: contract.AssembledTransaction<unknown>, target: CallTarge
 }
 
 const CANCELLED = Symbol('cancelled')
+const EXPIRED = Symbol('expired')
+
+/** The harness's own timer runs this much past `waitSeconds`, so the SDK's poll, bounded the same, reports first. */
+const WAIT_MARGIN_MS = 2_000
 
 /**
  * `tx.signAndSend`, still the SDK's, with its failures typed and its wait
  * bounded on its own: the transaction is signed with the client's far time
  * bound (so time travel never makes it too late), and once it is sent the
- * SDK polls for at most `wait.waitSeconds`. Tearing the worker down cancels
- * the wait. A transaction the network refuses, or one not applied in time,
+ * SDK polls for at most `wait.waitSeconds`; a timer of the harness's own
+ * ends the wait just after that whatever the SDK does. Tearing the worker
+ * down cancels the wait. A transaction the network refuses, or one not applied in time,
  * is a TransactionError with its hash, method, environment and last status.
  */
 export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, target: CallTarget, wait: WaitContext): void {
@@ -209,12 +214,18 @@ export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, targe
   tx.signAndSend = async ({ watcher, ...options }: Parameters<typeof signAndSend>[0] = {}) => {
     const validity = tx.options.timeoutInSeconds
     const details = { environment: wait.environment, hash: undefined as string | undefined, lastStatus: 'not sent' }
+    let expire!: () => void
+    const expired = new Promise<never>((_, reject) => (expire = () => reject(EXPIRED)))
+    const untilExpiry = () => setTimeout(expire, wait.waitSeconds * 1000 + WAIT_MARGIN_MS)
+    let timer = untilExpiry()
     const bounded: contract.Watcher = {
       onSubmitted(response) {
         details.hash = response?.hash
         details.lastStatus = response?.status ?? details.lastStatus
         // Signed by now, with the far time bound; from here the SDK only polls, as long as this says.
         tx.options.timeoutInSeconds = wait.waitSeconds
+        clearTimeout(timer)
+        timer = untilExpiry()
         watcher?.onSubmitted?.(response)
       },
       onProgress(response) {
@@ -226,14 +237,15 @@ export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, targe
     sending.catch(() => {})
     let sent: contract.SentTransaction<unknown>
     try {
-      sent = await Promise.race([sending, cancelled(wait[CLOSED])])
+      sent = await Promise.race([sending, cancelled(wait[CLOSED]), expired])
     } catch (e) {
       if (e === CANCELLED) {
         throw new TransactionError(what, 'CANCELLED', undefined, details, 'the wait for its result was cancelled: the worker was torn down')
       }
-      if (e instanceof contract.SentTransaction.Errors.TransactionStillPending) {
+      if (e === EXPIRED || e instanceof contract.SentTransaction.Errors.TransactionStillPending) {
         const why = `not applied within ${wait.waitSeconds} s of waiting`
-        throw Object.assign(new TransactionError(what, 'NOT_FOUND', undefined, details, why), { cause: e })
+        const error = new TransactionError(what, 'NOT_FOUND', undefined, details, why)
+        throw e === EXPIRED ? error : Object.assign(error, { cause: e })
       }
       if (e instanceof contract.SentTransaction.Errors.SendFailed) {
         const result = /"result":\s*"(\w+)"/.exec(e.message)?.[1]
@@ -242,13 +254,15 @@ export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, targe
       }
       throw typedError(target, tx, e)
     } finally {
+      clearTimeout(timer)
       tx.options.timeoutInSeconds = validity
     }
     const response = sent.getTransactionResponse
     if (response?.status === 'FAILED') {
       const events = response.diagnosticEventsXdr ?? []
       if (events.length) throw invocationError(target, '', events)
-      throw new TransactionError(what, 'FAILED', response.resultXdr.result.type, { ...details, lastStatus: 'FAILED' })
+      const result = response.resultXdr.result.type.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
+      throw new TransactionError(what, 'FAILED', result, { ...details, lastStatus: 'FAILED' })
     }
     return sent
   }

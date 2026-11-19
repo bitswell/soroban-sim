@@ -78,7 +78,7 @@ export class TransactionError extends Error {
    * torn down while waiting).
    */
   readonly status: string
-  /** The transaction result code, such as `tx_bad_seq`. */
+  /** The transaction result code, such as `tx_bad_seq`: the SDK's JSON spelling, on every path. */
   readonly result: string | undefined
   readonly hash: string | undefined
   readonly environment: string | undefined
