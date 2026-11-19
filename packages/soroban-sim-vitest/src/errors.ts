@@ -1,4 +1,4 @@
-import { humanizeEvents, type contract, type xdr } from '@stellar/stellar-sdk'
+import { StrKey, humanizeEvents, type contract, type xdr } from '@stellar/stellar-sdk'
 
 /** A sandbox control (setting a balance, moving time, patching storage) that a local network cannot provide. */
 export class SandboxOnlyError extends Error {
@@ -42,7 +42,10 @@ export class ContractError extends InvocationError {
   /**
    * The code's name in the called contract's error enum. Undefined when its
    * spec has none, or when a contract it called raised the error and it
-   * passed through: the code is then from that contract's enum.
+   * passed through: the code is then from that contract's enum. Also
+   * undefined when the called contract caught a failed call of its own
+   * (`try_call`) and then raised its own error with the same number: the
+   * name is then missing, never wrong.
    */
   readonly errorName: string | undefined
 
@@ -91,7 +94,8 @@ export function invocationError(target: CallTarget, text: string, events: xdr.Di
   const code = /^#(\d+)$/.exec(value)
   if (type === 'Contract' && code) {
     const n = Number(code[1])
-    // The contract that raises an error logs it first; its callers log it again as it passes through them.
+    // The contract that raises an error logs it first, so the oldest event with the code is the raiser's;
+    // its callers log the same code again as it passes through them.
     const raisedIn = logged.find((e) => e.error === found[0])?.contractId
     return new ContractError(target, n, raisedIn === target.contract ? errorName(target.spec, n) : undefined, events, readable)
   }
@@ -106,7 +110,7 @@ function errorName(spec: contract.Spec | null | undefined, code: number): string
   }
 }
 
-type Humanized = { type?: string; topics?: unknown[]; contractId?: string; data?: unknown }
+type Humanized = { topics?: unknown[]; contractId?: string; data?: unknown }
 
 function humanized(events: xdr.DiagnosticEvent[]): Humanized[] {
   try {
@@ -118,13 +122,14 @@ function humanized(events: xdr.DiagnosticEvent[]): Humanized[] {
 
 /** The host errors in the diagnostic `error` events, oldest first, each with the contract that logged it. */
 function loggedErrors(events: xdr.DiagnosticEvent[]): { error: string; contractId: string | undefined }[] {
-  return humanized(events).flatMap((e) => {
-    const [topic, err] = e.topics ?? []
-    if (e.type !== 'diagnostic' || topic !== 'error' || !err || typeof err !== 'object') return []
-    const { type, code } = err as { type?: string; code?: number | string }
-    if (type === undefined || code === undefined) return []
-    const name = type.charAt(0).toUpperCase() + type.slice(1)
-    return [{ error: `Error(${name}, ${type === 'contract' ? `#${code}` : code})`, contractId: e.contractId }]
+  return events.flatMap(({ event }) => {
+    const [topic, logged] = event.body.v0.topics
+    if (event.type.name !== 'diagnostic' || topic?.type !== 'scvSymbol' || topic.value !== 'error') return []
+    if (logged?.type !== 'scvError') return []
+    const { error } = logged
+    const value = error.type === 'sceContract' ? `#${error.contractCode}` : error.code.name.slice('scec'.length)
+    const contractId = event.contractId ? StrKey.encodeContract(Buffer.from(event.contractId.value)) : undefined
+    return [{ error: `Error(${error.type.slice('sce'.length)}, ${value})`, contractId }]
   })
 }
 

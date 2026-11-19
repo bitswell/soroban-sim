@@ -95,7 +95,7 @@ A failed call throws a typed error:
 
 | Error | When | Carries |
 |---|---|---|
-| `ContractError` | the call failed with a contract's own error (`Error(Contract, #n)`) | `code`, `errorName` (from the called contract's error enum; undefined when the error came up from a contract it called), `events` |
+| `ContractError` | the call failed with a contract's own error (`Error(Contract, #n)`) | `code`, `errorName` (from the called contract's error enum; undefined when the error came up from a contract it called, or when the called contract caught a failed call with `try_call` and then raised its own error with the same number: a missing name, never a wrong one), `events` |
 | `InvocationError` | any other host error: a trap, failed authorization, a missing entry | `hostError` (such as `Error(WasmVm, InvalidAction)`), `events` |
 | `TransactionError` | the network refused the transaction itself | `status`, `result` (such as `txBadSeq`) |
 
@@ -274,7 +274,7 @@ pass on the other.
 | Sandbox controls | all | none: each throws `SandboxOnlyError` |
 | History | `getTransaction` and `getEvents` cover only the test's own transactions; `getLedgers` and `getTransactions` are not served | full |
 | Clock | starts at the setup's ledger time and follows the wall clock; `setTime` and `advanceLedgers` move it ahead | follows the wall clock |
-| Speed (this package's suites, one laptop) | about 0.6 s for 34 tests with setup, 0.5 s from the cache | about 40 s for the 24 that run there |
+| Speed (this package's suites, one laptop) | about 0.6 s for 37 tests with setup, 0.5 s from the cache | about 40 s for the 27 that run there |
 
 A suite that passes on soroban-sim can still fail on a local network on
 timing: a test that assumes a transaction is visible as soon as

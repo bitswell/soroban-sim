@@ -9,8 +9,9 @@ import { STELLAR_ASSET_SPEC } from '../src/sac.ts'
 const VAULT = 'CA7742EZELDVK5IFOELP7EBOYSFZFU5RO7S5MX4RVUJCYT7U3ZYGMUSV'
 const TOKEN = 'CDMLFMKMMD7MWZP3FKUBZPVHTUEDLSX4BYGYKH4GCESXYHS3IHQ4EIG4'
 
-/** A diagnostic `error` event for contract error `code`, logged while `contract` runs. */
-function errorIn(contract: string, code: number): xdr.DiagnosticEvent {
+/** A diagnostic `error` event logged while `contract` runs: a contract error code, or another host error. */
+function errorIn(contract: string, error: number | xdr.ScError): xdr.DiagnosticEvent {
+  const scError = typeof error === 'number' ? xdr.ScError.sceContract(error) : error
   return new xdr.DiagnosticEvent({
     inSuccessfulContractCall: false,
     event: new xdr.ContractEvent({
@@ -19,7 +20,7 @@ function errorIn(contract: string, code: number): xdr.DiagnosticEvent {
       type: xdr.ContractEventType.diagnostic,
       body: xdr.ContractEventBody.v0(
         new xdr.ContractEventV0({
-          topics: [xdr.ScVal.scvSymbol('error'), xdr.ScVal.scvError(xdr.ScError.sceContract(code))],
+          topics: [xdr.ScVal.scvSymbol('error'), xdr.ScVal.scvError(scError)],
           data: xdr.ScVal.scvVoid(),
         }),
       ),
@@ -34,13 +35,15 @@ const paths: [string, string][] = [
   ['on the ledger', ''],
 ]
 
-// The token raises 10; the vault logs it twice more as its call fails and its VM traps.
+// The token raises 10 first; the vault logs it twice more, later, as its call fails and its VM traps.
 const tokenFailed = [errorIn(TOKEN, 10), errorIn(VAULT, 10), errorIn(VAULT, 10)]
 const vaultFailed = [errorIn(VAULT, 10)]
 // The token raises 9, the vault catches it (try_call) and then raises its own 10.
 const vaultFailedAfterCatching = [errorIn(TOKEN, 9), errorIn(VAULT, 9), errorIn(VAULT, 10)]
+// As above, but the token's caught error is also number 10.
+const vaultFailedAfterCatchingTheSameNumber = [errorIn(TOKEN, 10), errorIn(VAULT, 10), errorIn(VAULT, 10)]
 
-test.for(paths)('%s: an error raised by a contract the call reached is not named from the called contract', ([, text]) => {
+test.for(paths)('%s: the oldest event with the code names the raiser: an error passing through the called contract is not named from it', ([, text]) => {
   const error = invocationError(vault, text, tokenFailed)
   expect(error).toBeInstanceOf(ContractError)
   expect(error).toMatchObject({ code: 10, errorName: undefined, hostError: 'Error(Contract, #10)' })
@@ -54,4 +57,16 @@ test.for(paths)('%s: the called contract’s own error is named', ([, text]) => 
 test.for(paths)('%s: the called contract’s own error is named after it caught a failed call', ([, text]) => {
   const error = invocationError(vault, text, vaultFailedAfterCatching)
   expect(error).toMatchObject({ code: 10, errorName: 'BalanceError', hostError: 'Error(Contract, #10) BalanceError' })
+})
+
+test.for(paths)('%s: after catching a failed call with the same number, the name is missing, not wrong', ([, text]) => {
+  const error = invocationError(vault, text, vaultFailedAfterCatchingTheSameNumber)
+  expect(error).toMatchObject({ code: 10, errorName: undefined })
+})
+
+test('on the ledger: a host error other than a contract’s keeps its type and code name', () => {
+  const trap = xdr.ScError.sceWasmVm(xdr.ScErrorCode.scecInvalidAction)
+  const error = invocationError(vault, '', [errorIn(VAULT, trap)])
+  expect(error).not.toBeInstanceOf(ContractError)
+  expect(error.hostError).toBe('Error(WasmVm, InvalidAction)')
 })
