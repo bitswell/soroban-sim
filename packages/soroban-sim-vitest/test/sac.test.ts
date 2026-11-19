@@ -1,9 +1,8 @@
-// The Stellar asset contract has no Wasm to read a spec from: its spec and
-// error names are checked here against their sources.
-import { readFile } from 'node:fs/promises'
+// The Stellar asset contract has no Wasm to read a spec from: the spec entries
+// the harness uses are checked here against the generated bindings' own.
 import { expect, test } from 'vitest'
 import { Client as Generated } from '../src/generated/stellar-asset.ts'
-import { STELLAR_ASSET_ENTRIES, STELLAR_ASSET_ERRORS, STELLAR_ASSET_SPEC } from '../src/sac.ts'
+import { STELLAR_ASSET_ENTRIES, STELLAR_ASSET_SPEC } from '../src/sac.ts'
 
 test('the spec entries are the ones stellar contract bindings generated', () => {
   const generated = new Generated({
@@ -14,11 +13,4 @@ test('the spec entries are the ones stellar contract bindings generated', () => 
   })
   expect(generated.spec.entries.map((entry) => entry.toXdr('base64'))).toEqual([...STELLAR_ASSET_ENTRIES])
   expect(STELLAR_ASSET_SPEC.funcs().map((f) => f.name.toString())).toContain('trust')
-})
-
-test('the error names are the host’s, by code', async () => {
-  const source = await readFile(new URL('../../../crates/soroban-sim-host/src/builtin_contracts/contract_error.rs', import.meta.url), 'utf8')
-  const body = /pub\(crate\) enum ContractError \{([\s\S]*?)\n\}/.exec(source)![1]
-  const host = [...body.matchAll(/^\s*([A-Za-z]\w*) = (\d+),/gm)].map(([, name, code]) => [name, Number(code)])
-  expect([...STELLAR_ASSET_ERRORS]).toEqual(host.filter(([name]) => !String(name).startsWith('_')))
 })

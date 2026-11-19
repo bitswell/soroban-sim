@@ -8,6 +8,9 @@ members = [
     "crates/soroban-sim-facade",
     # The sign dialog's preview reactor (not published; one build per host).
     "crates/soroban-sim-preview",
+    # Emits the asset contract's error table for packages/soroban-sim-vitest
+    # from the host's own enum (not published).
+    "crates/soroban-sim-asset-errors",
     # Generated copies of core, facade and the CLI's library against the
     # protocol-30 host (scripts/sync-protocol-twins.py).
     "crates/soroban-sim-core-p30",

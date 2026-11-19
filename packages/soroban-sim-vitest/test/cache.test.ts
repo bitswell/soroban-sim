@@ -157,20 +157,6 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
     await expect(prepareSimSetup(suite, cfg)).rejects.toThrow(/does not list in `wasm`/)
   })
 
-  test('setup may not deploy with a bindings client the suite does not pair with the Wasm', async () => {
-    const cfg = await config()
-    const { Client: StorageClient } = await import('./bindings/storage.ts')
-    const suite: SuiteDefinition<undefined> = {
-      name: 'unpaired',
-      wasm: [storage],
-      async setup(worker) {
-        const admin = await worker.createAccount('admin')
-        await admin.deploy(storage, { client: StorageClient })
-      },
-    }
-    await expect(prepareSimSetup(suite, cfg)).rejects.toThrow(/does not pair with it/)
-  })
-
   test('cacheInputs are part of the key, each by name', async () => {
     const cfg = await config()
     const wasm = [await readFile(storage)]
@@ -193,5 +179,22 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
     expect(await explained(withSupply(1n))).toMatch(/cache miss for "cache" .*: no earlier entry for this suite$/)
     expect(await explained(withSupply(1n))).toMatch(/cache hit for "cache" .*: setup did not run$/)
     expect(await explained(withSupply(2n))).toMatch(/cache miss for "cache" .*: changed since the last entry: cacheInputs\.initialSupply$/)
+  })
+
+  test('with explain on, a setup that failed leaves no entry for the next run to compare with', async () => {
+    const base = await config()
+    const cfg = { ...base, sim: { ...base.sim, explain: true } }
+    let fail = true
+    const suite: SuiteDefinition<number> = {
+      name: 'fails once',
+      async setup() {
+        if (fail) throw new Error('setup broke')
+        return 1
+      },
+    }
+    await expect(prepareSimSetup(suite, cfg)).rejects.toThrow('setup broke')
+    fail = false
+    expect((await prepareSimSetup(suite, cfg)).explanation).toMatch(/cache miss for "fails once" .*: no earlier entry for this suite$/)
+    expect((await prepareSimSetup(suite, cfg)).explanation).toMatch(/cache hit for "fails once" /)
   })
 })

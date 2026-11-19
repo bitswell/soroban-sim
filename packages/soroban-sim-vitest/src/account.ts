@@ -19,16 +19,12 @@ import { ADMIN, BINDINGS, DEPLOYS, MARKER } from './internal.ts'
 import { toPath } from './paths.ts'
 import type { Worker } from './worker.ts'
 
-export interface DeployOptions<B extends BindingsClass | undefined = undefined> {
+export interface DeployOptions {
   /** The constructor's arguments, named, as the contract's spec declares them. */
   args?: Record<string, unknown>
   /** 32 bytes; the default is random, so each deploy is a new contract. */
   salt?: Uint8Array
-  /** The generated bindings `Client` to return, for typed methods. */
-  client?: B
 }
-
-type Deployed<B> = B extends BindingsClass<infer C> ? C : ContractClient
 
 /** A funded account, created by name. It signs and pays for the transactions of the clients bound to it. */
 export class Account {
@@ -57,45 +53,36 @@ export class Account {
   /**
    * The same contract with this account signing: an SDK client of the same
    * class (the generated one, or `contract.Client`), on this account's
-   * network. Given a bindings class, a client of that class.
+   * network.
    */
-  client<C extends contract.Client>(contract: C): C
-  client<C extends contract.Client>(contract: contract.Client, Bindings: BindingsClass<C>): C
-  client(contract: contract.Client, Bindings?: BindingsClass): contract.Client {
+  client<C extends contract.Client>(contract: C): C {
     const bound = boundOf(contract)
     if (!bound) throw new Error('account.client takes a client from this package (deploy, worker.contract or worker.xlm)')
     if (bound.worker !== this.worker) throw new Error(`that client is on another worker's network than ${this.name}`)
-    return buildClient(this.worker, contract.options.contractId, contract.spec, bound.wasmHash, this, Bindings ?? bound.Bindings)
+    return buildClient(this.worker, contract.options.contractId, contract.spec, bound.wasmHash, this, bound.Bindings) as unknown as C
   }
 
   /**
    * Uploads the contract's Wasm, creates a contract from it with `args` for
    * its constructor, and returns a client for it with this account signing.
-   * Given a `defineContract` declaration, a client of its generated class,
-   * typed; given a path, URL or bytes, the generated class in `client`, or
-   * the spec-built `contract.Client`.
+   * Given a `defineContract` declaration with a generated client, a client
+   * of that class, typed; given a path, URL or bytes, the class the suite's
+   * `wasm` declares for that code, or the spec-built `contract.Client`.
    */
-  deploy<C extends contract.Client>(contract: ContractDefinition<C>, options?: Omit<DeployOptions, 'client'>): Promise<C>
-  deploy<B extends BindingsClass | undefined = undefined>(wasm: string | URL | Uint8Array, options?: DeployOptions<B>): Promise<Deployed<B>>
+  deploy<C extends contract.Client>(contract: ContractDefinition<C>, options?: DeployOptions): Promise<C>
+  deploy(wasm: string | URL | Uint8Array, options?: DeployOptions): Promise<ContractClient>
   async deploy(
     what: string | URL | Uint8Array | ContractDefinition<contract.Client>,
-    given: DeployOptions<BindingsClass | undefined> = {},
+    options: DeployOptions = {},
   ): Promise<contract.Client> {
     const wasm = isDefinition(what) ? what.file : what
-    const options = isDefinition(what) ? { ...given, client: what.client } : given
+    const declared = isDefinition(what) ? what.client : undefined
     const code = wasm instanceof Uint8Array ? wasm : await readFile(toPath(wasm))
     const wasmHash = createHash('sha256').update(code).digest('hex')
     const allowed = this.worker[DEPLOYS]
     if (allowed && !allowed.has(wasmHash)) {
       const what = wasm instanceof Uint8Array ? `Wasm ${wasmHash.slice(0, 12)}…` : String(wasm)
       throw new Error(`setup deploys ${what}, which the suite does not list in \`wasm\`: list it so the setup cache key covers it`)
-    }
-    const paired = this.worker[BINDINGS].get(wasmHash)
-    if (allowed && options.client && options.client !== paired) {
-      throw new Error(
-        `setup deploys ${String(wasm)} with a bindings client the suite does not pair with it: ` +
-          'list it in `wasm` as { file, client } so every test gets that client back',
-      )
     }
     rememberSpec(wasmHash, code)
     const salt = options.salt ?? randomBytes(32)
@@ -125,7 +112,7 @@ export class Account {
     const target = { contract: id, method: '__constructor', spec }
     mapSignAndSend(created, target, this.worker)
     await created.signAndSend()
-    return buildClient(this.worker, id, spec, wasmHash, this, options.client ?? paired)
+    return buildClient(this.worker, id, spec, wasmHash, this, declared ?? this.worker[BINDINGS].get(wasmHash))
   }
 
   /**

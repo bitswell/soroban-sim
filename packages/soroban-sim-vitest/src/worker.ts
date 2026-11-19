@@ -2,7 +2,6 @@ import { Address, Asset, Operation, contract, nativeToScVal, rpc, scValToNative,
 import { Account, attach } from './account.ts'
 import {
   clientOptions,
-  isDefinition,
   mapSignAndSend,
   type BindingsClass,
   type ContractClient,
@@ -138,11 +137,10 @@ export class Worker {
   /**
    * An SDK client for a contract already on the network, by its `C…`
    * address, with nobody signing (for reads; `account.client(it)` signs).
-   * Given a `defineContract` declaration or a generated class, a client of that class.
+   * Given a `defineContract` declaration with a generated client, a client of that class.
    */
-  async contract<C extends contract.Client = ContractClient>(id: string, kind?: ContractDefinition<C> | BindingsClass<C>): Promise<C> {
-    const Bindings = isDefinition(kind) ? kind.client : kind
-    return (await attach(this, id, Bindings)) as unknown as C
+  async contract<C extends contract.Client = ContractClient>(id: string, declaration?: ContractDefinition<C>): Promise<C> {
+    return (await attach(this, id, declaration?.client)) as unknown as C
   }
 
   /** An SDK client for the native asset (XLM) contract, deployed first if the network does not have it yet. */

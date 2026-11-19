@@ -29,7 +29,8 @@ export interface ContractDefinition<C extends contract.Client = ContractClient> 
  * Declares a contract once: its Wasm file and, optionally, the client
  * `stellar contract bindings typescript` generated for it. List it in a
  * suite's `wasm`, deploy it with `account.deploy(Storage)`, attach to it
- * with `worker.contract(id, Storage)`: each gives that client, typed.
+ * with `worker.contract(id, Storage)`: each gives that client, typed. It is
+ * the only way to pair a generated client with a contract.
  */
 export function defineContract(file: string | URL): ContractDefinition<ContractClient>
 export function defineContract<C extends contract.Client>(file: string | URL, client: BindingsClass<C>): ContractDefinition<C>
@@ -199,8 +200,8 @@ const CANCELLED = Symbol('cancelled')
  * bounded on its own: the transaction is signed with the client's far time
  * bound (so time travel never makes it too late), and once it is sent the
  * SDK polls for at most `wait.waitSeconds`. Tearing the worker down cancels
- * the wait. A transaction not applied in time is a TransactionError with
- * its hash, method, environment and last status.
+ * the wait. A transaction the network refuses, or one not applied in time,
+ * is a TransactionError with its hash, method, environment and last status.
  */
 export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, target: CallTarget, wait: WaitContext): void {
   const signAndSend = tx.signAndSend.bind(tx)
@@ -221,7 +222,7 @@ export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, targe
         watcher?.onProgress?.(response)
       },
     }
-    const sending = mapping(target, tx, () => signAndSend({ ...options, watcher: bounded }))
+    const sending = signAndSend({ ...options, watcher: bounded })
     sending.catch(() => {})
     let sent: contract.SentTransaction<unknown>
     try {
@@ -234,7 +235,12 @@ export function mapSignAndSend(tx: contract.AssembledTransaction<unknown>, targe
         const why = `not applied within ${wait.waitSeconds} s of waiting`
         throw Object.assign(new TransactionError(what, 'NOT_FOUND', undefined, details, why), { cause: e })
       }
-      throw e
+      if (e instanceof contract.SentTransaction.Errors.SendFailed) {
+        const result = /"result":\s*"(\w+)"/.exec(e.message)?.[1]
+        const hash = /"hash":\s*"(\w+)"/.exec(e.message)?.[1] ?? details.hash
+        throw Object.assign(new TransactionError(what, 'ERROR', result, { ...details, hash, lastStatus: 'ERROR' }), { cause: e })
+      }
+      throw typedError(target, tx, e)
     } finally {
       tx.options.timeoutInSeconds = validity
     }
@@ -255,7 +261,7 @@ function cancelled(signal: AbortSignal): Promise<never> {
   })
 }
 
-/** Runs `step`, turning the SDK's simulation and send failures into InvocationError, ContractError and TransactionError. */
+/** Runs `step`, turning the SDK's simulation failure into an InvocationError or ContractError. */
 export async function mapping<T>(target: CallTarget, tx: contract.AssembledTransaction<unknown>, step: () => Promise<T>): Promise<T> {
   try {
     return await step()
@@ -269,12 +275,6 @@ function typedError(target: CallTarget, tx: contract.AssembledTransaction<unknow
     const text = /Transaction simulation failed: "([\s\S]*)"$/.exec(e.message)?.[1] ?? e.message
     const events = tx.simulation && 'events' in tx.simulation ? tx.simulation.events : []
     return Object.assign(invocationError(target, text, events), { cause: e })
-  }
-  if (e instanceof contract.SentTransaction.Errors.SendFailed) {
-    const result = /"result":\s*"(\w+)"/.exec(e.message)?.[1]
-    const hash = /"hash":\s*"(\w+)"/.exec(e.message)?.[1]
-    const what = `${target.method} on ${target.contract}`
-    return Object.assign(new TransactionError(what, 'ERROR', result, { hash, lastStatus: 'ERROR' }), { cause: e })
   }
   return e
 }

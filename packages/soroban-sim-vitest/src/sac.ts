@@ -1,10 +1,12 @@
 import { contract, xdr } from '@stellar/stellar-sdk'
+import { STELLAR_ASSET_ERRORS } from './generated/stellar-asset-errors.ts'
 import type { Client as GeneratedStellarAssetClient } from './generated/stellar-asset.ts'
 
 // A Stellar asset contract has no Wasm and so no spec to read. Its interface
 // comes from `stellar contract bindings typescript`, which generates it from
-// soroban-sdk's (src/generated/stellar-asset.ts); its error names come from
-// the host. test/sac.test.ts checks both against those sources.
+// soroban-sdk's (src/generated/stellar-asset.ts; test/sac.test.ts checks the
+// entries below against it). Its error names and codes are emitted from the
+// host's own enum (src/generated/stellar-asset-errors.ts).
 
 /** A Stellar asset contract's client, typed as its generated bindings type it. */
 export type StellarAssetClient = GeneratedStellarAssetClient
@@ -41,24 +43,6 @@ export const STELLAR_ASSET_ENTRIES: readonly string[] = [
   'AAAABQAAAAAAAAAAAAAACENsYXdiYWNrAAAAAQAAAAhjbGF3YmFjawAAAAIAAAAAAAAABGZyb20AAAATAAAAAQAAAAAAAAAGYW1vdW50AAAAAAALAAAAAAAAAAA=',
   'AAAABQAAAAAAAAAAAAAACFNldEFkbWluAAAAAQAAAAlzZXRfYWRtaW4AAAAAAAACAAAAAAAAAAVhZG1pbgAAAAAAABMAAAABAAAAAAAAAAluZXdfYWRtaW4AAAAAAAATAAAAAAAAAAA=',
   'AAAABQAAAAAAAAAAAAAADVNldEF1dGhvcml6ZWQAAAAAAAABAAAADnNldF9hdXRob3JpemVkAAAAAAACAAAAAAAAAAJpZAAAAAAAEwAAAAEAAAAAAAAACWF1dGhvcml6ZQAAAAAAAAEAAAAAAAAAAA==',
-]
-
-/** The host's errors for its built-in contracts (`ContractError` in soroban-env-host; 1 is reserved). */
-export const STELLAR_ASSET_ERRORS: readonly [string, number][] = [
-  ['OperationNotSupportedError', 2],
-  ['AlreadyInitializedError', 3],
-  ['UnauthorizedError', 4],
-  ['AuthenticationError', 5],
-  ['AccountMissingError', 6],
-  ['AccountIsNotClassic', 7],
-  ['NegativeAmountError', 8],
-  ['AllowanceError', 9],
-  ['BalanceError', 10],
-  ['BalanceDeauthorizedError', 11],
-  ['OverflowError', 12],
-  ['TrustlineMissingError', 13],
-  ['InsufficientAccountReserve', 14],
-  ['TooManyAccountSubentries', 15],
 ]
 
 export const STELLAR_ASSET_SPEC = new contract.Spec([

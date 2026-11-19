@@ -8,12 +8,16 @@ import { mapSignAndSend, type WaitContext } from '../src/clients.ts'
 import { CLOSED } from '../src/internal.ts'
 
 /** The parts of an AssembledTransaction signAndSend uses, recording the bound in force when it signs and when it polls. */
-function fakeTransaction(outcome: 'pending' | 'hang') {
+function fakeTransaction(outcome: 'pending' | 'hang' | 'refused') {
   const seen: { signedWith?: number; polledWith?: number } = {}
   const tx = {
     options: { timeoutInSeconds: CLIENT_TIMEOUT_SECONDS },
     async signAndSend({ watcher }: { watcher?: contract.Watcher } = {}) {
       seen.signedWith = tx.options.timeoutInSeconds
+      if (outcome === 'refused') {
+        const refusal = { status: 'ERROR', hash: 'abc123', errorResult: { result: 'txTooLate' } }
+        throw new contract.SentTransaction.Errors.SendFailed(`Sending the transaction to the network failed!\n${JSON.stringify(refusal, null, 2)}`)
+      }
       watcher?.onSubmitted?.({ hash: 'abc123', status: 'PENDING' } as never)
       seen.polledWith = tx.options.timeoutInSeconds
       watcher?.onProgress?.({ status: 'NOT_FOUND' } as never)
@@ -46,4 +50,14 @@ test('tearing the worker down cancels the wait', async () => {
   closed.abort()
   expect(await sending).toMatchObject({ status: 'CANCELLED', hash: 'abc123' })
   expect(String(await sending)).toMatch(/cancelled: the worker was torn down/)
+})
+
+test('a transaction the network refuses reports where it was sent, like one that never lands', async () => {
+  const { tx } = fakeTransaction('refused')
+  mapSignAndSend(tx, target, wait())
+  const error = await tx.signAndSend().catch((e: unknown) => e)
+  expect(error).toBeInstanceOf(TransactionError)
+  expect(error).toMatchObject({ status: 'ERROR', result: 'txTooLate', hash: 'abc123', environment: 'local', lastStatus: 'ERROR' })
+  expect((error as Error).message).toBe('put_persist on CABC: ERROR (txTooLate) (transaction abc123, on local, last status ERROR)')
+  expect((error as Error).cause).toBeInstanceOf(contract.SentTransaction.Errors.SendFailed)
 })

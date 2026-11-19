@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cacheKey, explainCache, readEntry, writeEntry, type StoredSetup } from './cache.ts'
+import { cacheKey, explainCache, readEntry, recordEntry, writeEntry, type StoredSetup } from './cache.ts'
 import { SEED, type Config } from './config.ts'
 import { attach } from './account.ts'
 import { isDefinition, type ContractDefinition } from './clients.ts'
@@ -144,8 +144,9 @@ export async function prepareSimSetup(def: AnySuite, config: Config, testFile?: 
     const hit = await readEntry(cacheDir, key)
     const explanation = await explainCache(cacheDir, def, testFile, key, parts, hit !== undefined)
     if (explain) process.stderr.write(`${explanation}\n`)
-    if (hit) return { ...hit, cached: true, explanation }
-    return { ...(await runAndExport(def, config, wasm, key)), explanation }
+    const prepared: PreparedSetup = hit ? { ...hit, cached: true } : await runAndExport(def, config, wasm, key)
+    await recordEntry(cacheDir, def, testFile, key, parts)
+    return { ...prepared, explanation }
   }
   return runAndExport(def, config, wasm, key)
 }

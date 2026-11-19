@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Writes one job's cost table to the run summary ($GITHUB_STEP_SUMMARY) and
-# to the log, from clock.sh marks and the memory figures.
+# to the log, from clock.sh marks (the job stops its own clock, `clock.sh stop
+# job`, once its timed steps are done) and the memory figures.
 #   summary.sh soroban-sim   (reads BUILD_SECONDS, CLI_JOB_SECONDS, $RUNNER_TEMP/servers.rss and servers-cached.rss)
 #   summary.sh quickstart    (reads QUICKSTART_MEMORY_PEAK_MIB)
 set -euo pipefail
@@ -11,7 +12,6 @@ minus() { awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { printf "%.1f", a - b }'; }
 or_na() { if [ -n "${1:-}" ]; then echo "$1"; else echo "n/a"; fi; }
 rss() { if [ -f "$1" ]; then awk '{ printf "%s MiB (%s servers at once)", $1, $2 }' "$1"; else echo "n/a"; fi; }
 
-"$here/clock.sh" stop job
 job=$(clock job)
 
 case "$1" in
@@ -33,8 +33,8 @@ case "$1" in
 | Peak memory, soroban-sim servers | first run $(rss "${RUNNER_TEMP:-/tmp}/servers.rss"); cached run $(rss "${RUNNER_TEMP:-/tmp}/servers-cached.rss") | same |
 
 - The latest release (soroban-sim-cli-v0.1.0) predates \`fork_exportSnapshot\`, which the harness needs, so the CLI is built once from this commit in \`vitest-cli\` (with the Rust cache restored) and downloaded here; "Built from source" adds that job's time and leaves out the download.
-- Times are wall-clock between marks in the job; Total runs from the job's first step to this summary, so it includes checkout, Node and \`pnpm install\` but not runner start-up.
-- Memory is the summed resident memory of every \`soroban-sim\` server process, sampled with \`ps\` in a loop with no pause (a peak between two samples is missed, so this is a lower bound); the Node test runner is not counted.
+- Times are wall-clock between marks in the job; Total runs from the job's first step to the end of its last timed step, so it includes checkout, Node and \`pnpm install\` but not runner start-up, and nothing that runs after the tests.
+- Memory is the summed resident memory of every \`soroban-sim\` server process, sampled with \`ps\` in a loop with no pause (a peak between two samples is missed, so this is a lower bound); the Node test runner is not counted. The sampler keeps a core busy, so it runs in two further runs of the suites (the cache cleared, then from the cache) after the clock has stopped: the timed runs above carry no sampler, and the memory runs are in none of the times, Total included.
 TABLE
 )
     ;;
@@ -54,8 +54,8 @@ TABLE
 | Total | ${job} s |
 | Peak memory, the container | ${memory} |
 
-- Times are wall-clock between marks in the job; Total runs from the job's first step to this summary, so it includes checkout, Node and \`pnpm install\` but not runner start-up.
-- Memory is the container's cgroup \`memory.peak\`: the most it held at once since it started, page cache charged to it included.
+- Times are wall-clock between marks in the job; Total runs from the job's first step to the end of its last timed step, so it includes checkout, Node and \`pnpm install\` but not runner start-up, and nothing that runs after the tests.
+- Memory is the container's cgroup \`memory.peak\`: the most it held at once since it started, page cache charged to it included. The kernel keeps that figure and it is read once after the tests, so nothing samples while they are timed.
 TABLE
 )
     ;;

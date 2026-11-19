@@ -124,6 +124,20 @@ jobs:
       - name: Type check
         run: pnpm --filter @theahaco/soroban-sim-vitest check
 
+  # The harness's table of the asset contract's errors is emitted from the
+  # host's own enum (crates/soroban-sim-asset-errors); this fails when the
+  # committed table differs from what the emitter writes.
+  vitest-generated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vitest-generated
+      - name: The asset contract's error table is up to date
+        run: cargo run -p soroban-sim-asset-errors --locked -- --check
+
   # The latest release (soroban-sim-cli-v0.1.0) predates fork_exportSnapshot,
   # which the harness needs, so the CLI is built once from this commit and
   # handed to vitest-soroban-sim as an artifact.
@@ -184,10 +198,21 @@ jobs:
         run: chmod +x bin/soroban-sim && $CLOCK stop binary && bin/soroban-sim --version
       - name: The suites on soroban-sim
         working-directory: packages/soroban-sim-vitest
-        run: ci/clock.sh run first -- ci/peak-rss.sh soroban-sim "$RUNNER_TEMP/servers.rss" -- pnpm test
+        run: ci/clock.sh run first -- pnpm test
       - name: The same suites again, setup from the cache
         working-directory: packages/soroban-sim-vitest
-        run: ci/clock.sh run cached -- ci/peak-rss.sh soroban-sim "$RUNNER_TEMP/servers-cached.rss" -- pnpm test
+        run: ci/clock.sh run cached -- pnpm test
+      - name: Stop the clock
+        if: always()
+        run: $CLOCK stop job
+      # Memory is sampled in runs of its own, after the clock has stopped, so
+      # the sampler's load is in none of the reported times.
+      - name: Server memory, both runs again with the sampler (not timed)
+        working-directory: packages/soroban-sim-vitest
+        run: |
+          pnpm cache:clear
+          ci/peak-rss.sh soroban-sim "$RUNNER_TEMP/servers.rss" -- pnpm test
+          ci/peak-rss.sh soroban-sim "$RUNNER_TEMP/servers-cached.rss" -- pnpm test
       - name: Cost summary
         if: always()
         env:
@@ -230,6 +255,9 @@ jobs:
         env:
           SOROBAN_TEST_RPC_URL: http://127.0.0.1:8000/rpc
         run: ci/clock.sh run tests -- pnpm test:local
+      - name: Stop the clock
+        if: always()
+        run: $CLOCK stop job
       - name: Cost summary
         if: always()
         run: |

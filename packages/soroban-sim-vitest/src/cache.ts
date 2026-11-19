@@ -83,9 +83,22 @@ const LABELS: Record<Exclude<keyof KeyParts, 'inputs'>, string> = {
   base: 'the base snapshot',
 }
 
+const explainRecord = (dir: string, def: AnySuite, testFile: string | undefined) =>
+  join(dir, '.explain', `${sha256(`${def.name}\0${testFile ?? ''}`).slice(0, 32)}.json`)
+
+/**
+ * Notes `key` and its parts as the last entry this suite (by name and test
+ * file) used: call it once the entry is there, after a hit or a stored setup.
+ */
+export async function recordEntry(dir: string, def: AnySuite, testFile: string | undefined, key: string, parts: KeyParts): Promise<void> {
+  const record = explainRecord(dir, def, testFile)
+  await mkdir(dirname(record), { recursive: true })
+  await writeFile(record, JSON.stringify({ key, parts }))
+}
+
 /**
  * Says whether `key` was a hit and, on a miss, which parts changed since the
- * last entry this suite (by name and test file) used, then records this one.
+ * last entry this suite (by name and test file) used.
  */
 export async function explainCache(
   dir: string,
@@ -95,7 +108,7 @@ export async function explainCache(
   parts: KeyParts,
   hit: boolean,
 ): Promise<string> {
-  const record = join(dir, '.explain', `${sha256(`${def.name}\0${testFile ?? ''}`).slice(0, 32)}.json`)
+  const record = explainRecord(dir, def, testFile)
   const suite = JSON.stringify(def.name)
   let previous: { key: string; parts: KeyParts } | undefined
   try {
@@ -103,8 +116,6 @@ export async function explainCache(
   } catch {
     previous = undefined
   }
-  await mkdir(dirname(record), { recursive: true })
-  await writeFile(record, JSON.stringify({ key, parts }))
   if (hit) return `soroban-sim-vitest: cache hit for ${suite} (${key}): setup did not run`
   if (!previous) return `soroban-sim-vitest: cache miss for ${suite} (${key}): no earlier entry for this suite`
   const before = previous.parts
