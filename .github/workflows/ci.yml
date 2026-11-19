@@ -126,7 +126,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Type check
         run: pnpm --filter @theahaco/soroban-sim-vitest check
-      - name: Example, isolation and cache suites on soroban-sim
+      - name: The suites on soroban-sim
         run: pnpm --filter @theahaco/soroban-sim-vitest test
       - name: The same suites again, setup from the cache
         run: pnpm --filter @theahaco/soroban-sim-vitest test
