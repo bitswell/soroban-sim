@@ -120,6 +120,8 @@ and `signAndSend()`, as a typed error with the SDK's own error as `cause`:
 `ContractError` extends `InvocationError`. Both carry `contract`, `method`,
 and the diagnostic events of the failed call; the message includes the
 host's event log.
+`account.deploy` throws the same errors when the upload or the
+constructor fails.
 
 ## Suites and setup
 
@@ -250,7 +252,7 @@ example suite with spec-built clients, `bindings.test.ts` the same with the
 generated client in `test/bindings/storage.ts`, `isolation.test.ts` checks that two tests writing the same key
 at once each read back their own value, `sandbox.test.ts` covers the
 controls (and their refusal on a local network), `worker.test.ts` the plain
-`test`, `errors.test.ts` which contract an error's name comes from and how
+`test`, asset contracts and failed deploys, `errors.test.ts` which contract an error's name comes from and how
 a host error is labelled, `config.test.ts` the variables and account keys,
 and `cache.test.ts` the cache.
 
