@@ -41,8 +41,8 @@ export class ContractError extends InvocationError {
   readonly code: number
   /**
    * The code's name in the called contract's error enum. Undefined when its
-   * spec has none, or when a contract it called raised the error: the code
-   * is then from that contract's enum.
+   * spec has none, or when a contract it called raised the error and it
+   * passed through: the code is then from that contract's enum.
    */
   readonly errorName: string | undefined
 
@@ -84,13 +84,16 @@ const HOST_ERROR = /Error\((\w+), ([^)]+)\)/
  */
 export function invocationError(target: CallTarget, text: string, events: xdr.DiagnosticEvent[]): InvocationError {
   const readable = text.trim() || describeEvents(events)
-  const found = HOST_ERROR.exec(text) ?? errorInEvents(events)
+  const logged = loggedErrors(events)
+  const found = HOST_ERROR.exec(text) ?? HOST_ERROR.exec(logged.at(-1)?.error ?? '')
   if (!found) return new InvocationError(target, text.split('\n')[0] || 'unknown host error', events, readable)
   const [, type, value] = found
   const code = /^#(\d+)$/.exec(value)
   if (type === 'Contract' && code) {
     const n = Number(code[1])
-    return new ContractError(target, n, raisedByTarget(events) ? errorName(target.spec, n) : undefined, events, readable)
+    // The contract that raises an error logs it first; its callers log it again as it passes through them.
+    const raisedIn = logged.find((e) => e.error === found[0])?.contractId
+    return new ContractError(target, n, raisedIn === target.contract ? errorName(target.spec, n) : undefined, events, readable)
   }
   return new InvocationError(target, `Error(${type}, ${value})`, events, readable)
 }
@@ -113,30 +116,16 @@ function humanized(events: xdr.DiagnosticEvent[]): Humanized[] {
   }
 }
 
-/**
- * True when the called contract itself raised the error. The host logs
- * `fn_call` when a contract call starts and `fn_return` when it returns, so a
- * failure inside the called contract leaves that one call unreturned, and a
- * failure in a contract it called leaves more.
- */
-function raisedByTarget(events: xdr.DiagnosticEvent[]): boolean {
-  const marks = humanized(events)
-    .filter((e) => e.type === 'diagnostic')
-    .map((e) => e.topics?.[0])
-  return marks.filter((m) => m === 'fn_call').length - marks.filter((m) => m === 'fn_return').length === 1
-}
-
-/** The `error` diagnostic event's code, as `Error(Type, value)` parts. */
-function errorInEvents(events: xdr.DiagnosticEvent[]): RegExpExecArray | null {
-  for (const e of humanized(events)) {
+/** The host errors in the diagnostic `error` events, oldest first, each with the contract that logged it. */
+function loggedErrors(events: xdr.DiagnosticEvent[]): { error: string; contractId: string | undefined }[] {
+  return humanized(events).flatMap((e) => {
     const [topic, err] = e.topics ?? []
-    if (topic !== 'error' || !err || typeof err !== 'object') continue
+    if (e.type !== 'diagnostic' || topic !== 'error' || !err || typeof err !== 'object') return []
     const { type, code } = err as { type?: string; code?: number | string }
-    if (type === undefined || code === undefined) continue
+    if (type === undefined || code === undefined) return []
     const name = type.charAt(0).toUpperCase() + type.slice(1)
-    return HOST_ERROR.exec(`Error(${name}, ${type === 'contract' ? `#${code}` : code})`)
-  }
-  return null
+    return [{ error: `Error(${name}, ${type === 'contract' ? `#${code}` : code})`, contractId: e.contractId }]
+  })
 }
 
 function describeEvents(events: xdr.DiagnosticEvent[]): string {

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { Address, Operation, scValToNative, type Keypair, type rpc } from '@stellar/stellar-sdk'
+import { Address, Operation, StrKey, hash, xdr, type Keypair, type rpc } from '@stellar/stellar-sdk'
 import { Contract, fromScVal, rememberSpec, toScVals, type Args } from './contract.ts'
 import { ADMIN, DEPLOYS, MARKER } from './internal.ts'
 import { send } from './transactions.ts'
@@ -70,28 +70,25 @@ export class Account {
   /** Uploads `wasm` (a path, URL or bytes), creates a contract from it with this account as deployer, and returns it. */
   async deploy(wasm: string | URL | Uint8Array, options: DeployOptions = {}): Promise<Contract> {
     const code = wasm instanceof Uint8Array ? wasm : await readFile(toPath(wasm))
-    const hash = createHash('sha256').update(code).digest('hex')
+    const wasmHash = createHash('sha256').update(code).digest('hex')
     const allowed = this.worker[DEPLOYS]
-    if (allowed && !allowed.has(hash)) {
-      const what = wasm instanceof Uint8Array ? `Wasm ${hash.slice(0, 12)}…` : String(wasm)
+    if (allowed && !allowed.has(wasmHash)) {
+      const what = wasm instanceof Uint8Array ? `Wasm ${wasmHash.slice(0, 12)}…` : String(wasm)
       throw new Error(`setup deploys ${what}, which the suite does not list in \`wasm\`: list it so the setup cache key covers it`)
     }
-    rememberSpec(hash, code)
+    rememberSpec(wasmHash, code)
     const upload = { contract: 'the network', method: 'uploadContractWasm' }
     await send(this.worker, this.keypair, Operation.uploadContractWasm({ wasm: Buffer.from(code) }), upload)
-    const pending = new Contract(this.worker, 'a new contract', hash)
-    const spec = await pending.spec()
+    const address = Address.fromString(this.address)
+    const salt = Buffer.from(options.salt ?? randomBytes(32))
+    const created = new Contract(this.worker, contractId(this.worker.networkPassphrase, address, salt), wasmHash)
+    const spec = await created.spec()
     const hasConstructor = spec?.funcs().some((f) => f.name.toString() === '__constructor')
     const constructorArgs =
-      options.args === undefined && !hasConstructor ? [] : toScVals(pending, spec, '__constructor', options.args)
-    const op = Operation.createCustomContract({
-      address: Address.fromString(this.address),
-      wasmHash: Buffer.from(hash, 'hex'),
-      salt: Buffer.from(options.salt ?? randomBytes(32)),
-      constructorArgs,
-    })
-    const res = await send(this.worker, this.keypair, op, { contract: 'a new contract', method: '__constructor', spec })
-    return new Contract(this.worker, scValToNative(res.returnValue!) as string, hash)
+      options.args === undefined && !hasConstructor ? [] : toScVals(created, spec, '__constructor', options.args)
+    const op = Operation.createCustomContract({ address, wasmHash: Buffer.from(wasmHash, 'hex'), salt, constructorArgs })
+    await send(this.worker, this.keypair, op, { contract: created.id, method: '__constructor', spec })
+    return created
   }
 
   /** The account's XLM balance in stroops. */
@@ -113,4 +110,17 @@ export class Account {
   toString(): string {
     return this.address
   }
+}
+
+/** The address of the contract `deployer` creates with `salt`. */
+function contractId(networkPassphrase: string, deployer: Address, salt: Buffer): string {
+  const preimage = xdr.HashIdPreimage.envelopeTypeContractId(
+    new xdr.HashIdPreimageContractId({
+      networkId: hash(Buffer.from(networkPassphrase)),
+      contractIdPreimage: xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+        new xdr.ContractIdPreimageFromAddress({ address: deployer.toScAddress(), salt }),
+      ),
+    }),
+  )
+  return StrKey.encodeContract(hash(preimage.toXdr()))
 }
