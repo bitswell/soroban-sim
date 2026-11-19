@@ -2,18 +2,18 @@
 
 ```ts
 import { expect } from 'vitest'
-import { defineSuite } from '@theahaco/soroban-sim-vitest'
+import { defineContract, defineSuite, send } from '@theahaco/soroban-sim-vitest'
 
-const storageWasm = new URL('./storage.wasm', import.meta.url)
+const Storage = defineContract(new URL('./storage.wasm', import.meta.url))
 
 const { test } = defineSuite({
   name: 'storage',
-  wasm: [storageWasm],
+  wasm: [Storage],
   async setup(worker) {
     const admin = await worker.createAccount('admin')
     const alice = await worker.createAccount('alice')
-    const storage = await admin.deploy(storageWasm)
-    await (await storage.put_persist({ key: 1, val: 7 })).signAndSend()
+    const storage = await admin.deploy(Storage)
+    await send(storage.put_persist({ key: 1, val: 7 }))
     return { alice, storage }
   },
 })
@@ -21,29 +21,20 @@ const { test } = defineSuite({
 test('alice overwrites what setup wrote', async ({ setup: { alice, storage } }) => {
   const asAlice = alice.client(storage)
   expect((await asAlice.get_persist({ key: 1 })).result).toBe(7)
-  await (await asAlice.put_persist({ key: 1, val: 42 })).signAndSend()
+  await send(asAlice.put_persist({ key: 1, val: 42 }))
   expect((await asAlice.get_persist({ key: 1 })).result).toBe(42)
 })
 ```
 
-The same suite with the client `stellar contract bindings typescript`
-generated for the contract, so every method and result is typed:
+With the client `stellar contract bindings typescript` generated for the
+contract, declare it once with its Wasm; everything else is the same, and
+every method and result is typed (`storage` and `alice.client(storage)` are
+`StorageClient`s):
 
 ```ts
 import { Client as StorageClient } from './bindings/storage'
 
-const { test } = defineSuite({
-  name: 'storage',
-  wasm: [{ file: storageWasm, client: StorageClient }],
-  async setup(worker) {
-    const admin = await worker.createAccount('admin')
-    const alice = await worker.createAccount('alice')
-    const storage = await admin.deploy(storageWasm, { client: StorageClient })
-    await (await storage.put_persist({ key: 1, val: 7 })).signAndSend()
-    return { alice, storage }
-  },
-})
-// The test is the same; `storage` and `alice.client(storage)` are StorageClients.
+const Storage = defineContract(new URL('./storage.wasm', import.meta.url), StorageClient)
 ```
 
 Vitest tests for Soroban contracts, written with the Stellar SDK's own
@@ -76,21 +67,27 @@ the local network.
   network, from the test), never real; do not fund it anywhere else.
 - `worker.account(name)` returns an account created earlier, by the test or
   by setup.
-- `await worker.contract(id, Bindings?)` returns a client for a contract
-  already on the network, by its `C…` address, with nobody signing (reads).
+- `await worker.contract(id, Storage?)` returns a client for a contract
+  already on the network, by its `C…` address, with nobody signing (reads);
+  given a `defineContract` declaration or a generated class, one of that
+  class.
 - `await worker.xlm()` and `await worker.assetContract(asset)` return a
-  client for a Stellar asset contract, deploying it first if the network
-  lacks it. It has the asset contract's functions (the SEP-41 token
-  interface and the admin's) built in, since it has no Wasm to read a spec
-  from.
+  typed client (`StellarAssetClient`) for a Stellar asset contract,
+  deploying it first if the network lacks it. A Stellar asset contract has
+  no Wasm to read a spec from, so its interface is the one `stellar contract
+  bindings typescript` generates from soroban-sdk's
+  ([`src/generated/stellar-asset.ts`](./src/generated/stellar-asset.ts)),
+  with the host's error names; `test/sac.test.ts` checks both against those
+  sources.
 
 An **`Account`** signs:
 
-- `account.deploy(wasm, { args, client })` uploads a Wasm file (a path, URL
-  or bytes) unless the network has it, creates a contract from it with
-  `args` for its constructor, and returns a client with the account
-  signing: of the generated class when given `client`, else
-  `contract.Client` built from the contract's spec.
+- `account.deploy(Storage, { args })` uploads the contract's Wasm unless the
+  network has it, creates a contract from it with `args` for its
+  constructor, and returns a client with the account signing: of the
+  generated class when the declaration has one (typed), else
+  `contract.Client` built from the contract's spec. It also takes a Wasm
+  path, URL or bytes, with `{ client }` for a generated class.
 - `account.client(storage)` returns the same contract with this account
   signing, a client of the same class; `account.client(storage, Bindings)`
   one of the bindings class.
@@ -104,9 +101,18 @@ A **client** is the SDK's: `storage.put_persist({ key, val })` builds and
 simulates the call and returns an `AssembledTransaction`, `.result` is the
 simulated result, `.signAndSend()` signs with the client's account, sends,
 and waits. Arguments and results are converted by the SDK from the
-contract's spec. The harness builds every client with a far time bound
-(`CLIENT_TIMEOUT_SECONDS`) instead of the SDK's 300 s, so moving ledger time
-ahead (`setTime`) never makes a transaction too late.
+contract's spec. `await send(storage.put_persist({ key, val }))` is the
+same as `await (await storage.put_persist({ key, val })).signAndSend()`:
+it returns the SDK's `SentTransaction`, its `result` typed as the method's.
+A call other accounts must authorize keeps the `AssembledTransaction` for
+`signAuthEntries` before it is sent.
+
+Signing and waiting are bounded separately. A transaction is signed with a
+far time bound (`CLIENT_TIMEOUT_SECONDS`) instead of the SDK's 300 s, so
+moving ledger time ahead (`setTime`) never makes it too late. Once it is
+sent, `signAndSend` waits for its result for at most
+`SOROBAN_TEST_WAIT_SECONDS` (60 by default), and stops waiting when the
+test's worker is torn down.
 
 A failure comes from the same places the SDK throws it, reading `.result`
 and `signAndSend()`, as a typed error with the SDK's own error as `cause`:
@@ -115,7 +121,7 @@ and `signAndSend()`, as a typed error with the SDK's own error as `cause`:
 |---|---|---|
 | `ContractError` | the call failed with a contract's own error (`Error(Contract, #n)`) | `code`, `errorName` (from the called contract's error enum; undefined when the error came up from a contract it called, or when the called contract caught a failed call with `try_call` and then raised its own error with the same number: a missing name, never a wrong one), `events` |
 | `InvocationError` | any other host error: a trap, failed authorization, a missing entry | `hostError` (such as `Error(WasmVm, InvalidAction)`), `events` |
-| `TransactionError` | the network refused the transaction itself | `status`, `result` (such as `tx_too_late`) |
+| `TransactionError` | the network refused the transaction (`ERROR`, `FAILED`), it was not applied within the wait (`NOT_FOUND`), or the worker was torn down while waiting (`CANCELLED`) | `status`, `result` (such as `tx_too_late`), `hash`, `environment`, `lastStatus` |
 
 `ContractError` extends `InvocationError`. Both carry `contract`, `method`,
 and the diagnostic events of the failed call; the message includes the
@@ -125,29 +131,36 @@ constructor fails.
 
 ## Suites and setup
 
-`defineSuite({ name, wasm, cacheFiles, setup })` returns `test`, Vitest's own
+`defineSuite({ name, wasm, cacheFiles, cacheInputs, setup })` returns `test`, Vitest's own
 extended with two fixtures, and `sandbox` (see below):
 
 - **`worker`**: the test's worker. On soroban-sim it is a server of the
   test's own, stopped when the test ends.
 - **`setup`**: what setup returned, as the test's own copy. Accounts and
   clients in it are bound to the test's worker, each client with the same
-  signing account and class; everything else is JSON (setup's result is
-  cached as JSON, so it must survive it).
+  signing account and class. Setup may return JSON values, bigints and
+  bytes (`Uint8Array`, `Buffer`) as well, and the tests get them back as
+  such (bytes as a `Buffer`), on both environments, cached or not; any other
+  value (a `Map`, a `Date`, a function, `NaN`) is refused with where it is,
+  such as `result.balances[1] is a Map`.
 
 Setup receives a worker of its own. On soroban-sim it runs once for the
 suite (per Vitest worker), and its state becomes the snapshot every test
 starts from. On a local network it runs again for every test, against that
 test's accounts.
 
-- **`wasm`**: the Wasm files setup deploys, each a path or URL, or
-  `{ file, client }` to pair it with its generated client: every client for
-  that code, in setup and in the tests, is then of that class. Their
-  contents are part of the cache key, and setup may deploy no others (it
-  throws, naming the file), so a changed contract always reruns setup.
-  Tests may deploy anything.
+- **`wasm`**: the contracts setup deploys, each a `defineContract`
+  declaration (or a Wasm path or URL). A declaration with a generated client
+  makes every client for that code, in setup and in the tests, of that
+  class. Their contents are part of the cache key, and setup may deploy no
+  others (it throws, naming the file), so a changed contract always reruns
+  setup. Tests may deploy anything.
 - **`cacheFiles`**: files setup depends on besides the Wasm and the test
   file itself (see the cache key below).
+- **`cacheInputs`**: values setup depends on that no file holds, such as an
+  environment variable it reads or an argument of a factory that builds the
+  suite: `cacheInputs: { initialSupply, featureFlag }`. Each is part of the
+  cache key by name.
 
 `test.skip`, `test.each` and the rest work as usual. Run a file's tests in
 parallel with `sequence.concurrent` in the Vitest config (as this package's
@@ -166,8 +179,11 @@ test('alice deploys and writes', async ({ worker }) => {
 })
 ```
 
-Outside a test, `await Worker.init()` returns a worker for the configured
-environment, and `await worker.tearDown()` stops it.
+Outside a test, for a script or Vitest's global setup, import from
+`@theahaco/soroban-sim-vitest/worker`, which does not load Vitest:
+`await Worker.init()` returns a worker for the configured environment, and
+`await worker.tearDown()` stops it. Everything but `defineSuite` and `test`
+is there.
 
 ### The escape hatch
 
@@ -194,6 +210,14 @@ give `keyType` and `valueType` (as `nativeToScVal`'s `type`, such as
 `'u32'`) when the stored type is not the one `nativeToScVal` picks (a whole
 number becomes a `u64`). `durability` is `persistent` (the default) or
 `temporary`.
+
+```ts
+// The storage fixture keeps u32 keys and values: say so rather than rely on the default.
+await worker.setStorage(storage, 1, 99, { keyType: 'u32', valueType: 'u32' })
+await worker.setStorage(storage, 3, 30, { keyType: 'u32', valueType: 'u32', durability: 'temporary' })
+// Or give the XDR itself.
+await worker.setStorage(storage, nativeToScVal(1, { type: 'u32' }), nativeToScVal(99, { type: 'u32' }))
+```
 
 A local network has no way to do any of this, so on a local network each
 control throws `SandboxOnlyError`; none of them silently does nothing. A
@@ -236,6 +260,8 @@ and wait until friendbot answers.
 | `SOROBAN_TEST_CACHE_DIR` | Where cached setups live | `node_modules/.cache/soroban-sim-vitest` |
 | `SOROBAN_TEST_RPC_URL` | The local network's RPC | `http://localhost:8000/rpc` |
 | `SOROBAN_TEST_FRIENDBOT_URL` | Its friendbot | `/friendbot` on the RPC's host |
+| `SOROBAN_TEST_WAIT_SECONDS` | How long `signAndSend` waits for a sent transaction's result | `60` |
+| `SOROBAN_TEST_CACHE_EXPLAIN` | `1` says on stderr, for each suite, whether its setup came from the cache and, on a miss, what changed | off |
 
 The bundled snapshot holds the settings and latest header of a fresh
 quickstart local network (protocol 30, captured with
@@ -249,12 +275,16 @@ complete on main.
 
 This package's own suites are in [`test/`](./test): `example.test.ts` is the
 example suite with spec-built clients, `bindings.test.ts` the same with the
-generated client in `test/bindings/storage.ts`, `isolation.test.ts` checks that two tests writing the same key
-at once each read back their own value, `sandbox.test.ts` covers the
-controls (and their refusal on a local network), `worker.test.ts` the plain
-`test`, asset contracts and failed deploys, `errors.test.ts` which contract an error's name comes from and how
-a host error is labelled, `config.test.ts` the variables and account keys,
-and `cache.test.ts` the cache.
+generated client in `test/bindings/storage.ts` declared by `defineContract`,
+`isolation.test.ts` checks that two tests writing the same key at once each
+read back their own value, `setup-values.test.ts` the values setup can
+return, `sandbox.test.ts` covers the controls (and their refusal on a local
+network), `worker.test.ts` the plain `test`, asset contracts and failed
+deploys, `waiting.test.ts` how long `signAndSend` waits, `errors.test.ts`
+which contract an error's name comes from and how a host error is labelled,
+`sac.test.ts` the asset contract's interface against its sources,
+`standalone.test.ts` the Vitest-free entry point, `config.test.ts` the
+variables and account keys, and `cache.test.ts` the cache.
 
 ## In CI
 
@@ -290,13 +320,18 @@ everything that decides the snapshot:
   helper function in it that setup uses reruns setup when it changes (as
   does any other edit to the file);
 - the contents of each `wasm` file and each `cacheFiles` file;
+- each of `cacheInputs`, by name;
 - the `soroban-sim` binary: its `--version` and a hash of the file, since a
   local build keeps its version number;
 - the base snapshot file's contents.
 
-The key does not cover the modules the test file imports. When setup uses a
-helper module of your own, list that module in `cacheFiles`, or a change to
-it will not rerun setup.
+The key does not cover the modules the test file imports, nor values setup
+reads from outside the file (an environment variable, a factory's
+argument). List such a module in `cacheFiles` and such a value in
+`cacheInputs`, or a change to it will not rerun setup. With
+`SOROBAN_TEST_CACHE_EXPLAIN=1`, each suite says whether its setup came from
+the cache and, on a miss, which of these changed since its last entry
+(`changed since the last entry: cacheInputs.initialSupply`).
 
 To bypass the cache for a run, set `SOROBAN_TEST_CACHE=off`. To clear it,
 run `pnpm --filter @theahaco/soroban-sim-vitest cache:clear`, call
@@ -322,7 +357,7 @@ pass on the other.
 | Sandbox controls | all | none: each throws `SandboxOnlyError` |
 | History | `getTransaction` and `getEvents` cover only the test's own transactions; `getLedgers` and `getTransactions` are not served | full |
 | Clock | starts at the setup's ledger time and follows the wall clock; `setTime` and `advanceLedgers` move it ahead | follows the wall clock |
-| Speed (this package's suites, one laptop) | about 0.7 s for 45 tests with setup, 0.5 s from the cache | about 40 s for the 34 that run there |
+| Speed (this package's suites, one laptop) | about 0.9 s for 63 tests with setup | about 40 s for the 49 that run there |
 
 A suite that passes on soroban-sim can still fail on a local network on
 timing: a test that assumes a transaction is visible as soon as
