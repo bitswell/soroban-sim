@@ -256,6 +256,26 @@ controls (and their refusal on a local network), `worker.test.ts` the plain
 a host error is labelled, `config.test.ts` the variables and account keys,
 and `cache.test.ts` the cache.
 
+## In CI
+
+This repository's CI runs the suites in two independent jobs, one per
+environment, so each pays only for what it needs, and each writes a cost
+table to the run's summary page:
+
+- `vitest-soroban-sim` downloads the CLI that `vitest-cli` built from the
+  same commit, type-checks the package, runs the suites, and runs them again
+  with setup from the cache. Its table gives the time to get the CLI, each
+  test run, the total, and the peak memory of the `soroban-sim` servers; a
+  second column adds the source build in place of the download.
+- `vitest-quickstart` pulls and starts `stellar/quickstart:testing` (pinned
+  by digest), waits in a step of its own until RPC is healthy and friendbot
+  funds an account, and runs the suites. Its table gives those times, the
+  total, and the container's peak memory.
+
+The helpers are in [`ci/`](./ci): `clock.sh` times steps, `peak-rss.sh`
+samples the servers' memory, `wait-for-funding.sh` waits for the local
+network, and `summary.sh` writes the tables, each saying how it measured.
+
 ## The setup cache (soroban-sim)
 
 A cached setup is a directory under the cache directory, named by a hash of
