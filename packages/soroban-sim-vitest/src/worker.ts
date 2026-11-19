@@ -168,7 +168,6 @@ export class Worker {
         parseResultXdr: (result: xdr.ScVal) => result,
       })
       mapSignAndSend(tx, target)
-      await tx.simulate()
       await tx.signAndSend()
     } catch (e) {
       // Another worker on the same local network may have deployed it first.

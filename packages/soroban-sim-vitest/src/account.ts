@@ -105,7 +105,6 @@ export class Account {
       })
       const uploadTarget = { contract: 'the network', method: 'uploadContractWasm' }
       mapSignAndSend(upload, uploadTarget)
-      await upload.simulate()
       if (!(await mapping(uploadTarget, upload, async () => upload.isReadCall))) await upload.signAndSend()
     }
 
@@ -115,11 +114,9 @@ export class Account {
       ...deployOptions,
       wasmHash,
       salt: Buffer.from(salt),
-      simulate: false,
     })) as contract.AssembledTransaction<unknown>
     const target = { contract: id, method: '__constructor', spec }
     mapSignAndSend(created, target)
-    await created.simulate()
     await created.signAndSend()
     return buildClient(this.worker, id, spec, wasmHash, this, options.client ?? paired) as Deployed<B>
   }
