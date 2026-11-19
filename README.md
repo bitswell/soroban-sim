@@ -307,8 +307,13 @@ as a snapshot (`fork_exportSnapshot`) and cached on disk, and each test gets
 its own server started from it, so tests are isolated and run in parallel.
 The same suite also runs against a local network (quickstart), where setup
 runs once per test with fresh friendbot-funded accounts. Which one runs is
-the `SOROBAN_TEST_ENV` variable, not the test code. See the package README
-for what differs between the two.
+the `SOROBAN_TEST_ENV` variable, not the test code. A test reads as accounts
+acting on contracts (`await alice.call(token, 'transfer', { from: alice, to:
+bob, amount: 10n })`, `await token.view('balance', { id: bob })`), with
+arguments converted through the contract's spec and failures thrown as typed
+errors carrying the contract's error code. On soroban-sim, tests can also set
+balances, patch contract storage and move ledger time. See the package README
+for the API and for what differs between the two environments.
 
 ```sh
 cargo build --release -p soroban-sim-cli
@@ -327,7 +332,7 @@ pnpm --filter @theahaco/soroban-sim-vitest test:local   # a running local networ
 - `docs/differential-testing.md` — oracles A/B/C and the M3 RPC-equivalence result.
 - `docs/upstream.md` — upstream pins and contribution notes.
 - `packages/soroban-sign-dialog/README.md` — the sign dialog: embedding, frameworks, theming, the preview engine.
-- `packages/soroban-sim-vitest/README.md` — Vitest suites on soroban-sim or a local network: setup, the cache, what differs.
+- `packages/soroban-sim-vitest/README.md` — Vitest suites on soroban-sim or a local network: workers, accounts and contracts, setup, sandbox controls, the cache, what differs.
 - `CONTRIBUTING.md` — PR and commit templates, and the checks that run on every PR.
 
 ## License
