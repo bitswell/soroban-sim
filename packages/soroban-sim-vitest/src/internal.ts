@@ -11,3 +11,5 @@ export const DEPLOYS = Symbol('soroban-sim-vitest/deploys')
 
 /** The JSON key that marks an account or contract in a setup's stored result. */
 export const MARKER = '@soroban-sim-vitest'
+/** `worker[BINDINGS]`: generated bindings clients by the hash of the Wasm they are for, from the suite's `wasm`. */
+export const BINDINGS = Symbol('soroban-sim-vitest/bindings')

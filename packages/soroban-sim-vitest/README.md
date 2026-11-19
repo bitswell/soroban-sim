@@ -2,7 +2,7 @@
 
 ```ts
 import { expect } from 'vitest'
-import { ContractError, defineSuite } from '@theahaco/soroban-sim-vitest'
+import { defineSuite } from '@theahaco/soroban-sim-vitest'
 
 const storageWasm = new URL('./storage.wasm', import.meta.url)
 
@@ -13,29 +13,45 @@ const { test } = defineSuite({
     const admin = await worker.createAccount('admin')
     const alice = await worker.createAccount('alice')
     const storage = await admin.deploy(storageWasm)
-    await admin.call(storage, 'put_persist', { key: 1, val: 7 })
+    await (await storage.put_persist({ key: 1, val: 7 })).signAndSend()
     return { alice, storage }
   },
 })
 
 test('alice overwrites what setup wrote', async ({ setup: { alice, storage } }) => {
-  expect(await storage.view('get_persist', { key: 1 })).toBe(7)
-  await alice.call(storage, 'put_persist', { key: 1, val: 42 })
-  expect(await storage.view('get_persist', { key: 1 })).toBe(42)
-})
-
-test('alice cannot send more XLM than she has', async ({ worker, setup: { alice } }) => {
-  const xlm = await worker.xlm()
-  const bob = await worker.createAccount('bob')
-  const error = await alice.call(xlm, 'transfer', { from: alice, to: bob, amount: 20_000_0000000n }).catch((e) => e)
-  expect(error).toBeInstanceOf(ContractError)
-  expect(error.errorName).toBe('BalanceError')
+  const asAlice = alice.client(storage)
+  expect((await asAlice.get_persist({ key: 1 })).result).toBe(7)
+  await (await asAlice.put_persist({ key: 1, val: 42 })).signAndSend()
+  expect((await asAlice.get_persist({ key: 1 })).result).toBe(42)
 })
 ```
 
-Vitest tests for Soroban contracts, written as accounts acting on
-contracts: no transactions, simulation, signing, polling or XDR in the test.
-The same file runs unchanged on two environments:
+The same suite with the client `stellar contract bindings typescript`
+generated for the contract, so every method and result is typed:
+
+```ts
+import { Client as StorageClient } from './bindings/storage'
+
+const { test } = defineSuite({
+  name: 'storage',
+  wasm: [{ file: storageWasm, client: StorageClient }],
+  async setup(worker) {
+    const admin = await worker.createAccount('admin')
+    const alice = await worker.createAccount('alice')
+    const storage = await admin.deploy(storageWasm, { client: StorageClient })
+    await (await storage.put_persist({ key: 1, val: 7 })).signAndSend()
+    return { alice, storage }
+  },
+})
+// The test is the same; `storage` and `alice.client(storage)` are StorageClients.
+```
+
+Vitest tests for Soroban contracts, written with the Stellar SDK's own
+contract client (`contract.Client`, the class generated bindings extend):
+each contract is a client whose methods take named arguments and return an
+`AssembledTransaction` (`.result` for reads, `.signAndSend()` for writes).
+The harness supplies the network, funded accounts as signers, and the
+contracts. The same file runs unchanged on two environments:
 
 - **soroban-sim** (the default): setup runs once on a `soroban-sim serve`,
   its state is exported as a snapshot, and every test gets a server of its
@@ -49,7 +65,7 @@ Which environment runs is configuration (`SOROBAN_TEST_ENV`), never test
 code. The package is private to this repository for now (not published to
 npm).
 
-## Workers, accounts and contracts
+## Workers, accounts and contract clients
 
 A **`Worker`** is one network to test on: its own `soroban-sim serve`, or
 the local network.
@@ -60,44 +76,46 @@ the local network.
   network, from the test), never real; do not fund it anywhere else.
 - `worker.account(name)` returns an account created earlier, by the test or
   by setup.
-- `worker.contract(id)` returns a contract already on the network, by its
-  `C…` address.
-- `worker.xlm()` returns the native asset (XLM) contract, deploying it first
-  if the network lacks it.
+- `await worker.contract(id, Bindings?)` returns a client for a contract
+  already on the network, by its `C…` address, with nobody signing (reads).
+- `await worker.xlm()` and `await worker.assetContract(asset)` return a
+  client for a Stellar asset contract, deploying it first if the network
+  lacks it. It has the asset contract's functions (the SEP-41 token
+  interface and the admin's) built in, since it has no Wasm to read a spec
+  from.
 
-An **`Account`** acts:
+An **`Account`** signs:
 
-- `account.deploy(wasm, { args })` uploads a Wasm file (a path, URL or
-  bytes), creates a contract from it with `args` for its constructor, and
-  returns the contract.
-- `account.call(contract, method, args)` sends a transaction the account
-  signs and pays for, waits for its result, and returns the call's return
-  value. `account.callRaw` returns the value with the transaction's hash,
-  ledger, close time and full response.
-- `account.balance()` returns its XLM balance in stroops.
+- `account.deploy(wasm, { args, client })` uploads a Wasm file (a path, URL
+  or bytes) unless the network has it, creates a contract from it with
+  `args` for its constructor, and returns a client with the account
+  signing: of the generated class when given `client`, else
+  `contract.Client` built from the contract's spec.
+- `account.client(storage)` returns the same contract with this account
+  signing, a client of the same class; `account.client(storage, Bindings)`
+  one of the bindings class.
+- `account.signAuthEntries(tx)` signs the account's authorization entries in
+  a transaction another account sends (`tx.needsNonInvokerSigningBy()` lists
+  who must): the SDK's `signAuthEntries` with an expiration 100 ledgers out.
+- `account.signer` is the account as an SDK signer (`contract.basicNodeSigner`),
+  and `account.balance()` its XLM balance in stroops.
 
-A **`Contract`** is read:
+A **client** is the SDK's: `storage.put_persist({ key, val })` builds and
+simulates the call and returns an `AssembledTransaction`, `.result` is the
+simulated result, `.signAndSend()` signs with the client's account, sends,
+and waits. Arguments and results are converted by the SDK from the
+contract's spec. The harness builds every client with a far time bound
+(`CLIENT_TIMEOUT_SECONDS`) instead of the SDK's 300 s, so moving ledger time
+ahead (`setTime`) never makes a transaction too late.
 
-- `contract.view(method, args)` simulates the call and returns its result.
-  Nothing is signed or sent.
-- `contract.getStorage(key, options)` reads one entry of its persistent or
-  temporary storage.
-
-Arguments are named and native, converted with the contract's spec (read
-from its Wasm; a Stellar asset contract has its token and admin functions
-built in):
-numbers, `bigint`s for 64- and 128-bit integers, strings, arrays, objects
-for structs, and accounts or contracts wherever the function takes an
-address. Return values come back the same way. To pass XDR yourself, give an
-array of `xdr.ScVal` instead of the object.
-
-A failed call throws a typed error:
+A failure comes from the same places the SDK throws it, reading `.result`
+and `signAndSend()`, as a typed error with the SDK's own error as `cause`:
 
 | Error | When | Carries |
 |---|---|---|
 | `ContractError` | the call failed with a contract's own error (`Error(Contract, #n)`) | `code`, `errorName` (from the called contract's error enum; undefined when the error came up from a contract it called, or when the called contract caught a failed call with `try_call` and then raised its own error with the same number: a missing name, never a wrong one), `events` |
 | `InvocationError` | any other host error: a trap, failed authorization, a missing entry | `hostError` (such as `Error(WasmVm, InvalidAction)`), `events` |
-| `TransactionError` | the network refused the transaction itself | `status`, `result` (such as `txBadSeq`) |
+| `TransactionError` | the network refused the transaction itself | `status`, `result` (such as `tx_too_late`) |
 
 `ContractError` extends `InvocationError`. Both carry `contract`, `method`,
 and the diagnostic events of the failed call; the message includes the
@@ -111,17 +129,21 @@ extended with two fixtures, and `sandbox` (see below):
 - **`worker`**: the test's worker. On soroban-sim it is a server of the
   test's own, stopped when the test ends.
 - **`setup`**: what setup returned, as the test's own copy. Accounts and
-  contracts in it are bound to the test's worker; everything else is JSON
-  (setup's result is cached as JSON, so it must survive it).
+  clients in it are bound to the test's worker, each client with the same
+  signing account and class; everything else is JSON (setup's result is
+  cached as JSON, so it must survive it).
 
 Setup receives a worker of its own. On soroban-sim it runs once for the
 suite (per Vitest worker), and its state becomes the snapshot every test
 starts from. On a local network it runs again for every test, against that
 test's accounts.
 
-- **`wasm`**: the Wasm files setup deploys. Their contents are part of the
-  cache key, and setup may deploy no others (it throws, naming the file), so
-  a changed contract always reruns setup. Tests may deploy anything.
+- **`wasm`**: the Wasm files setup deploys, each a path or URL, or
+  `{ file, client }` to pair it with its generated client: every client for
+  that code, in setup and in the tests, is then of that class. Their
+  contents are part of the cache key, and setup may deploy no others (it
+  throws, naming the file), so a changed contract always reruns setup.
+  Tests may deploy anything.
 - **`cacheFiles`**: files setup depends on besides the Wasm and the test
   file itself (see the cache key below).
 
@@ -135,10 +157,10 @@ For tests without a shared setup, import `test` itself: each test receives a
 ```ts
 import { test } from '@theahaco/soroban-sim-vitest'
 
-test('alice deploys and calls', async ({ worker }) => {
+test('alice deploys and writes', async ({ worker }) => {
   const alice = await worker.createAccount('alice')
   const storage = await alice.deploy(storageWasm)
-  await alice.call(storage, 'put_persist', { key: 1, val: 3 })
+  await (await storage.put_persist({ key: 1, val: 3 })).signAndSend()
 })
 ```
 
@@ -149,24 +171,27 @@ environment, and `await worker.tearDown()` stops it.
 
 `worker.rpcUrl`, `worker.networkPassphrase` and `worker.rpc` (an
 `rpc.Server`) reach the network directly, and `account.keypair` is the
-account's key, for building any transaction by hand.
+account's key, for building any transaction by hand. A client's
+`options` are the SDK's `ClientOptions`.
 
 ## Sandbox controls (soroban-sim only)
 
 | Control | soroban-sim admin method |
 |---|---|
 | `account.setBalance(stroops)` | `fork_setBalance` |
-| `contract.setStorage(key, value, options)`, `contract.removeStorage(key, options)` | `fork_setLedgerEntry`, `fork_removeLedgerEntry` |
+| `worker.setStorage(contract, key, value, options)`, `worker.removeStorage(contract, key, options)` | `fork_setLedgerEntry`, `fork_removeLedgerEntry` |
 | `worker.advanceLedgers(n)` | `fork_advanceLedgers` |
 | `worker.setTime(date or Unix seconds)` | `fork_setTime` |
 
 `advanceLedgers` and `setTime` return the next ledger's sequence number and
 close time; `worker.latestLedger()` (on both environments) returns the last
-closed one. Time only moves forward. Storage keys and values are native
-values or `xdr.ScVal`s; give `keyType` and `valueType` (as `nativeToScVal`'s
-`type`, such as `'u32'`) when the stored type is not the one `nativeToScVal`
-picks (a whole number becomes a `u64`). `durability` is `persistent` (the
-default) or `temporary`.
+closed one. Time only moves forward. `worker.getStorage(contract, key,
+options)` reads an entry on both environments. `contract` is a client or a
+`C…` address. Storage keys and values are native values or `xdr.ScVal`s;
+give `keyType` and `valueType` (as `nativeToScVal`'s `type`, such as
+`'u32'`) when the stored type is not the one `nativeToScVal` picks (a whole
+number becomes a `u64`). `durability` is `persistent` (the default) or
+`temporary`.
 
 A local network has no way to do any of this, so on a local network each
 control throws `SandboxOnlyError`; none of them silently does nothing. A
@@ -178,14 +203,10 @@ const { test, sandbox } = defineSuite({ /* … */ })
 
 test.skipIf(!sandbox)('the vote closes after a day', async ({ worker, setup: { alice, vote } }) => {
   await worker.setTime((await worker.latestLedger()).closeTime + 86_400)
-  await expect(alice.call(vote, 'cast', { choice: 1 })).rejects.toMatchObject({ code: 3 })
+  const tx = await alice.client(vote).cast({ choice: 1 })
+  await expect(tx.signAndSend()).rejects.toMatchObject({ code: 3 })
 })
 ```
-
-The harness sends its transactions with no upper time bound, so moving time
-ahead never makes them too late. A transaction you build yourself with a
-bound set from the wall clock (`setTimeout(300)`) is refused once
-`setTime` moves past it.
 
 ## Running
 
@@ -225,7 +246,8 @@ supported yet. It is planned as a follow-up once exports of live forks are
 complete on main.
 
 This package's own suites are in [`test/`](./test): `example.test.ts` is the
-example suite, `isolation.test.ts` checks that two tests writing the same key
+example suite with spec-built clients, `bindings.test.ts` the same with the
+generated client in `test/bindings/storage.ts`, `isolation.test.ts` checks that two tests writing the same key
 at once each read back their own value, `sandbox.test.ts` covers the
 controls (and their refusal on a local network), `worker.test.ts` the plain
 `test`, `errors.test.ts` which contract an error's name comes from and how
@@ -275,12 +297,12 @@ pass on the other.
 | Sandbox controls | all | none: each throws `SandboxOnlyError` |
 | History | `getTransaction` and `getEvents` cover only the test's own transactions; `getLedgers` and `getTransactions` are not served | full |
 | Clock | starts at the setup's ledger time and follows the wall clock; `setTime` and `advanceLedgers` move it ahead | follows the wall clock |
-| Speed (this package's suites, one laptop) | about 0.6 s for 37 tests with setup, 0.5 s from the cache | about 40 s for the 27 that run there |
+| Speed (this package's suites, one laptop) | about 0.7 s for 42 tests with setup, 0.5 s from the cache | about 40 s for the 31 that run there |
 
 A suite that passes on soroban-sim can still fail on a local network on
 timing: a test that assumes a transaction is visible as soon as
 `sendTransaction` returns, that sends from one account in parallel, or that
-needs a ledger to close by itself. `call` and `deploy` wait for each
+needs a ledger to close by itself. `signAndSend()` and `deploy` wait for each
 transaction's result, which holds on both. See
 [`docs/rpc-facade.md`](../../docs/rpc-facade.md) for everything soroban-sim's
 RPC serves and how its clock moves.

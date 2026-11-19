@@ -13,8 +13,8 @@ const { test } = defineSuite({
   async setup(worker) {
     const writer = await worker.createAccount('writer')
     const storage = await writer.deploy(storageWasm)
-    await writer.call(storage, 'put_persist', { key: 1, val: 0 })
-    return { writer, storage }
+    await (await storage.put_persist({ key: 1, val: 0 })).signAndSend()
+    return { storage }
   },
 })
 
@@ -31,10 +31,10 @@ function rendezvous(parties: number, timeoutMs = 60_000) {
 const bothWritten = rendezvous(2)
 
 for (const value of [111, 222]) {
-  test(`writes ${value} and reads back only its own write`, async ({ setup: { writer, storage } }) => {
-    expect(await storage.view('get_persist', { key: 1 })).toBe(0)
-    await writer.call(storage, 'put_persist', { key: 1, val: value })
+  test(`writes ${value} and reads back only its own write`, async ({ setup: { storage } }) => {
+    expect((await storage.get_persist({ key: 1 })).result).toBe(0)
+    await (await storage.put_persist({ key: 1, val: value })).signAndSend()
     await bothWritten()
-    expect(await storage.view('get_persist', { key: 1 })).toBe(value)
+    expect((await storage.get_persist({ key: 1 })).result).toBe(value)
   })
 }

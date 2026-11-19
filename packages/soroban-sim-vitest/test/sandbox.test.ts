@@ -13,7 +13,7 @@ const { test, sandbox } = defineSuite({
   async setup(worker) {
     const alice = await worker.createAccount('alice')
     const storage = await alice.deploy(storageWasm)
-    await alice.call(storage, 'put_persist', { key: 1, val: 7 })
+    await (await storage.put_persist({ key: 1, val: 7 })).signAndSend()
     return { alice, storage }
   },
 })
@@ -23,20 +23,21 @@ test.skipIf(!sandbox)('setBalance sets an account’s XLM balance', async ({ set
   expect(await alice.balance()).toBe(5_0000000n)
 })
 
-test.skipIf(!sandbox)('setStorage and removeStorage patch what the contract reads', async ({ setup: { storage } }) => {
-  expect(await storage.getStorage(1, u32)).toBe(7)
-  await storage.setStorage(1, 99, u32)
-  await storage.setStorage(5, 50, u32)
-  await storage.setStorage(3, 30, { ...u32, durability: 'temporary' })
-  expect(await storage.view('get_persist', { key: 1 })).toBe(99)
-  expect(await storage.view('get_persist', { key: 5 })).toBe(50)
-  expect(await storage.view('get_temp', { key: 3 })).toBe(30)
-  await storage.removeStorage(1, u32)
-  expect(await storage.getStorage(1, u32)).toBeUndefined()
-  await expect(storage.view('get_persist', { key: 1 })).rejects.toBeInstanceOf(InvocationError)
+test.skipIf(!sandbox)('setStorage and removeStorage patch what the contract reads', async ({ worker, setup: { storage } }) => {
+  expect(await worker.getStorage(storage, 1, u32)).toBe(7)
+  await worker.setStorage(storage, 1, 99, u32)
+  await worker.setStorage(storage, 5, 50, u32)
+  await worker.setStorage(storage, 3, 30, { ...u32, durability: 'temporary' })
+  expect((await storage.get_persist({ key: 1 })).result).toBe(99)
+  expect((await storage.get_persist({ key: 5 })).result).toBe(50)
+  expect((await storage.get_temp({ key: 3 })).result).toBe(30)
+  await worker.removeStorage(storage, 1, u32)
+  expect(await worker.getStorage(storage, 1, u32)).toBeUndefined()
+  const read = await storage.get_persist({ key: 1 })
+  expect(() => read.result).toThrow(InvocationError)
 })
 
-test.skipIf(!sandbox)('advanceLedgers closes ledgers and setTime moves the clock', async ({ worker, setup: { alice, storage } }) => {
+test.skipIf(!sandbox)('advanceLedgers closes ledgers and setTime moves the clock', async ({ worker, setup: { storage } }) => {
   const before = await worker.latestLedger()
   const next = await worker.advanceLedgers(5)
   const after = await worker.latestLedger()
@@ -45,19 +46,19 @@ test.skipIf(!sandbox)('advanceLedgers closes ledgers and setTime moves the clock
 
   const target = after.closeTime + 86_400
   expect((await worker.setTime(target)).closeTime).toBe(target)
-  const call = await alice.callRaw(storage, 'put_persist', { key: 2, val: 2 })
-  expect(call.closeTime).toBe(target)
+  const sent = await (await storage.put_persist({ key: 2, val: 2 })).signAndSend()
+  expect(Number(sent.getTransactionResponse?.createdAt)).toBe(target)
 })
 
 test.skipIf(sandbox)('on a local network every sandbox control refuses', async ({ worker, setup: { alice, storage } }) => {
   expect(worker.sandbox).toBe(false)
   const refusals = [
     () => alice.setBalance(1n),
-    () => storage.setStorage(1, 1, u32),
-    () => storage.removeStorage(1, u32),
+    () => worker.setStorage(storage, 1, 1, u32),
+    () => worker.removeStorage(storage, 1, u32),
     () => worker.advanceLedgers(1),
     () => worker.setTime(new Date()),
   ]
   for (const control of refusals) await expect(control()).rejects.toBeInstanceOf(SandboxOnlyError)
-  expect(await storage.view('get_persist', { key: 1 })).toBe(7)
+  expect((await storage.get_persist({ key: 1 })).result).toBe(7)
 })

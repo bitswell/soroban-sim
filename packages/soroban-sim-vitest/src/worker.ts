@@ -1,12 +1,11 @@
-import { Asset, Operation, rpc } from '@stellar/stellar-sdk'
-import { Account } from './account.ts'
+import { Address, Asset, Operation, contract, nativeToScVal, rpc, scValToNative, xdr } from '@stellar/stellar-sdk'
+import { Account, attach } from './account.ts'
+import { clientOptions, mapSignAndSend, mapping, type BindingsClass, type ContractClient } from './clients.ts'
 import { resolveConfig, SEED, type Config, type EnvironmentKind } from './config.ts'
-import { Contract } from './contract.ts'
 import { SandboxOnlyError } from './errors.ts'
-import { ACCOUNTS, ADMIN, ADOPT, DEPLOYS } from './internal.ts'
+import { ACCOUNTS, ADMIN, ADOPT, BINDINGS, DEPLOYS } from './internal.ts'
 import { RUN_NONCE, deriveKeypair } from './keys.ts'
 import { rpcCall, startServer } from './server.ts'
-import { send } from './transactions.ts'
 
 /** Every account starts with this balance on both environments (friendbot's amount). */
 export const FUNDING_XLM = '10000'
@@ -57,7 +56,9 @@ export class Worker {
   readonly #accounts = new Map<string, Account>();
   /** While setup runs: the hashes of the Wasm the suite lists. */
   [DEPLOYS]: Set<string> | undefined
-  #xlm: Promise<Contract> | undefined
+  /** Generated bindings clients by Wasm hash, from the suite's `wasm`: a client for that code is of that class. */
+  readonly [BINDINGS] = new Map<string, BindingsClass>()
+  readonly #assets = new Map<string, Promise<string>>()
 
   private constructor(environment: EnvironmentKind, backend: Backend, client: rpc.Server, passphrase: string, seed: string) {
     this.environment = environment
@@ -111,34 +112,57 @@ export class Worker {
     return found
   }
 
-  /** A contract already on the network, by its `C…` address. */
-  contract(id: string, wasmHash?: string): Contract {
-    return new Contract(this, id, wasmHash)
+  /**
+   * An SDK client for a contract already on the network, by its `C…`
+   * address, with nobody signing (for reads; `account.client(it)` signs).
+   * Given generated bindings, a client of that class.
+   */
+  async contract<C extends contract.Client = ContractClient>(id: string, Bindings?: BindingsClass<C>): Promise<C> {
+    return (await attach(this, id, Bindings)) as unknown as C
   }
 
-  /** The native asset (XLM) contract, deployed first if the network does not have it yet. */
-  xlm(): Promise<Contract> {
-    this.#xlm ??= this.#nativeAsset().catch((e) => {
-      this.#xlm = undefined
-      throw e
-    })
-    return this.#xlm
+  /** An SDK client for the native asset (XLM) contract, deployed first if the network does not have it yet. */
+  xlm(): Promise<ContractClient> {
+    return this.assetContract(Asset.native())
   }
 
-  async #nativeAsset(): Promise<Contract> {
-    const asset = Asset.native()
-    const sac = new Contract(this, asset.contractId(this.networkPassphrase))
-    if (await this.#exists(sac.id)) return sac
+  /**
+   * An SDK client for `asset`'s Stellar asset contract, deployed first if
+   * the network does not have it yet (an issued asset's admin is its
+   * issuer: `issuer.client(token).mint(…)`).
+   */
+  async assetContract(asset: Asset): Promise<ContractClient> {
+    const key = asset.toString()
+    let id = this.#assets.get(key)
+    if (!id) {
+      id = this.#deployAsset(asset)
+      id.catch(() => this.#assets.delete(key))
+      this.#assets.set(key, id)
+    }
+    return attach(this, await id, undefined, undefined, null)
+  }
+
+  async #deployAsset(asset: Asset): Promise<string> {
+    const id = asset.contractId(this.networkPassphrase)
+    if (await this.#exists(id)) return id
     // Anyone may deploy it; a key of the worker's own pays, outside the accounts tests see.
-    const deployer = deriveKeypair(this.#seed, '\0native-asset-deployer')
-    await this.#backend.fund(deployer.publicKey())
+    const deployer = new Account(this, '\0native-asset-deployer', deriveKeypair(this.#seed, '\0native-asset-deployer'))
+    await this.#backend.fund(deployer.address)
+    const target = { contract: id, method: 'createStellarAssetContract' }
     try {
-      await send(this, deployer, Operation.createStellarAssetContract({ asset }), { contract: sac.id, method: 'deploy' })
+      const tx = await contract.AssembledTransaction.buildWithOp(Operation.createStellarAssetContract({ asset }), {
+        ...clientOptions(this, id, deployer),
+        method: target.method,
+        parseResultXdr: (result: xdr.ScVal) => result,
+      })
+      mapSignAndSend(tx, target)
+      await mapping(target, tx, () => tx.simulate())
+      await tx.signAndSend()
     } catch (e) {
       // Another worker on the same local network may have deployed it first.
-      if (!(await this.#exists(sac.id))) throw e
+      if (!(await this.#exists(id))) throw e
     }
-    return sac
+    return id
   }
 
   async #exists(contractId: string): Promise<boolean> {
@@ -170,6 +194,47 @@ export class Worker {
     return res.next
   }
 
+  /** Reads one entry of a contract's persistent (default) or temporary storage; undefined when absent. */
+  async getStorage<T = any>(contract: ContractRef, key: unknown, options: StorageOptions = {}): Promise<T | undefined> {
+    const res = await this.rpc.getLedgerEntries(dataKey(contract, key, options))
+    const entry = res.entries[0]
+    if (!entry || entry.val.type !== 'contractData') return undefined
+    return scValToNative(entry.val.contractData.val) as T
+  }
+
+  /** Sets one entry of a contract's storage, keeping its TTL (or, for a new entry, live for a long while). soroban-sim only. */
+  async setStorage(contract: ContractRef, key: unknown, value: unknown, options: StorageOptions = {}): Promise<void> {
+    const id = idOf(contract)
+    const ledgerKey = dataKey(contract, key, options)
+    const [current, latest] = await Promise.all([this.rpc.getLedgerEntries(ledgerKey), this.latestLedger()])
+    const entry = new xdr.LedgerEntry({
+      lastModifiedLedgerSeq: latest.sequence,
+      data: xdr.LedgerEntryData.contractData(
+        new xdr.ContractDataEntry({
+          ext: xdr.ExtensionPoint.v0(),
+          contract: new Address(id).toScAddress(),
+          key: scVal(key, options.keyType),
+          durability: durabilityOf(options),
+          val: scVal(value, options.valueType),
+        }),
+      ),
+      ext: xdr.LedgerEntryExt.v0(),
+    })
+    await this[ADMIN]('setStorage', 'fork_setLedgerEntry', {
+      entry: entry.toXdr('base64'),
+      liveUntilLedgerSeq: current.entries[0]?.liveUntilLedgerSeq ?? latest.sequence + NEW_ENTRY_TTL,
+      label: `${id} storage`,
+    })
+  }
+
+  /** Removes one entry of a contract's storage. soroban-sim only. */
+  async removeStorage(contract: ContractRef, key: unknown, options: StorageOptions = {}): Promise<void> {
+    await this[ADMIN]('removeStorage', 'fork_removeLedgerEntry', {
+      key: dataKey(contract, key, options).toXdr('base64'),
+      label: `${idOf(contract)} storage`,
+    })
+  }
+
   /** Stops the worker's soroban-sim server (nothing to stop on a local network). */
   tearDown(): Promise<void> {
     return this.#backend.stop()
@@ -191,6 +256,42 @@ export class Worker {
   [ACCOUNTS](): string[] {
     return [...this.#accounts.keys()]
   }
+}
+
+/** A contract: its client or its `C…` address. */
+export type ContractRef = contract.Client | string
+
+export interface StorageOptions {
+  /** `persistent` (the default) or `temporary`; instance storage lives in the contract's own entry. */
+  durability?: 'persistent' | 'temporary'
+  /** How to convert a native key, as `nativeToScVal`'s `type` (`'u32'`, `'symbol'`…); ignored for an xdr.ScVal. */
+  keyType?: string
+  /** How to convert a native value, as above. */
+  valueType?: string
+}
+
+/** A new storage entry's TTL in ledgers: about a week of five-second ledgers. */
+const NEW_ENTRY_TTL = 120_000
+
+const idOf = (contract: ContractRef) => (typeof contract === 'string' ? contract : contract.options.contractId)
+
+function dataKey(contract: ContractRef, key: unknown, options: StorageOptions): xdr.LedgerKey {
+  return xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Address(idOf(contract)).toScAddress(),
+      key: scVal(key, options.keyType),
+      durability: durabilityOf(options),
+    }),
+  )
+}
+
+function durabilityOf(options: StorageOptions): xdr.ContractDataDurability {
+  return options.durability === 'temporary' ? xdr.ContractDataDurability.temporary : xdr.ContractDataDurability.persistent
+}
+
+function scVal(value: unknown, type: string | undefined): xdr.ScVal {
+  if (xdr.ScVal.is(value)) return value
+  return nativeToScVal(value, type ? ({ type } as Parameters<typeof nativeToScVal>[1]) : undefined)
 }
 
 async function simBackend(config: Config, snapshot: string): Promise<Backend> {

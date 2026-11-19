@@ -125,17 +125,20 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
           const admin = await worker.createAccount('admin')
           await admin.setBalance(12_5000000n)
           const contract = await admin.deploy(storage)
-          await admin.call(contract, 'put_persist', { key: 1, val: 7 })
+          await (await contract.put_persist({ key: 1, val: 7 })).signAndSend()
           return { admin, contract }
         },
       },
       cfg,
     )
-    expect(prepared.result).toMatchObject({ admin: { name: 'admin' }, contract: { id: expect.stringMatching(/^C/) } })
+    expect(prepared.result).toMatchObject({
+      admin: { name: 'admin' },
+      contract: { id: expect.stringMatching(/^C/), signer: 'admin' },
+    })
     const worker = await Worker.init({ config: cfg, snapshot: prepared.snapshot })
     try {
       const { contract } = prepared.result as { contract: { id: string } }
-      expect(await worker.contract(contract.id).view('get_persist', { key: 1 })).toBe(7)
+      expect((await (await worker.contract(contract.id)).get_persist({ key: 1 })).result).toBe(7)
     } finally {
       await worker.tearDown()
     }
@@ -152,5 +155,19 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
       },
     }
     await expect(prepareSimSetup(suite, cfg)).rejects.toThrow(/does not list in `wasm`/)
+  })
+
+  test('setup may not deploy with a bindings client the suite does not pair with the Wasm', async () => {
+    const cfg = await config()
+    const { Client: StorageClient } = await import('./bindings/storage.ts')
+    const suite: SuiteDefinition<undefined> = {
+      name: 'unpaired',
+      wasm: [storage],
+      async setup(worker) {
+        const admin = await worker.createAccount('admin')
+        await admin.deploy(storage, { client: StorageClient })
+      },
+    }
+    await expect(prepareSimSetup(suite, cfg)).rejects.toThrow(/does not pair with it/)
   })
 })

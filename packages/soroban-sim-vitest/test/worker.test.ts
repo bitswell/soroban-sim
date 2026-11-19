@@ -1,18 +1,26 @@
 // The plain `test`: a worker of the test's own, no suite setup.
-import { Asset, Operation } from '@stellar/stellar-sdk'
+import { Asset, contract } from '@stellar/stellar-sdk'
 import { expect } from 'vitest'
 import { test } from '../src/index.ts'
-import { send } from '../src/transactions.ts'
 
 const storageWasm = new URL('../../../fixtures/contracts/storage.wasm', import.meta.url)
 
-test('accounts by name deploy, call and view', async ({ worker }) => {
+test('accounts by name deploy, write and read through SDK clients', async ({ worker }) => {
   const alice = await worker.createAccount('alice')
   const storage = await alice.deploy(storageWasm)
-  await alice.call(storage, 'put_persist', { key: 1, val: 3 })
-  expect(await storage.view('get_persist', { key: 1 })).toBe(3)
+  expect(storage).toBeInstanceOf(contract.Client)
+  await (await storage.put_persist({ key: 1, val: 3 })).signAndSend()
+  expect((await storage.get_persist({ key: 1 })).result).toBe(3)
   expect(worker.account('alice')).toBe(alice)
-  expect(await worker.contract(storage.id).view('get_persist', { key: 1 })).toBe(3)
+})
+
+test('worker.contract finds a contract’s spec on the network and reads without a signer', async ({ worker }) => {
+  const alice = await worker.createAccount('alice')
+  const deployed = await alice.deploy(storageWasm)
+  await (await deployed.put_persist({ key: 1, val: 4 })).signAndSend()
+  const found = await worker.contract(deployed.options.contractId)
+  expect(found.options.publicKey).toBeUndefined()
+  expect((await found.get_persist({ key: 1 })).result).toBe(4)
 })
 
 test('a name is one account: creating it twice is refused, as is an unknown name', async ({ worker }) => {
@@ -21,20 +29,13 @@ test('a name is one account: creating it twice is refused, as is an unknown name
   expect(() => worker.account('carol')).toThrow(/no account "carol"/)
 })
 
-test('a function the contract does not have is refused with the ones it has', async ({ worker }) => {
-  const alice = await worker.createAccount('alice')
-  const storage = await alice.deploy(storageWasm)
-  await expect(alice.call(storage, 'put', { key: 1 })).rejects.toThrow(/has no function "put"; it has .*put_persist/)
-})
-
 test('a Stellar asset contract takes its admin functions by name', async ({ worker }) => {
   const issuer = await worker.createAccount('issuer')
-  const asset = new Asset('TST', issuer.address)
-  const token = worker.contract(asset.contractId(worker.networkPassphrase))
-  await send(worker, issuer.keypair, Operation.createStellarAssetContract({ asset }), { contract: token.id, method: 'deploy' })
+  const token = issuer.client(await worker.assetContract(new Asset('TST', issuer.address)))
   const holder = await issuer.deploy(storageWasm)
-  await issuer.call(token, 'mint', { to: holder, amount: 5n })
-  expect(await token.view('balance', { id: holder })).toBe(5n)
-  expect(await token.view('admin')).toBe(issuer.address)
-  expect(await token.view('authorized', { id: holder })).toBe(true)
+  const id = holder.options.contractId
+  await (await token.mint({ to: id, amount: 5n })).signAndSend()
+  expect((await token.balance({ id })).result).toBe(5n)
+  expect((await token.admin()).result).toBe(issuer.address)
+  expect((await token.authorized({ id })).result).toBe(true)
 })

@@ -1,5 +1,8 @@
-// The example suite: nothing here names an environment. `pnpm test` runs it
-// on soroban-sim, `pnpm test:local` against a local network.
+// The example suite, without generated bindings: each contract client is
+// the SDK's contract.Client built from the contract's spec. Nothing here
+// names an environment: `pnpm test` runs it on soroban-sim, `pnpm
+// test:local` against a local network.
+import { contract } from '@stellar/stellar-sdk'
 import { expect } from 'vitest'
 import { ContractError, InvocationError, defineSuite } from '../src/index.ts'
 
@@ -13,18 +16,19 @@ const { test } = defineSuite({
     const alice = await worker.createAccount('alice')
     const bob = await worker.createAccount('bob')
     const storage = await admin.deploy(storageWasm)
-    await admin.call(storage, 'put_persist', { key: 1, val: 7 })
+    await (await storage.put_persist({ key: 1, val: 7 })).signAndSend()
     return { admin, alice, bob, storage }
   },
 })
 
 test('reads what setup wrote', async ({ setup: { storage } }) => {
-  expect(await storage.view('get_persist', { key: 1 })).toBe(7)
+  expect((await storage.get_persist({ key: 1 })).result).toBe(7)
 })
 
-test('an account writes and reads its own value back', async ({ setup: { alice, storage } }) => {
-  await alice.call(storage, 'put_persist', { key: 2, val: 42 })
-  expect(await storage.view('get_persist', { key: 2 })).toBe(42)
+test('another account writes and reads its own value back', async ({ setup: { alice, storage } }) => {
+  const asAlice = alice.client(storage)
+  await (await asAlice.put_persist({ key: 2, val: 42 })).signAndSend()
+  expect((await asAlice.get_persist({ key: 2 })).result).toBe(42)
 })
 
 test('accounts setup did not use still hold their funding', async ({ setup: { alice, bob } }) => {
@@ -34,28 +38,45 @@ test('accounts setup did not use still hold their funding', async ({ setup: { al
 
 test('a test deploys a contract of its own', async ({ setup: { bob, storage } }) => {
   const mine = await bob.deploy(storageWasm)
-  expect(mine.id).not.toBe(storage.id)
-  await bob.call(mine, 'put_persist', { key: 1, val: 9 })
-  expect(await mine.view('get_persist', { key: 1 })).toBe(9)
-  expect(await storage.view('get_persist', { key: 1 })).toBe(7)
+  expect(mine.options.contractId).not.toBe(storage.options.contractId)
+  await (await mine.put_persist({ key: 1, val: 9 })).signAndSend()
+  expect((await mine.get_persist({ key: 1 })).result).toBe(9)
+  expect((await storage.get_persist({ key: 1 })).result).toBe(7)
 })
 
 test('XLM moves between accounts through the native asset contract', async ({ worker, setup: { alice, bob } }) => {
-  const xlm = await worker.xlm()
-  await alice.call(xlm, 'transfer', { from: alice, to: bob, amount: 25_0000000n })
-  expect(await xlm.view('balance', { id: bob })).toBe(10_025_0000000n)
+  const xlm = alice.client(await worker.xlm())
+  await (await xlm.transfer({ from: alice.address, to: bob.address, amount: 25_0000000n })).signAndSend()
+  expect((await xlm.balance({ id: bob.address })).result).toBe(10_025_0000000n)
 })
 
-test("a contract's own error comes back as a ContractError with its code", async ({ worker, setup: { alice, bob } }) => {
-  const xlm = await worker.xlm()
-  const error = await alice.call(xlm, 'transfer', { from: alice, to: bob, amount: 1_000_000_0000000n }).catch((e) => e)
+test('a transfer another account authorizes uses the SDK’s signAuthEntries', async ({ worker, setup: { alice, bob } }) => {
+  const xlm = bob.client(await worker.xlm())
+  const tx = await xlm.transfer({ from: alice.address, to: bob.address, amount: 5_0000000n })
+  expect(tx.needsNonInvokerSigningBy()).toEqual([alice.address])
+  await alice.signAuthEntries(tx)
+  await tx.signAndSend()
+  expect((await xlm.balance({ id: alice.address })).result).toBe(9_995_0000000n)
+})
+
+test("a contract's own error is thrown by signAndSend as a ContractError with its code", async ({ worker, setup: { alice, bob } }) => {
+  const xlm = alice.client(await worker.xlm())
+  const tx = await xlm.transfer({ from: alice.address, to: bob.address, amount: 1_000_000_0000000n })
+  const error = await tx.signAndSend().catch((e: any) => e)
   expect(error).toBeInstanceOf(ContractError)
-  expect(error).toMatchObject({ code: 10, errorName: 'BalanceError', method: 'transfer', contract: xlm.id })
+  expect(error).toMatchObject({ code: 10, errorName: 'BalanceError', method: 'transfer', contract: xlm.options.contractId })
   expect(error.events.length).toBeGreaterThan(0)
+  expect(error.cause).toBeInstanceOf(contract.AssembledTransaction.Errors.SimulationFailed)
 })
 
-test('a trap comes back as an InvocationError with the host error and its events', async ({ setup: { storage } }) => {
-  const error = await storage.view('get_persist', { key: 99 }).catch((e) => e)
+test('a read that traps throws an InvocationError from result, with the host error and its events', async ({ setup: { storage } }) => {
+  const tx = await storage.get_persist({ key: 99 })
+  let error: any
+  try {
+    void tx.result
+  } catch (e) {
+    error = e
+  }
   expect(error).toBeInstanceOf(InvocationError)
   expect(error).not.toBeInstanceOf(ContractError)
   expect(error.hostError).toMatch(/^Error\(WasmVm, /)
