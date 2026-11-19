@@ -107,6 +107,23 @@ jobs:
   # setup and test times, total and peak memory to the run summary, so the
   # two can be compared on every run (packages/soroban-sim-vitest/ci).
 
+  # The harness's type check is a job of its own, so neither cost job's total
+  # includes it.
+  vitest-types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.11.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - name: Type check
+        run: pnpm --filter @theahaco/soroban-sim-vitest check
+
   # The latest release (soroban-sim-cli-v0.1.0) predates fork_exportSnapshot,
   # which the harness needs, so the CLI is built once from this commit and
   # handed to vitest-soroban-sim as an artifact.
@@ -165,8 +182,6 @@ jobs:
           path: bin
       - name: Get the CLI (done)
         run: chmod +x bin/soroban-sim && $CLOCK stop binary && bin/soroban-sim --version
-      - name: Type check
-        run: pnpm --filter @theahaco/soroban-sim-vitest check
       - name: The suites on soroban-sim
         working-directory: packages/soroban-sim-vitest
         run: ci/clock.sh run first -- ci/peak-rss.sh soroban-sim "$RUNNER_TEMP/servers.rss" -- pnpm test

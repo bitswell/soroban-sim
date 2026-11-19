@@ -263,14 +263,17 @@ environment, so each pays only for what it needs, and each writes a cost
 table to the run's summary page:
 
 - `vitest-soroban-sim` downloads the CLI that `vitest-cli` built from the
-  same commit, type-checks the package, runs the suites, and runs them again
-  with setup from the cache. Its table gives the time to get the CLI, each
+  same commit, runs the suites, and runs them again with setup from the
+  cache. Its table gives the time to get the CLI, each
   test run, the total, and the peak memory of the `soroban-sim` servers; a
   second column adds the source build in place of the download.
 - `vitest-quickstart` pulls and starts `stellar/quickstart:testing` (pinned
   by digest), waits in a step of its own until RPC is healthy and friendbot
   funds an account, and runs the suites. Its table gives those times, the
   total, and the container's peak memory.
+
+The package's type check (`tsc --noEmit`) runs in a third job,
+`vitest-types`, so neither table's total includes it.
 
 The helpers are in [`ci/`](./ci): `clock.sh` times steps, `peak-rss.sh`
 samples the servers' memory, `wait-for-funding.sh` waits for the local

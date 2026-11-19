@@ -13,7 +13,7 @@ sample() {
     local pids kib count
     pids=$(pgrep -x "$name" | paste -sd, - || true)
     if [ -n "$pids" ]; then
-      kib=$(ps -o rss= -p "$pids" 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
+      kib=$({ ps -o rss= -p "$pids" 2>/dev/null || true; } | awk '{ s += $1 } END { print s + 0 }')
       count=$(echo "$pids" | tr ',' '\n' | wc -l | tr -d ' ')
       [ "$kib" -gt "$peak" ] && peak=$kib
       [ "$count" -gt "$most" ] && most=$count
