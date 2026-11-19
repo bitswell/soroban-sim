@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Writes one job's cost table to the run summary ($GITHUB_STEP_SUMMARY) and
+# to the log, from clock.sh marks and the memory figures.
+#   summary.sh soroban-sim   (reads BUILD_SECONDS, CLI_JOB_SECONDS, $RUNNER_TEMP/servers.rss and servers-cached.rss)
+#   summary.sh quickstart    (reads QUICKSTART_MEMORY_PEAK_MIB)
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+clock() { "$here/clock.sh" seconds "$1"; }
+sum() { awk -v a="${1:-0}" -v b="${2:-0}" -v c="${3:-0}" 'BEGIN { printf "%.1f", a + b + c }'; }
+minus() { awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { printf "%.1f", a - b }'; }
+or_na() { if [ -n "${1:-}" ]; then echo "$1"; else echo "n/a"; fi; }
+rss() { if [ -f "$1" ]; then awk '{ printf "%s MiB (%s servers at once)", $1, $2 }' "$1"; else echo "n/a"; fi; }
+
+"$here/clock.sh" stop job
+job=$(clock job)
+
+case "$1" in
+  soroban-sim)
+    binary=$(clock binary) first=$(clock first) cached=$(clock cached)
+    tests=$(sum "$first" "$cached")
+    from_source=$(sum "$(or_na "${CLI_JOB_SECONDS:-}")" "$(minus "$job" "$binary")")
+    [ -n "${CLI_JOB_SECONDS:-}" ] || from_source="n/a"
+    table=$(cat <<TABLE
+### soroban-sim
+
+| | Prebuilt binary (this job) | Built from source |
+|---|---|---|
+| Setup: get the CLI | ${binary} s, download the build artifact | $(or_na "${BUILD_SECONDS:-}") s \`cargo build --release\` (job \`vitest-cli\`, $(or_na "${CLI_JOB_SECONDS:-}") s in all) |
+| Tests, first run (setup runs once, snapshot cached) | ${first} s | ${first} s |
+| Tests again, setup from the cache | ${cached} s | ${cached} s |
+| Tests in all | ${tests} s | ${tests} s |
+| Total | ${job} s | ${from_source} s |
+| Peak memory, soroban-sim servers | first run $(rss "${RUNNER_TEMP:-/tmp}/servers.rss"); cached run $(rss "${RUNNER_TEMP:-/tmp}/servers-cached.rss") | same |
+
+- The latest release (soroban-sim-cli-v0.1.0) predates \`fork_exportSnapshot\`, which the harness needs, so the CLI is built once from this commit in \`vitest-cli\` (with the Rust cache restored) and downloaded here; "Built from source" adds that job's time and leaves out the download.
+- Times are wall-clock between marks in the job; Total runs from the job's first step to this summary, so it includes checkout, Node and \`pnpm install\` but not runner start-up.
+- Memory is the summed resident memory of every \`soroban-sim\` server process, sampled every 100 ms with \`ps\` (a spike shorter than that can be missed); the Node test runner is not counted.
+TABLE
+)
+    ;;
+  quickstart)
+    start=$(clock container) ready=$(clock ready) tests=$(clock tests) since=$(clock since-start)
+    setup=$(sum "$start" "$ready")
+    if [ -n "${QUICKSTART_MEMORY_PEAK_MIB:-}" ]; then memory="${QUICKSTART_MEMORY_PEAK_MIB} MiB"; else memory="n/a (the container's cgroup memory.peak was not readable)"; fi
+    table=$(cat <<TABLE
+### Local network (quickstart)
+
+| | Seconds |
+|---|---|
+| Setup: pull and start the container | ${start} s |
+| Setup: wait until RPC is healthy and friendbot funds an account | ${ready} s ($(or_na "$since") s from \`docker run\`, overlapping the install) |
+| Setup in all | ${setup} s |
+| Tests | ${tests} s |
+| Total | ${job} s |
+| Peak memory, the container | ${memory} |
+
+- Times are wall-clock between marks in the job; Total runs from the job's first step to this summary, so it includes checkout, Node and \`pnpm install\` but not runner start-up.
+- Memory is the container's cgroup \`memory.peak\`: the most it held at once since it started, page cache charged to it included.
+TABLE
+)
+    ;;
+  *)
+    echo "usage: summary.sh soroban-sim|quickstart" >&2
+    exit 2
+    ;;
+esac
+
+echo "$table"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then echo "$table" >>"$GITHUB_STEP_SUMMARY"; fi
