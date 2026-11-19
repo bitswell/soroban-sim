@@ -228,8 +228,9 @@ This package's own suites are in [`test/`](./test): `example.test.ts` is the
 example suite, `isolation.test.ts` checks that two tests writing the same key
 at once each read back their own value, `sandbox.test.ts` covers the
 controls (and their refusal on a local network), `worker.test.ts` the plain
-`test`, `errors.test.ts` which contract an error's name comes from, and
-`cache.test.ts` the cache.
+`test`, `errors.test.ts` which contract an error's name comes from and how
+a host error is labelled, `config.test.ts` the variables and account keys,
+and `cache.test.ts` the cache.
 
 ## The setup cache (soroban-sim)
 
