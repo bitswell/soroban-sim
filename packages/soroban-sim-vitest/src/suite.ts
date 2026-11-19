@@ -24,7 +24,7 @@ export function defineSuite<S>(def: SuiteDefinition<S>, config: Config = resolve
   const environment = environmentFor(def, config)
   const test = baseTest.extend<{ lease: Lease<S>; worker: Worker; setup: S }>({
     lease: async ({ task }, use) => {
-      const lease = await environment.acquire(task.id)
+      const lease = await environment.acquire(task.id, task.file.filepath)
       try {
         await use(lease)
       } finally {

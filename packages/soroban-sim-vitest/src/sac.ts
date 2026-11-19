@@ -1,12 +1,14 @@
 import { contract, xdr } from '@stellar/stellar-sdk'
 
-// A Stellar asset contract has no Wasm and so no spec to read. This is the
-// token interface (SEP-41) it implements, with the host's error codes, so
-// calls to it take and return native values like any other contract's.
+// A Stellar asset contract has no Wasm and so no spec to read. These are
+// its functions (the SEP-41 token interface and the admin's), with the
+// host's error codes, so calls to it take and return native values like any
+// other contract's.
 
 const T = xdr.ScSpecTypeDef
 const types = {
   address: () => T.scSpecTypeAddress(),
+  bool: () => T.scSpecTypeBool(),
   i128: () => T.scSpecTypeI128(),
   u32: () => T.scSpecTypeU32(),
   string: () => T.scSpecTypeString(),
@@ -52,6 +54,12 @@ export const STELLAR_ASSET_SPEC = new contract.Spec([
   fn('decimals', [], 'u32'),
   fn('name', [], 'string'),
   fn('symbol', [], 'string'),
+  fn('mint', [['to', 'address'], ['amount', 'i128']]),
+  fn('clawback', [['from', 'address'], ['amount', 'i128']]),
+  fn('set_admin', [['new_admin', 'address']]),
+  fn('admin', [], 'address'),
+  fn('set_authorized', [['id', 'address'], ['authorize', 'bool']]),
+  fn('authorized', [['id', 'address']], 'bool'),
   xdr.ScSpecEntry.scSpecEntryUdtErrorEnumV0(
     new xdr.ScSpecUdtErrorEnumV0({
       doc: '',

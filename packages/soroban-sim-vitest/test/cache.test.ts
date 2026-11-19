@@ -36,16 +36,6 @@ async function config(cache: Config['sim']['cache'] = 'on', cacheDir?: string): 
   return { ...env, sim: { ...env.sim, cache, cacheDir: cacheDir ?? (await mkdtemp(join(tmpdir(), 'svt-cache-'))) } }
 }
 
-/** An account's balance in the state a snapshot holds. */
-async function balanceIn(cfg: Config, snapshot: string, address: string): Promise<string> {
-  const worker = await Worker.init({ config: cfg, snapshot })
-  try {
-    return String((await worker.rpc.getAccountEntry(address)).balance)
-  } finally {
-    await worker.tearDown()
-  }
-}
-
 describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
   test('a second run takes the snapshot from the cache and does not run setup', async () => {
     const cfg = await config()
@@ -80,44 +70,35 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
     expect(counter.runs).toBe(4)
   })
 
-  test('an entry that cannot be read is replaced by a fresh setup run', async () => {
+  test('changing the test file that defines the suite runs setup again', async () => {
+    const cfg = await config()
+    const { first, counter } = suites()
+    const testFile = join(cfg.sim.cacheDir, 'suite.test.ts')
+    await writeFile(testFile, 'const INITIAL = 7\n')
+    await prepareSimSetup(first, cfg, testFile)
+    expect([(await prepareSimSetup(first, cfg, testFile)).cached, counter.runs]).toEqual([true, 1])
+    await writeFile(testFile, 'const INITIAL = 8\n')
+    expect([(await prepareSimSetup(first, cfg, testFile)).cached, counter.runs]).toEqual([false, 2])
+    expect([(await prepareSimSetup(first, cfg, testFile)).cached, counter.runs]).toEqual([true, 2])
+  })
+
+  test('an entry that cannot be read fails the run, naming the cache to clear', async () => {
     const damage = [
       (entry: string) => rm(join(entry, 'snapshot.json')),
       (entry: string) => writeFile(join(entry, 'setup.json'), 'not json'),
     ]
-    for (const [i, harm] of damage.entries()) {
+    for (const harm of damage) {
       const cfg = await config()
-      const { first, counter } = suites()
+      const { first } = suites()
       const a = await prepareSimSetup(first, cfg)
       await harm(dirname(a.snapshot))
-      const b = await prepareSimSetup(first, cfg)
-      expect([i, b.cached, counter.runs, b.result]).toEqual([i, false, 2, { value: 1 }])
-      expect(JSON.parse(await readFile(b.snapshot, 'utf8')).format).toBe('soroban-sim-snapshot/2')
-      const c = await prepareSimSetup(first, cfg)
-      expect([i, c.cached, counter.runs, c.snapshot]).toEqual([i, true, 2, b.snapshot])
+      const error: Error = await prepareSimSetup(first, cfg).catch((e) => e)
+      expect(error.message).toContain(`${dirname(a.snapshot)} cannot be read`)
+      expect(error.message).toContain(`delete ${cfg.sim.cacheDir}, or call clearCache`)
+      await clearCache(cfg.sim.cacheDir)
+      expect((await prepareSimSetup(first, cfg)).cached).toBe(false)
+      expect((await prepareSimSetup(first, cfg)).cached).toBe(true)
     }
-  })
-
-  test('a replaced entry pairs the result with the snapshot of the same setup run', async () => {
-    const cfg = await config()
-    let runs = 0
-    const suite: SuiteDefinition<{ account: string; xlm: number }> = {
-      name: 'replaced',
-      async setup(worker) {
-        const admin = await worker.createAccount('admin')
-        const xlm = 10 + ++runs
-        await admin.setBalance(BigInt(xlm) * 10_000_000n)
-        return { account: admin.address, xlm }
-      },
-    }
-    const a = await prepareSimSetup(suite, cfg)
-    await rm(join(dirname(a.snapshot), 'setup.json'))
-    const b = await prepareSimSetup(suite, cfg)
-    const result = b.result as { account: string; xlm: number }
-    expect([b.cached, runs, result.xlm, b.snapshot, b.accounts]).toEqual([false, 2, 12, a.snapshot, ['admin']])
-    expect(await balanceIn(cfg, b.snapshot, result.account)).toBe('120000000')
-    const c = await prepareSimSetup(suite, cfg)
-    expect([c.cached, runs, c.result, c.accounts]).toEqual([true, 2, b.result, ['admin']])
   })
 
   test('the key covers the Wasm, the suite name and the base snapshot', async () => {

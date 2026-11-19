@@ -4,7 +4,7 @@ import { resolveConfig, SEED, type Config, type EnvironmentKind } from './config
 import { Contract } from './contract.ts'
 import { SandboxOnlyError } from './errors.ts'
 import { ACCOUNTS, ADMIN, ADOPT, DEPLOYS } from './internal.ts'
-import { deriveKeypair } from './keys.ts'
+import { RUN_NONCE, deriveKeypair } from './keys.ts'
 import { rpcCall, startServer } from './server.ts'
 import { send } from './transactions.ts'
 
@@ -36,7 +36,6 @@ interface Backend {
   stop(): Promise<void>
 }
 
-const runNonce = `${process.pid}-${Date.now()}`
 let localWorkers = 0
 
 /**
@@ -78,7 +77,7 @@ export class Worker {
     try {
       const client = new rpc.Server(backend.url, { allowHttp: backend.url.startsWith('http:') })
       const { passphrase } = await client.getNetwork()
-      const seed = options.seed ?? (local ? `${SEED}/local/${runNonce}/worker-${localWorkers++}` : SEED)
+      const seed = options.seed ?? (local ? `${SEED}/local/${RUN_NONCE}/worker-${localWorkers++}` : SEED)
       return new Worker(config.environment, backend, client, passphrase, seed)
     } catch (e) {
       await backend.stop()

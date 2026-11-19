@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { cacheKey, readEntry, writeEntry, type StoredSetup } from './cache.ts'
 import { SEED, type Config } from './config.ts'
 import { ACCOUNTS, ADMIN, ADOPT, DEPLOYS, MARKER } from './internal.ts'
+import { RUN_NONCE } from './keys.ts'
 import { toPath } from './paths.ts'
 import { Worker } from './worker.ts'
 
@@ -15,9 +16,9 @@ export interface SuiteDefinition<S> {
   /** The Wasm files setup deploys: their contents are part of the cache key, and setup may deploy no others. */
   wasm?: readonly (string | URL)[]
   /**
-   * Files besides the Wasm whose contents setup depends on (helper modules
-   * it imports, data it reads): the cache key covers setup's own source
-   * only, so list them here for a change to them to rerun it.
+   * Files besides the Wasm and the test file whose contents setup depends
+   * on (helper modules it imports, data it reads): the cache key covers the
+   * test file only, so list them here for a change to them to rerun it.
    */
   cacheFiles?: readonly (string | URL)[]
   /**
@@ -38,7 +39,8 @@ export interface Lease<S> {
 }
 
 export interface Environment<S> {
-  acquire(testId: string): Promise<Lease<S>>
+  /** `testFile` is the file the test is in, which defines the suite. */
+  acquire(testId: string, testFile: string): Promise<Lease<S>>
 }
 
 export function environmentFor<S>(def: SuiteDefinition<S>, config: Config): Environment<S> {
@@ -101,10 +103,12 @@ function scratchDir(): string {
 /**
  * Runs the suite's setup once on a fresh `soroban-sim serve` and exports the
  * result with `fork_exportSnapshot`, or takes that snapshot from the cache.
+ * `testFile` is the file that defines the suite: its contents are part of
+ * the cache key.
  */
-export async function prepareSimSetup(def: AnySuite, config: Config, loaded?: Buffer[]): Promise<PreparedSetup> {
-  const wasm = loaded ?? (await loadWasm(def))
-  const key = await cacheKey(def, config, wasm)
+export async function prepareSimSetup(def: AnySuite, config: Config, testFile?: string): Promise<PreparedSetup> {
+  const wasm = await loadWasm(def)
+  const key = await cacheKey(def, config, wasm, testFile)
   const { cache, cacheDir } = config.sim
   if (cache === 'on') {
     const hit = await readEntry(cacheDir, key)
@@ -130,9 +134,9 @@ export async function prepareSimSetup(def: AnySuite, config: Config, loaded?: Bu
 function simEnvironment<S>(def: SuiteDefinition<S>, config: Config): Environment<S> {
   let prepared: Promise<PreparedSetup> | undefined
   return {
-    async acquire() {
+    async acquire(_testId, testFile) {
       // Setup runs (or comes from the cache) once, for the first test to ask.
-      prepared ??= prepareSimSetup(def as AnySuite, config)
+      prepared ??= prepareSimSetup(def as AnySuite, config, testFile)
       const setup = await prepared
       const worker = await Worker.init({ config, snapshot: setup.snapshot, seed: SEED })
       try {
@@ -147,8 +151,6 @@ function simEnvironment<S>(def: SuiteDefinition<S>, config: Config): Environment
 
 // --- local network ---
 
-const runNonce = `${process.pid}-${Date.now()}`
-
 function localEnvironment<S>(def: SuiteDefinition<S>, config: Config): Environment<S> {
   let wasm: Promise<Buffer[]> | undefined
   let attempt = 0
@@ -157,7 +159,7 @@ function localEnvironment<S>(def: SuiteDefinition<S>, config: Config): Environme
       wasm ??= loadWasm(def as AnySuite)
       // A local network keeps every account, so each test, and each run,
       // derives keys of its own: tests share no accounts and no contracts.
-      const seed = `${SEED}/local/${runNonce}/${def.name}/${testId}/${attempt++}`
+      const seed = `${SEED}/local/${RUN_NONCE}/${def.name}/${testId}/${attempt++}`
       const worker = await Worker.init({ config, seed })
       const stored = await runSetup(def as AnySuite, worker, await wasm)
       return { worker, setup: revive<S>(stored, worker), release: () => worker.tearDown() }

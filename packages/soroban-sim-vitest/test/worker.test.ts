@@ -1,6 +1,8 @@
 // The plain `test`: a worker of the test's own, no suite setup.
+import { Asset, Operation } from '@stellar/stellar-sdk'
 import { expect } from 'vitest'
 import { test } from '../src/index.ts'
+import { send } from '../src/transactions.ts'
 
 const storageWasm = new URL('../../../fixtures/contracts/storage.wasm', import.meta.url)
 
@@ -23,4 +25,16 @@ test('a function the contract does not have is refused with the ones it has', as
   const alice = await worker.createAccount('alice')
   const storage = await alice.deploy(storageWasm)
   await expect(alice.call(storage, 'put', { key: 1 })).rejects.toThrow(/has no function "put"; it has .*put_persist/)
+})
+
+test('a Stellar asset contract takes its admin functions by name', async ({ worker }) => {
+  const issuer = await worker.createAccount('issuer')
+  const asset = new Asset('TST', issuer.address)
+  const token = worker.contract(asset.contractId(worker.networkPassphrase))
+  await send(worker, issuer.keypair, Operation.createStellarAssetContract({ asset }), { contract: token.id, method: 'deploy' })
+  const holder = await issuer.deploy(storageWasm)
+  await issuer.call(token, 'mint', { to: holder, amount: 5n })
+  expect(await token.view('balance', { id: holder })).toBe(5n)
+  expect(await token.view('admin')).toBe(issuer.address)
+  expect(await token.view('authorized', { id: holder })).toBe(true)
 })

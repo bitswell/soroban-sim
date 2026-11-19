@@ -58,7 +58,10 @@ export class Contract {
 
   /** The contract's spec (from its Wasm, or the token interface for a Stellar asset contract); null if it has none. */
   spec(): Promise<contract.Spec | null> {
-    this.#spec ??= this.#loadSpec()
+    this.#spec ??= this.#loadSpec().catch((e) => {
+      this.#spec = undefined
+      throw e
+    })
     return this.#spec
   }
 
@@ -73,6 +76,7 @@ export class Contract {
     if (!found) {
       found = this.worker.rpc.getContractWasmByHash(hash, 'hex').then(specFromWasm)
       specs.set(hash, found)
+      found.catch(() => specs.delete(hash))
     }
     return found
   }
@@ -194,7 +198,7 @@ export function toScVals(target: Contract, spec: contract.Spec | null, method: s
 
 export function fromScVal(spec: contract.Spec | null, method: string, value: xdr.ScVal | undefined): unknown {
   if (!value) return undefined
-  if (!spec) return scValToNative(value)
+  if (!spec?.funcs().some((f) => f.name.toString() === method)) return scValToNative(value)
   const native = spec.funcResToNative(method, value)
   return native instanceof contract.Ok ? native.unwrap() : native
 }

@@ -84,7 +84,8 @@ A **`Contract`** is read:
   temporary storage.
 
 Arguments are named and native, converted with the contract's spec (read
-from its Wasm; a Stellar asset contract has the token interface built in):
+from its Wasm; a Stellar asset contract has its token and admin functions
+built in):
 numbers, `bigint`s for 64- and 128-bit integers, strings, arrays, objects
 for structs, and accounts or contracts wherever the function takes an
 address. Return values come back the same way. To pass XDR yourself, give an
@@ -94,7 +95,7 @@ A failed call throws a typed error:
 
 | Error | When | Carries |
 |---|---|---|
-| `ContractError` | the contract returned one of its own errors (`Error(Contract, #n)`) | `code`, `errorName` (from the contract's error enum), `events` |
+| `ContractError` | the call failed with a contract's own error (`Error(Contract, #n)`) | `code`, `errorName` (from the called contract's error enum; undefined when a contract it called raised the error), `events` |
 | `InvocationError` | any other host error: a trap, failed authorization, a missing entry | `hostError` (such as `Error(WasmVm, InvalidAction)`), `events` |
 | `TransactionError` | the network refused the transaction itself | `status`, `result` (such as `txBadSeq`) |
 
@@ -121,7 +122,8 @@ test's accounts.
 - **`wasm`**: the Wasm files setup deploys. Their contents are part of the
   cache key, and setup may deploy no others (it throws, naming the file), so
   a changed contract always reruns setup. Tests may deploy anything.
-- **`cacheFiles`**: other files setup depends on (see the cache key below).
+- **`cacheFiles`**: files setup depends on besides the Wasm and the test
+  file itself (see the cache key below).
 
 `test.skip`, `test.each` and the rest work as usual. Run a file's tests in
 parallel with `sequence.concurrent` in the Vitest config (as this package's
@@ -226,7 +228,8 @@ This package's own suites are in [`test/`](./test): `example.test.ts` is the
 example suite, `isolation.test.ts` checks that two tests writing the same key
 at once each read back their own value, `sandbox.test.ts` covers the
 controls (and their refusal on a local network), `worker.test.ts` the plain
-`test`, and `cache.test.ts` the cache.
+`test`, `errors.test.ts` which contract an error's name comes from, and
+`cache.test.ts` the cache.
 
 ## The setup cache (soroban-sim)
 
@@ -235,12 +238,15 @@ everything that decides the snapshot:
 
 - setup's source (`setup.toString()`), the suite's name and the built-in
   seed accounts' keys derive from;
+- the contents of the test file that defines the suite, so a constant or
+  helper function in it that setup uses reruns setup when it changes (as
+  does any other edit to the file);
 - the contents of each `wasm` file and each `cacheFiles` file;
 - the `soroban-sim` binary: its `--version` and a hash of the file, since a
   local build keeps its version number;
 - the base snapshot file's contents.
 
-Setup's source does not include the helpers it calls. When setup imports a
+The key does not cover the modules the test file imports. When setup uses a
 helper module of your own, list that module in `cacheFiles`, or a change to
 it will not rerun setup.
 
@@ -249,7 +255,8 @@ run `pnpm --filter @theahaco/soroban-sim-vitest cache:clear`, call
 `clearCache(dir)`, or delete the directory. Entries are written aside and
 renamed into place, so parallel workers that run the same setup do not
 corrupt each other. An entry that cannot be read (a file deleted by hand,
-say) is moved aside and replaced by the next run's fresh setup.
+say) is not repaired: the run fails with an error naming the entry, and
+clearing the cache fixes it.
 
 ## What differs between the two environments
 
@@ -267,7 +274,7 @@ pass on the other.
 | Sandbox controls | all | none: each throws `SandboxOnlyError` |
 | History | `getTransaction` and `getEvents` cover only the test's own transactions; `getLedgers` and `getTransactions` are not served | full |
 | Clock | starts at the setup's ledger time and follows the wall clock; `setTime` and `advanceLedgers` move it ahead | follows the wall clock |
-| Speed (this package's suites, one laptop) | about 0.6 s for 27 tests with setup, 0.5 s from the cache | about 40 s for the 17 that run there |
+| Speed (this package's suites, one laptop) | about 0.6 s for 32 tests with setup, 0.5 s from the cache | about 40 s for the 22 that run there |
 
 A suite that passes on soroban-sim can still fail on a local network on
 timing: a test that assumes a transaction is visible as soon as

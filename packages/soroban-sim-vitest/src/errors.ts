@@ -39,7 +39,11 @@ export class InvocationError extends Error {
 export class ContractError extends InvocationError {
   /** The contract's error code. */
   readonly code: number
-  /** The code's name in the contract's error enum, when its spec has one. */
+  /**
+   * The code's name in the called contract's error enum. Undefined when its
+   * spec has none, or when a contract it called raised the error: the code
+   * is then from that contract's enum.
+   */
   readonly errorName: string | undefined
 
   constructor(target: CallTarget, code: number, errorName: string | undefined, events: xdr.DiagnosticEvent[], detail: string) {
@@ -86,7 +90,7 @@ export function invocationError(target: CallTarget, text: string, events: xdr.Di
   const code = /^#(\d+)$/.exec(value)
   if (type === 'Contract' && code) {
     const n = Number(code[1])
-    return new ContractError(target, n, errorName(target.spec, n), events, readable)
+    return new ContractError(target, n, raisedByTarget(events) ? errorName(target.spec, n) : undefined, events, readable)
   }
   return new InvocationError(target, `Error(${type}, ${value})`, events, readable)
 }
@@ -99,7 +103,7 @@ function errorName(spec: contract.Spec | null | undefined, code: number): string
   }
 }
 
-type Humanized = { topics?: unknown[]; contractId?: string; data?: unknown }
+type Humanized = { type?: string; topics?: unknown[]; contractId?: string; data?: unknown }
 
 function humanized(events: xdr.DiagnosticEvent[]): Humanized[] {
   try {
@@ -107,6 +111,19 @@ function humanized(events: xdr.DiagnosticEvent[]): Humanized[] {
   } catch {
     return []
   }
+}
+
+/**
+ * True when the called contract itself raised the error. The host logs
+ * `fn_call` when a contract call starts and `fn_return` when it returns, so a
+ * failure inside the called contract leaves that one call unreturned, and a
+ * failure in a contract it called leaves more.
+ */
+function raisedByTarget(events: xdr.DiagnosticEvent[]): boolean {
+  const marks = humanized(events)
+    .filter((e) => e.type === 'diagnostic')
+    .map((e) => e.topics?.[0])
+  return marks.filter((m) => m === 'fn_call').length - marks.filter((m) => m === 'fn_return').length === 1
 }
 
 /** The `error` diagnostic event's code, as `Error(Type, value)` parts. */

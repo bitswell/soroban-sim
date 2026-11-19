@@ -22,14 +22,19 @@ export interface CacheEntry extends StoredSetup {
 
 const sha256 = (data: string | Uint8Array) => createHash('sha256').update(data).digest('hex')
 
-/** The key of a suite's setup snapshot: a hash of everything that decides it. */
-export async function cacheKey(def: AnySuite, config: Config, wasm: readonly Buffer[]): Promise<string> {
+/**
+ * The key of a suite's setup snapshot: a hash of everything that decides it.
+ * `testFile` is the file that defines the suite, for the values and helpers
+ * setup takes from it.
+ */
+export async function cacheKey(def: AnySuite, config: Config, wasm: readonly Buffer[], testFile?: string): Promise<string> {
   const { snapshot, bin } = config.sim
   const files = await Promise.all((def.cacheFiles ?? []).map(async (f) => sha256(await readFile(toPath(f)))))
   const material = {
     format: KEY_FORMAT,
     suite: def.name,
     setup: def.setup.toString(),
+    testFile: testFile === undefined ? null : sha256(await readFile(testFile)),
     seed: SEED,
     funding: FUNDING_XLM,
     wasm: wasm.map((code) => sha256(code)).sort(),
@@ -87,10 +92,8 @@ const occupied = (e: unknown) => ['EEXIST', 'ENOTEMPTY'].includes((e as NodeJS.E
 /**
  * Stores a setup's snapshot, result and accounts under `key` and returns
  * the entry now there, as read back from disk: this worker's, or the one
- * another worker stored first (all of it). The entry is written
- * aside and renamed into place, so a reader sees all of it or none. An
- * entry that cannot be read is moved aside and replaced; a readable one is
- * never removed.
+ * another worker stored first (all of it). The entry is written aside and
+ * renamed into place, so a reader sees all of it or none.
  */
 export async function writeEntry(dir: string, key: string, snapshot: string, stored: StoredSetup): Promise<CacheEntry> {
   const staging = join(dir, `.staging-${randomBytes(6).toString('hex')}`)
@@ -99,33 +102,17 @@ export async function writeEntry(dir: string, key: string, snapshot: string, sto
   await writeFile(join(staging, 'setup.json'), JSON.stringify({ result: stored.result, accounts: stored.accounts }))
   const entry = join(dir, key)
   try {
-    let placed = false
-    for (let attempt = 0; attempt < 5; attempt++) {
-      if (!placed) {
-        try {
-          await rename(staging, entry)
-          placed = true
-        } catch (e) {
-          if (!occupied(e)) throw e
-        }
-      }
-      const installed = await readEntry(dir, key)
-      if (installed) return installed
-      const aside = `.damaged-${randomBytes(6).toString('hex')}`
-      try {
-        await rename(entry, join(dir, aside))
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue
-        throw e
-      }
-      if (await readEntry(dir, aside)) {
-        await rename(join(dir, aside), entry).catch((e) => {
-          if (!occupied(e)) throw e
-        })
-      }
-      await rm(join(dir, aside), { recursive: true, force: true })
+    await rename(staging, entry).catch((e) => {
+      if (!occupied(e)) throw e
+    })
+    const installed = await readEntry(dir, key)
+    if (!installed) {
+      throw new Error(
+        `the cached setup ${entry} cannot be read, and is not replaced: ` +
+          `clear the cache (delete ${dir}, or call clearCache) and run again`,
+      )
     }
-    throw new Error(`could not store the cached setup ${entry}: the entry there stayed unreadable`)
+    return installed
   } finally {
     await rm(staging, { recursive: true, force: true })
   }
