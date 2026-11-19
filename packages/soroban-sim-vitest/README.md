@@ -87,8 +87,10 @@ the local network.
   --bindings <the generated src/index.ts>` writes the file, rewriting the
   two constructs plain Node cannot load (a constructor parameter property,
   and imports of names that are only types) and refusing output in which it
-  does not find exactly those. CI (`vitest-generated`) fails when either
-  committed file is not what its command writes.
+  does not find exactly those. CI (`vitest-generated`) fails when the
+  committed table differs from what its command writes, or when the
+  committed bindings lack that rewrite; it does not generate the bindings'
+  interface again.
 
 An **`Account`** signs:
 

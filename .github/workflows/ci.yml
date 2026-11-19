@@ -127,7 +127,9 @@ jobs:
   # The harness's table of the asset contract's errors is emitted from the
   # host's own enum, and its bindings for that contract are stellar-cli's,
   # rewritten for plain Node (crates/soroban-sim-asset-errors); this fails
-  # when a committed file is not what the emitter writes.
+  # when the committed table differs from what the emitter writes, or the
+  # committed bindings lack that rewrite. The bindings' interface is not
+  # generated again here.
   vitest-generated:
     runs-on: ubuntu-latest
     steps:
@@ -136,7 +138,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: vitest-generated
-      - name: The asset contract's error table and bindings are up to date
+      - name: The asset contract's error table is up to date and its bindings carry the plain-Node rewrite
         run: cargo run -p soroban-sim-asset-errors --locked -- --check
 
   # The latest release (soroban-sim-cli-v0.1.0) predates fork_exportSnapshot,
