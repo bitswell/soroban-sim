@@ -370,7 +370,7 @@ pass on the other.
 | Sandbox controls | all | none: each throws `SandboxOnlyError` |
 | History | `getTransaction` and `getEvents` cover only the test's own transactions; `getLedgers` and `getTransactions` are not served | full |
 | Clock | starts at the setup's ledger time and follows the wall clock; `setTime` and `advanceLedgers` move it ahead | follows the wall clock |
-| Speed (this package's suites, one laptop) | about 0.9 s for 63 tests with setup | about 40 s for the 49 that run there |
+| Speed (this package's suites, one laptop) | about 0.9 s for 68 tests with setup | about 40 s for the 53 that run there |
 
 A suite that passes on soroban-sim can still fail on a local network on
 timing: a test that assumes a transaction is visible as soon as
