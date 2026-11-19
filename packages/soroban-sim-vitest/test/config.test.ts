@@ -1,17 +1,13 @@
 import { describe, expect, test } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
-import { deriveSigners } from '../src/signers.ts'
+import { deriveKeypair } from '../src/keys.ts'
 
-describe('signers', () => {
+describe('account keys', () => {
   test('the same seed and name give the same key; another seed or name another key', () => {
-    const a = deriveSigners('seed', ['admin', 'alice'])
-    expect(deriveSigners('seed', ['admin']).admin.secret()).toBe(a.admin.secret())
-    expect(a.alice.publicKey()).not.toBe(a.admin.publicKey())
-    expect(deriveSigners('other', ['admin']).admin.publicKey()).not.toBe(a.admin.publicKey())
-  })
-
-  test('a name listed twice is refused', () => {
-    expect(() => deriveSigners('seed', ['admin', 'admin'])).toThrow(/twice/)
+    const admin = deriveKeypair('seed', 'admin')
+    expect(deriveKeypair('seed', 'admin').secret()).toBe(admin.secret())
+    expect(deriveKeypair('seed', 'alice').publicKey()).not.toBe(admin.publicKey())
+    expect(deriveKeypair('other', 'admin').publicKey()).not.toBe(admin.publicKey())
   })
 })
 

@@ -1,42 +1,63 @@
 // The example suite: nothing here names an environment. `pnpm test` runs it
 // on soroban-sim, `pnpm test:local` against a local network.
-import { nativeToScVal } from '@stellar/stellar-sdk'
 import { expect } from 'vitest'
-import { defineSuite, deployContract, invoke, read } from '../src/index.ts'
+import { ContractError, InvocationError, defineSuite } from '../src/index.ts'
 
-const u32 = (n: number) => nativeToScVal(n, { type: 'u32' })
+const storageWasm = new URL('../../../fixtures/contracts/storage.wasm', import.meta.url)
 
 const { test } = defineSuite({
   name: 'storage example',
-  signers: ['admin', 'alice', 'bob'],
-  wasm: { storage: new URL('../../../fixtures/contracts/storage.wasm', import.meta.url) },
-  async setup({ signers, wasm, ...net }) {
-    const contractId = await deployContract(net, signers.admin, wasm.storage)
-    await invoke(net, signers.admin, contractId, 'put_persist', [u32(1), u32(7)])
-    return { contractId }
+  wasm: [storageWasm],
+  async setup(worker) {
+    const admin = await worker.createAccount('admin')
+    const alice = await worker.createAccount('alice')
+    const bob = await worker.createAccount('bob')
+    const storage = await admin.deploy(storageWasm)
+    await admin.call(storage, 'put_persist', { key: 1, val: 7 })
+    return { admin, alice, bob, storage }
   },
 })
 
-test('reads what setup wrote', async ({ env }) => {
-  expect(await read(env, env.signers.alice, env.setup.contractId, 'get_persist', [u32(1)])).toBe(7)
+test('reads what setup wrote', async ({ setup: { storage } }) => {
+  expect(await storage.view('get_persist', { key: 1 })).toBe(7)
 })
 
-test('a signer writes and reads its own value back', async ({ env }) => {
-  await invoke(env, env.signers.alice, env.setup.contractId, 'put_persist', [u32(2), u32(42)])
-  expect(await read(env, env.signers.alice, env.setup.contractId, 'get_persist', [u32(2)])).toBe(42)
+test('an account writes and reads its own value back', async ({ setup: { alice, storage } }) => {
+  await alice.call(storage, 'put_persist', { key: 2, val: 42 })
+  expect(await storage.view('get_persist', { key: 2 })).toBe(42)
 })
 
-test('the signers setup did not use still hold their funding', async ({ env }) => {
-  for (const name of ['alice', 'bob'] as const) {
-    const entry = await env.rpc.getAccountEntry(env.signers[name].publicKey())
-    expect(String(entry.balance)).toBe('100000000000')
-  }
+test('accounts setup did not use still hold their funding', async ({ setup: { alice, bob } }) => {
+  expect(await alice.balance()).toBe(10_000_0000000n)
+  expect(await bob.balance()).toBe(10_000_0000000n)
 })
 
-test('a test deploys a contract of its own', async ({ env }) => {
-  const mine = await deployContract(env, env.signers.bob, env.wasm.storage)
-  expect(mine).not.toBe(env.setup.contractId)
-  await invoke(env, env.signers.bob, mine, 'put_persist', [u32(1), u32(9)])
-  expect(await read(env, env.signers.bob, mine, 'get_persist', [u32(1)])).toBe(9)
-  expect(await read(env, env.signers.bob, env.setup.contractId, 'get_persist', [u32(1)])).toBe(7)
+test('a test deploys a contract of its own', async ({ setup: { bob, storage } }) => {
+  const mine = await bob.deploy(storageWasm)
+  expect(mine.id).not.toBe(storage.id)
+  await bob.call(mine, 'put_persist', { key: 1, val: 9 })
+  expect(await mine.view('get_persist', { key: 1 })).toBe(9)
+  expect(await storage.view('get_persist', { key: 1 })).toBe(7)
+})
+
+test('XLM moves between accounts through the native asset contract', async ({ worker, setup: { alice, bob } }) => {
+  const xlm = await worker.xlm()
+  await alice.call(xlm, 'transfer', { from: alice, to: bob, amount: 25_0000000n })
+  expect(await xlm.view('balance', { id: bob })).toBe(10_025_0000000n)
+})
+
+test("a contract's own error comes back as a ContractError with its code", async ({ worker, setup: { alice, bob } }) => {
+  const xlm = await worker.xlm()
+  const error = await alice.call(xlm, 'transfer', { from: alice, to: bob, amount: 1_000_000_0000000n }).catch((e) => e)
+  expect(error).toBeInstanceOf(ContractError)
+  expect(error).toMatchObject({ code: 10, errorName: 'BalanceError', method: 'transfer', contract: xlm.id })
+  expect(error.events.length).toBeGreaterThan(0)
+})
+
+test('a trap comes back as an InvocationError with the host error and its events', async ({ setup: { storage } }) => {
+  const error = await storage.view('get_persist', { key: 99 }).catch((e) => e)
+  expect(error).toBeInstanceOf(InvocationError)
+  expect(error).not.toBeInstanceOf(ContractError)
+  expect(error.hostError).toMatch(/^Error\(WasmVm, /)
+  expect(error.events.length).toBeGreaterThan(0)
 })

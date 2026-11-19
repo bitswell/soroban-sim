@@ -1,72 +1,189 @@
 # @theahaco/soroban-sim-vitest
 
-Vitest suites for Soroban contracts that run unchanged on two environments:
-
-- **soroban-sim** (the default): the suite's setup runs once on a
-  `soroban-sim serve`, its result is exported as a snapshot, and every test
-  gets a server of its own started from that snapshot. Tests are isolated
-  and run in parallel, and the snapshot is cached on disk, so a later run
-  skips setup.
-- **local**: a local network that is already running (quickstart). Setup
-  runs once per test, with fresh accounts funded through friendbot, so tests
-  share no keys and no contracts.
-
-Test code receives an environment object and nothing else: the RPC URL, the
-network passphrase, an `rpc.Server`, funded signers, the suite's Wasm, and
-whatever setup returned. Which environment runs is configuration.
-
-The package is private to this repository for now (not published to npm).
-
-## A suite
-
 ```ts
-import { nativeToScVal } from '@stellar/stellar-sdk'
 import { expect } from 'vitest'
-import { defineSuite, deployContract, invoke, read } from '@theahaco/soroban-sim-vitest'
+import { ContractError, defineSuite } from '@theahaco/soroban-sim-vitest'
 
-const u32 = (n: number) => nativeToScVal(n, { type: 'u32' })
+const storageWasm = new URL('./storage.wasm', import.meta.url)
 
 const { test } = defineSuite({
-  name: 'storage example',
-  signers: ['admin', 'alice'],
-  wasm: { storage: new URL('./storage.wasm', import.meta.url) },
-  async setup({ signers, wasm, ...net }) {
-    const contractId = await deployContract(net, signers.admin, wasm.storage)
-    await invoke(net, signers.admin, contractId, 'put_persist', [u32(1), u32(7)])
-    return { contractId }
+  name: 'storage',
+  wasm: [storageWasm],
+  async setup(worker) {
+    const admin = await worker.createAccount('admin')
+    const alice = await worker.createAccount('alice')
+    const storage = await admin.deploy(storageWasm)
+    await admin.call(storage, 'put_persist', { key: 1, val: 7 })
+    return { alice, storage }
   },
 })
 
-test('reads what setup wrote', async ({ env }) => {
-  expect(await read(env, env.signers.alice, env.setup.contractId, 'get_persist', [u32(1)])).toBe(7)
+test('alice overwrites what setup wrote', async ({ setup: { alice, storage } }) => {
+  expect(await storage.view('get_persist', { key: 1 })).toBe(7)
+  await alice.call(storage, 'put_persist', { key: 1, val: 42 })
+  expect(await storage.view('get_persist', { key: 1 })).toBe(42)
+})
+
+test('alice cannot send more XLM than she has', async ({ worker, setup: { alice } }) => {
+  const xlm = await worker.xlm()
+  const bob = await worker.createAccount('bob')
+  const error = await alice.call(xlm, 'transfer', { from: alice, to: bob, amount: 20_000_0000000n }).catch((e) => e)
+  expect(error).toBeInstanceOf(ContractError)
+  expect(error.errorName).toBe('BalanceError')
 })
 ```
 
-`test` is Vitest's own, extended with an `env` fixture, so `test.skip`,
-`test.each` and the rest work as usual. The fixture starts the test's
-environment when the test first asks for `env`, and stops it when the test
-ends. Run a file's tests in parallel with `sequence.concurrent` in the Vitest
-config (as this package's own config does) or `test.concurrent`.
+Vitest tests for Soroban contracts, written as accounts acting on
+contracts: no transactions, simulation, signing, polling or XDR in the test.
+The same file runs unchanged on two environments:
 
-- **`signers`**: names of throwaway keypairs derived from a built-in seed and the name.
-  Each starts with 10,000 XLM: friendbot's amount on the local network, set
-  with `fork_setBalance` on soroban-sim. The keys are never real; do not fund
-  them anywhere else.
-- **`wasm`**: files setup deploys, read once and handed to setup and tests as
-  `Buffer`s.
-- **`setup(ctx)`**: deploys, funds and writes through `ctx`, and returns what
-  the tests need. The value must survive JSON (it is cached as JSON); tests
-  receive the JSON copy on both environments.
+- **soroban-sim** (the default): setup runs once on a `soroban-sim serve`,
+  its state is exported as a snapshot, and every test gets a server of its
+  own started from that snapshot. Tests are isolated and run in parallel,
+  and the snapshot is cached on disk, so a later run skips setup.
+- **local**: a local network that is already running (quickstart). Setup
+  runs once per test, with fresh accounts funded through friendbot, so tests
+  share no accounts and no contracts.
+
+Which environment runs is configuration (`SOROBAN_TEST_ENV`), never test
+code. The package is private to this repository for now (not published to
+npm).
+
+## Workers, accounts and contracts
+
+A **`Worker`** is one network to test on: its own `soroban-sim serve`, or
+the local network.
+
+- `worker.createAccount(name)` creates an account funded with 10,000 XLM:
+  friendbot's amount on the local network, set with `fork_setBalance` on
+  soroban-sim. Its key is a throwaway derived from the name (and, on a local
+  network, from the test), never real; do not fund it anywhere else.
+- `worker.account(name)` returns an account created earlier, by the test or
+  by setup.
+- `worker.contract(id)` returns a contract already on the network, by its
+  `C…` address.
+- `worker.xlm()` returns the native asset (XLM) contract, deploying it first
+  if the network lacks it.
+
+An **`Account`** acts:
+
+- `account.deploy(wasm, { args })` uploads a Wasm file (a path, URL or
+  bytes), creates a contract from it with `args` for its constructor, and
+  returns the contract.
+- `account.call(contract, method, args)` sends a transaction the account
+  signs and pays for, waits for its result, and returns the call's return
+  value. `account.callRaw` returns the value with the transaction's hash,
+  ledger, close time and full response.
+- `account.balance()` returns its XLM balance in stroops.
+
+A **`Contract`** is read:
+
+- `contract.view(method, args)` simulates the call and returns its result.
+  Nothing is signed or sent.
+- `contract.getStorage(key, options)` reads one entry of its persistent or
+  temporary storage.
+
+Arguments are named and native, converted with the contract's spec (read
+from its Wasm; a Stellar asset contract has the token interface built in):
+numbers, `bigint`s for 64- and 128-bit integers, strings, arrays, objects
+for structs, and accounts or contracts wherever the function takes an
+address. Return values come back the same way. To pass XDR yourself, give an
+array of `xdr.ScVal` instead of the object.
+
+A failed call throws a typed error:
+
+| Error | When | Carries |
+|---|---|---|
+| `ContractError` | the contract returned one of its own errors (`Error(Contract, #n)`) | `code`, `errorName` (from the contract's error enum), `events` |
+| `InvocationError` | any other host error: a trap, failed authorization, a missing entry | `hostError` (such as `Error(WasmVm, InvalidAction)`), `events` |
+| `TransactionError` | the network refused the transaction itself | `status`, `result` (such as `txBadSeq`) |
+
+`ContractError` extends `InvocationError`. Both carry `contract`, `method`,
+and the diagnostic events of the failed call; the message includes the
+host's event log.
+
+## Suites and setup
+
+`defineSuite({ name, wasm, cacheFiles, setup })` returns `test`, Vitest's own
+extended with two fixtures, and `sandbox` (see below):
+
+- **`worker`**: the test's worker. On soroban-sim it is a server of the
+  test's own, stopped when the test ends.
+- **`setup`**: what setup returned, as the test's own copy. Accounts and
+  contracts in it are bound to the test's worker; everything else is JSON
+  (setup's result is cached as JSON, so it must survive it).
+
+Setup receives a worker of its own. On soroban-sim it runs once for the
+suite (per Vitest worker), and its state becomes the snapshot every test
+starts from. On a local network it runs again for every test, against that
+test's accounts.
+
+- **`wasm`**: the Wasm files setup deploys. Their contents are part of the
+  cache key, and setup may deploy no others (it throws, naming the file), so
+  a changed contract always reruns setup. Tests may deploy anything.
 - **`cacheFiles`**: other files setup depends on (see the cache key below).
 
-`deployContract`, `invoke`, `read` (a simulation, nothing sent), `uploadWasm`
-and `submit` (any operation) work on both environments. Each takes the context
-or `env`, a signer, and the call. You can also use `env.rpc` or any other
-client with `env.rpcUrl` and `env.networkPassphrase`.
+`test.skip`, `test.each` and the rest work as usual. Run a file's tests in
+parallel with `sequence.concurrent` in the Vitest config (as this package's
+own config does) or `test.concurrent`.
 
-This package's own suites are in [`test/`](./test): `example.test.ts` is the
-example suite, `isolation.test.ts` checks that two tests writing the same key
-at once each read back their own value, and `cache.test.ts` checks the cache.
+For tests without a shared setup, import `test` itself: each test receives a
+`worker` of its own and nothing else.
+
+```ts
+import { test } from '@theahaco/soroban-sim-vitest'
+
+test('alice deploys and calls', async ({ worker }) => {
+  const alice = await worker.createAccount('alice')
+  const storage = await alice.deploy(storageWasm)
+  await alice.call(storage, 'put_persist', { key: 1, val: 3 })
+})
+```
+
+Outside a test, `await Worker.init()` returns a worker for the configured
+environment, and `await worker.tearDown()` stops it.
+
+### The escape hatch
+
+`worker.rpcUrl`, `worker.networkPassphrase` and `worker.rpc` (an
+`rpc.Server`) reach the network directly, and `account.keypair` is the
+account's key, for building any transaction by hand.
+
+## Sandbox controls (soroban-sim only)
+
+| Control | soroban-sim admin method |
+|---|---|
+| `account.setBalance(stroops)` | `fork_setBalance` |
+| `contract.setStorage(key, value, options)`, `contract.removeStorage(key, options)` | `fork_setLedgerEntry`, `fork_removeLedgerEntry` |
+| `worker.advanceLedgers(n)` | `fork_advanceLedgers` |
+| `worker.setTime(date or Unix seconds)` | `fork_setTime` |
+
+`advanceLedgers` and `setTime` return the next ledger's sequence number and
+close time; `worker.latestLedger()` (on both environments) returns the last
+closed one. Time only moves forward. Storage keys and values are native
+values or `xdr.ScVal`s; give `keyType` and `valueType` (as `nativeToScVal`'s
+`type`, such as `'u32'`) when the stored type is not the one `nativeToScVal`
+picks (a whole number becomes a `u64`). `durability` is `persistent` (the
+default) or `temporary`.
+
+A local network has no way to do any of this, so on a local network each
+control throws `SandboxOnlyError`; none of them silently does nothing. A
+suite's `sandbox` (and `worker.sandbox`) is true on soroban-sim, so a test
+that needs a control skips elsewhere:
+
+```ts
+const { test, sandbox } = defineSuite({ /* … */ })
+
+test.skipIf(!sandbox)('the vote closes after a day', async ({ worker, setup: { alice, vote } }) => {
+  await worker.setTime((await worker.latestLedger()).closeTime + 86_400)
+  await expect(alice.call(vote, 'cast', { choice: 1 })).rejects.toMatchObject({ code: 3 })
+})
+```
+
+The harness sends its transactions with no upper time bound, so moving time
+ahead never makes them too late. A transaction you build yourself with a
+bound set from the wall clock (`setTimeout(300)`) is refused once
+`setTime` moves past it.
 
 ## Running
 
@@ -105,13 +222,19 @@ Running a suite against a fork of a real network (mainnet, testnet) is not
 supported yet. It is planned as a follow-up once exports of live forks are
 complete on main.
 
+This package's own suites are in [`test/`](./test): `example.test.ts` is the
+example suite, `isolation.test.ts` checks that two tests writing the same key
+at once each read back their own value, `sandbox.test.ts` covers the
+controls (and their refusal on a local network), `worker.test.ts` the plain
+`test`, and `cache.test.ts` the cache.
+
 ## The setup cache (soroban-sim)
 
 A cached setup is a directory under the cache directory, named by a hash of
 everything that decides the snapshot:
 
-- setup's source (`setup.toString()`), the suite's name, its signer names and
-  the built-in seed;
+- setup's source (`setup.toString()`), the suite's name and the built-in
+  seed accounts' keys derive from;
 - the contents of each `wasm` file and each `cacheFiles` file;
 - the `soroban-sim` binary: its `--version` and a hash of the file, since a
   local build keeps its version number;
@@ -137,18 +260,19 @@ pass on the other.
 |---|---|---|
 | Setup | once per suite (per Vitest worker), then from the cache | once per test |
 | State | one server per test, started from the setup's snapshot | one shared network: every test's accounts and contracts stay on it |
-| Isolation | a test's writes live only in its own server | each test has its own keys and contracts, but they share one ledger |
+| Isolation | a test's writes live only in its own server | each test has its own accounts and contracts, but they share one ledger |
 | Ledgers | one per transaction, closed inside `sendTransaction` | one per second; a transaction waits for the next close |
 | Requests | each server answers one request at a time | concurrent |
-| Classic operations | none (no payments, trustlines or `createAccount`); signers are funded with `fork_setBalance` | all; signers are funded by friendbot |
+| Classic operations | none (no payments, trustlines or `createAccount`); accounts are funded with `fork_setBalance` | all; accounts are funded by friendbot |
+| Sandbox controls | all | none: each throws `SandboxOnlyError` |
 | History | `getTransaction` and `getEvents` cover only the test's own transactions; `getLedgers` and `getTransactions` are not served | full |
-| Clock | starts at the setup's ledger time and follows the wall clock | follows the wall clock |
-| Speed (this package's suites, one laptop) | about 0.6 s for 18 tests with setup, 0.4 s from the cache | about 40 s for the 11 that run there |
+| Clock | starts at the setup's ledger time and follows the wall clock; `setTime` and `advanceLedgers` move it ahead | follows the wall clock |
+| Speed (this package's suites, one laptop) | about 0.6 s for 27 tests with setup, 0.5 s from the cache | about 40 s for the 17 that run there |
 
 A suite that passes on soroban-sim can still fail on a local network on
 timing: a test that assumes a transaction is visible as soon as
 `sendTransaction` returns, that sends from one account in parallel, or that
-needs a ledger to close by itself. The helpers here wait for each
+needs a ledger to close by itself. `call` and `deploy` wait for each
 transaction's result, which holds on both. See
 [`docs/rpc-facade.md`](../../docs/rpc-facade.md) for everything soroban-sim's
 RPC serves and how its clock moves.

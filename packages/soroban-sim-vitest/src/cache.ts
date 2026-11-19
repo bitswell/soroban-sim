@@ -3,37 +3,36 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readFile, rename, rm, mkdir, writeFile, access } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { SEED, type Config } from './config.ts'
-import { FUNDING_XLM, type AnySuite } from './suite-types.ts'
+import type { AnySuite } from './environments.ts'
+import { toPath } from './paths.ts'
+import { FUNDING_XLM } from './worker.ts'
 
-const KEY_FORMAT = 'soroban-sim-vitest/cache/1'
+const KEY_FORMAT = 'soroban-sim-vitest/cache/2'
 
-export interface CacheEntry<S> {
+/** What setup produced besides the snapshot: its result as JSON, and the accounts it created. */
+export interface StoredSetup {
+  result: unknown
+  accounts: string[]
+}
+
+export interface CacheEntry extends StoredSetup {
   snapshot: string
-  result: S
 }
 
 const sha256 = (data: string | Uint8Array) => createHash('sha256').update(data).digest('hex')
 
-export function toPath(file: string | URL): string {
-  return file instanceof URL ? fileURLToPath(file) : file
-}
-
 /** The key of a suite's setup snapshot: a hash of everything that decides it. */
-export async function cacheKey(def: AnySuite, config: Config, wasm: Record<string, Buffer>): Promise<string> {
+export async function cacheKey(def: AnySuite, config: Config, wasm: readonly Buffer[]): Promise<string> {
   const { snapshot, bin } = config.sim
   const files = await Promise.all((def.cacheFiles ?? []).map(async (f) => sha256(await readFile(toPath(f)))))
   const material = {
     format: KEY_FORMAT,
     suite: def.name,
     setup: def.setup.toString(),
-    signers: [...def.signers],
     seed: SEED,
     funding: FUNDING_XLM,
-    wasm: Object.keys(wasm)
-      .sort()
-      .map((name) => [name, sha256(wasm[name])]),
+    wasm: wasm.map((code) => sha256(code)).sort(),
     files,
     binary: await binaryIdentity(bin),
     base: { snapshot: sha256(await readFile(snapshot)) },
@@ -71,12 +70,13 @@ async function which(bin: string): Promise<string> {
   throw new Error(`${bin} is not on PATH; build it (cargo build --release -p soroban-sim-cli) and set SOROBAN_SIM_BIN to it`)
 }
 
-export async function readEntry<S>(dir: string, key: string): Promise<CacheEntry<S> | undefined> {
+export async function readEntry(dir: string, key: string): Promise<CacheEntry | undefined> {
   const entry = join(dir, key)
   try {
-    const setup = JSON.parse(await readFile(join(entry, 'setup.json'), 'utf8')) as { result: S }
+    const setup = JSON.parse(await readFile(join(entry, 'setup.json'), 'utf8')) as StoredSetup
+    if (!Array.isArray(setup.accounts)) return undefined
     await access(join(entry, 'snapshot.json'))
-    return { snapshot: join(entry, 'snapshot.json'), result: setup.result }
+    return { snapshot: join(entry, 'snapshot.json'), result: setup.result, accounts: setup.accounts }
   } catch {
     return undefined
   }
@@ -85,18 +85,18 @@ export async function readEntry<S>(dir: string, key: string): Promise<CacheEntry
 const occupied = (e: unknown) => ['EEXIST', 'ENOTEMPTY'].includes((e as NodeJS.ErrnoException).code ?? '')
 
 /**
- * Stores a setup's snapshot and result under `key` and returns the entry
- * now there, as read back from disk: this worker's, or the one another
- * worker stored first (snapshot and result both). The entry is written
+ * Stores a setup's snapshot, result and accounts under `key` and returns
+ * the entry now there, as read back from disk: this worker's, or the one
+ * another worker stored first (all of it). The entry is written
  * aside and renamed into place, so a reader sees all of it or none. An
  * entry that cannot be read is moved aside and replaced; a readable one is
  * never removed.
  */
-export async function writeEntry<S>(dir: string, key: string, snapshot: string, result: S): Promise<CacheEntry<S>> {
+export async function writeEntry(dir: string, key: string, snapshot: string, stored: StoredSetup): Promise<CacheEntry> {
   const staging = join(dir, `.staging-${randomBytes(6).toString('hex')}`)
   await mkdir(staging, { recursive: true })
   await writeFile(join(staging, 'snapshot.json'), snapshot)
-  await writeFile(join(staging, 'setup.json'), JSON.stringify({ result }))
+  await writeFile(join(staging, 'setup.json'), JSON.stringify({ result: stored.result, accounts: stored.accounts }))
   const entry = join(dir, key)
   try {
     let placed = false
@@ -109,7 +109,7 @@ export async function writeEntry<S>(dir: string, key: string, snapshot: string, 
           if (!occupied(e)) throw e
         }
       }
-      const installed = await readEntry<S>(dir, key)
+      const installed = await readEntry(dir, key)
       if (installed) return installed
       const aside = `.damaged-${randomBytes(6).toString('hex')}`
       try {

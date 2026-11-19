@@ -1,21 +1,20 @@
 // Two tests write the same key of the contract setup deployed, at the same
-// time, with the same signer name. Each must read back its own value: on
+// time, from the same account name. Each must read back its own value: on
 // soroban-sim because each test has its own server, on a local network
-// because each test has its own keys and its own contract.
-import { nativeToScVal } from '@stellar/stellar-sdk'
+// because each test has its own accounts and its own contract.
 import { expect } from 'vitest'
-import { defineSuite, invoke, read, deployContract } from '../src/index.ts'
+import { defineSuite } from '../src/index.ts'
 
-const u32 = (n: number) => nativeToScVal(n, { type: 'u32' })
+const storageWasm = new URL('../../../fixtures/contracts/storage.wasm', import.meta.url)
 
 const { test } = defineSuite({
   name: 'isolation',
-  signers: ['writer'],
-  wasm: { storage: new URL('../../../fixtures/contracts/storage.wasm', import.meta.url) },
-  async setup({ signers, wasm, ...net }) {
-    const contractId = await deployContract(net, signers.writer, wasm.storage)
-    await invoke(net, signers.writer, contractId, 'put_persist', [u32(1), u32(0)])
-    return { contractId }
+  wasm: [storageWasm],
+  async setup(worker) {
+    const writer = await worker.createAccount('writer')
+    const storage = await writer.deploy(storageWasm)
+    await writer.call(storage, 'put_persist', { key: 1, val: 0 })
+    return { writer, storage }
   },
 })
 
@@ -32,11 +31,10 @@ function rendezvous(parties: number, timeoutMs = 60_000) {
 const bothWritten = rendezvous(2)
 
 for (const value of [111, 222]) {
-  test(`writes ${value} and reads back only its own write`, async ({ env }) => {
-    const { contractId } = env.setup
-    expect(await read(env, env.signers.writer, contractId, 'get_persist', [u32(1)])).toBe(0)
-    await invoke(env, env.signers.writer, contractId, 'put_persist', [u32(1), u32(value)])
+  test(`writes ${value} and reads back only its own write`, async ({ setup: { writer, storage } }) => {
+    expect(await storage.view('get_persist', { key: 1 })).toBe(0)
+    await writer.call(storage, 'put_persist', { key: 1, val: value })
     await bothWritten()
-    expect(await read(env, env.signers.writer, contractId, 'get_persist', [u32(1)])).toBe(value)
+    expect(await storage.view('get_persist', { key: 1 })).toBe(value)
   })
 }

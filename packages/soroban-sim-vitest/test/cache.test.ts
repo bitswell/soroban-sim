@@ -3,27 +3,26 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { rpc } from '@stellar/stellar-sdk'
 import { describe, expect, test } from 'vitest'
 import { cacheKey } from '../src/cache.ts'
-import { clearCache, prepareSimSetup, resolveConfig, type Config, type SuiteDefinition } from '../src/index.ts'
-import { rpcCall, startServer } from '../src/server.ts'
+import { Worker, clearCache, prepareSimSetup, resolveConfig, type Config, type SuiteDefinition } from '../src/index.ts'
 
 const env = resolveConfig()
 const storage = new URL('../../../fixtures/contracts/storage.wasm', import.meta.url)
+const addI32 = new URL('../../../fixtures/contracts/add_i32.wasm', import.meta.url)
 
 /** Two versions of one suite's setup, counting their runs: the second differs in source only. */
 function suites() {
   const counter = { runs: 0 }
-  const base = { name: 'cache', signers: ['admin'] as const, wasm: { storage } }
-  const first: SuiteDefinition<'admin', 'storage', { value: number }> = {
+  const base = { name: 'cache', wasm: [storage] }
+  const first: SuiteDefinition<{ value: number }> = {
     ...base,
     async setup() {
       counter.runs++
       return { value: 1 }
     },
   }
-  const changed: SuiteDefinition<'admin', 'storage', { value: number }> = {
+  const changed: SuiteDefinition<{ value: number }> = {
     ...base,
     async setup() {
       counter.runs++
@@ -35,6 +34,16 @@ function suites() {
 
 async function config(cache: Config['sim']['cache'] = 'on', cacheDir?: string): Promise<Config> {
   return { ...env, sim: { ...env.sim, cache, cacheDir: cacheDir ?? (await mkdtemp(join(tmpdir(), 'svt-cache-'))) } }
+}
+
+/** An account's balance in the state a snapshot holds. */
+async function balanceIn(cfg: Config, snapshot: string, address: string): Promise<string> {
+  const worker = await Worker.init({ config: cfg, snapshot })
+  try {
+    return String((await worker.rpc.getAccountEntry(address)).balance)
+  } finally {
+    await worker.tearDown()
+  }
 }
 
 describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
@@ -92,63 +101,75 @@ describe.skipIf(env.environment !== 'soroban-sim')('setup cache', () => {
   test('a replaced entry pairs the result with the snapshot of the same setup run', async () => {
     const cfg = await config()
     let runs = 0
-    const suite: SuiteDefinition<'admin', never, { account: string; xlm: string }> = {
+    const suite: SuiteDefinition<{ account: string; xlm: number }> = {
       name: 'replaced',
-      signers: ['admin'],
-      async setup({ signers, rpcUrl }) {
-        const xlm = String(10 + ++runs)
-        await rpcCall(rpcUrl, 'fork_setBalance', { account: signers.admin.publicKey(), xlm })
-        return { account: signers.admin.publicKey(), xlm }
+      async setup(worker) {
+        const admin = await worker.createAccount('admin')
+        const xlm = 10 + ++runs
+        await admin.setBalance(BigInt(xlm) * 10_000_000n)
+        return { account: admin.address, xlm }
       },
     }
     const a = await prepareSimSetup(suite, cfg)
     await rm(join(dirname(a.snapshot), 'setup.json'))
     const b = await prepareSimSetup(suite, cfg)
-    expect([b.cached, runs, b.result.xlm, b.snapshot]).toEqual([false, 2, '12', a.snapshot])
-    const srv = await startServer(cfg.sim.bin, ['--snapshot', b.snapshot])
-    try {
-      const entry = await new rpc.Server(srv.url, { allowHttp: true }).getAccountEntry(b.result.account)
-      expect(String(entry.balance)).toBe('120000000')
-    } finally {
-      await srv.stop()
-    }
+    const result = b.result as { account: string; xlm: number }
+    expect([b.cached, runs, result.xlm, b.snapshot, b.accounts]).toEqual([false, 2, 12, a.snapshot, ['admin']])
+    expect(await balanceIn(cfg, b.snapshot, result.account)).toBe('120000000')
     const c = await prepareSimSetup(suite, cfg)
-    expect([c.cached, runs, c.result]).toEqual([true, 2, b.result])
+    expect([c.cached, runs, c.result, c.accounts]).toEqual([true, 2, b.result, ['admin']])
   })
 
-  test('the key covers the Wasm, the signers and the base snapshot', async () => {
+  test('the key covers the Wasm, the suite name and the base snapshot', async () => {
     const cfg = await config()
     const { first } = suites()
-    const wasm = { storage: Buffer.from(await readFile(storage)) }
+    const wasm = [await readFile(storage)]
     const key = (def = first, c = cfg, w = wasm) => cacheKey(def as never, c, w)
     const original = await key()
     expect(await key()).toBe(original)
-    expect(await key(first, cfg, { storage: Buffer.concat([wasm.storage, Buffer.from([0])]) })).not.toBe(original)
-    expect(await key({ ...first, signers: ['admin', 'other'] } as never)).not.toBe(original)
+    expect(await key(first, cfg, [Buffer.concat([wasm[0], Buffer.from([0])])])).not.toBe(original)
+    expect(await key({ ...first, name: 'other' })).not.toBe(original)
     const other = join(cfg.sim.cacheDir, 'other-base.json')
     await writeFile(other, `${await readFile(cfg.sim.snapshot, 'utf8')}\n`)
     expect(await key(first, { ...cfg, sim: { ...cfg.sim, snapshot: other } })).not.toBe(original)
   })
 
-  test('a server started from the snapshot holds what setup wrote', async () => {
+  test('a worker started from the snapshot holds what setup wrote, accounts and contracts included', async () => {
     const cfg = await config()
     const prepared = await prepareSimSetup(
       {
-        name: 'balance',
-        signers: ['admin'],
-        async setup({ signers, rpcUrl }) {
-          await rpcCall(rpcUrl, 'fork_setBalance', { account: signers.admin.publicKey(), xlm: '12.5' })
-          return signers.admin.publicKey()
+        name: 'state',
+        wasm: [storage],
+        async setup(worker) {
+          const admin = await worker.createAccount('admin')
+          await admin.setBalance(12_5000000n)
+          const contract = await admin.deploy(storage)
+          await admin.call(contract, 'put_persist', { key: 1, val: 7 })
+          return { admin, contract }
         },
       },
       cfg,
     )
-    const srv = await startServer(cfg.sim.bin, ['--snapshot', prepared.snapshot])
+    expect(prepared.result).toMatchObject({ admin: { name: 'admin' }, contract: { id: expect.stringMatching(/^C/) } })
+    const worker = await Worker.init({ config: cfg, snapshot: prepared.snapshot })
     try {
-      const entry = await new rpc.Server(srv.url, { allowHttp: true }).getAccountEntry(prepared.result)
-      expect(String(entry.balance)).toBe('125000000')
+      const { contract } = prepared.result as { contract: { id: string } }
+      expect(await worker.contract(contract.id).view('get_persist', { key: 1 })).toBe(7)
     } finally {
-      await srv.stop()
+      await worker.tearDown()
     }
+  })
+
+  test('setup may deploy only the Wasm the suite lists, so the key covers it', async () => {
+    const cfg = await config()
+    const suite: SuiteDefinition<undefined> = {
+      name: 'unlisted',
+      wasm: [storage],
+      async setup(worker) {
+        const admin = await worker.createAccount('admin')
+        await admin.deploy(addI32)
+      },
+    }
+    await expect(prepareSimSetup(suite, cfg)).rejects.toThrow(/does not list in `wasm`/)
   })
 })
